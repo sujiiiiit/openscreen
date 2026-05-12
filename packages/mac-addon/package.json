@@ -1,0 +1,23 @@
+{
+  "name": "@openscreen/mac-addon",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Native macOS Node.js addon for openscreen",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "os": ["darwin"],
+  "gypfile": true,
+  "scripts": {
+    "build": "node-gyp rebuild",
+    "build:debug": "node-gyp rebuild --debug",
+    "clean": "node-gyp clean",
+    "configure": "node-gyp configure",
+    "rebuild": "node-gyp rebuild"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.3.0"
+  },
+  "devDependencies": {
+    "node-gyp": "^11.0.0"
+  }
+}
