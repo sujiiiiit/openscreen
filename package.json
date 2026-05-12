@@ -5,9 +5,7 @@
   "private": true,
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev:next": "next dev --turbopack -p 3000",
-    "dev:electron": "pnpm --filter @openscreen/mac-addon build && tsc -p electron && cp electron/dist-package.json dist-electron/package.json && concurrently -k -n NEXT,ELEC -c blue,green \"pnpm dev:next\" \"wait-on tcp:3000 && cross-env NODE_ENV=development electron . --trace-warnings\"",
-    "dev": "pnpm dev:electron",
+    "dev": "pnpm --filter @openscreen/mac-addon build && tsc -p electron && cp electron/dist-package.json dist-electron/package.json && concurrently -k -n NEXT,ELEC -c blue,green \"next dev --turbopack -p 3000\" \"wait-on tcp:3000 && cross-env NODE_ENV=development electron . --trace-warnings\"",
     "build:next": "cross-env NEXT_EXPORT=1 next build",
     "build:electron": "tsc -p electron && cp electron/dist-package.json dist-electron/package.json",
     "build": "pnpm --filter @openscreen/mac-addon build && pnpm build:next && pnpm build:electron",
@@ -25,6 +23,7 @@
     "clsx": "^2.1.1",
     "next": "16.1.7",
     "next-themes": "^0.4.6",
+    "node-mac-permissions": "^2.5.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "shadcn": "^4.7.0",
@@ -54,7 +53,8 @@
     "onlyBuiltDependencies": [
       "@openscreen/mac-addon",
       "electron",
-      "esbuild"
+      "esbuild",
+      "node-mac-permissions"
     ]
   }
 }

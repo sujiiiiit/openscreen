@@ -26,6 +26,14 @@
               "-fobjc-arc"
             ],
             "OTHER_LDFLAGS": [
+              "-framework ScreenCaptureKit",
+              "-framework AVFoundation",
+              "-framework CoreMedia",
+              "-framework CoreVideo",
+              "-framework CoreGraphics",
+              "-framework IOSurface",
+              "-framework AudioToolbox",
+              "-framework AppKit",
               "-framework Foundation"
             ]
           }

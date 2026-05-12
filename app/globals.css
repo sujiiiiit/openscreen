@@ -127,3 +127,17 @@
     @apply font-sans;
     }
 }
+
+/* Electron transparent windows: pages that mount [data-window] draw their own surface. */
+html:has([data-window="recorder"]),
+html:has([data-window="recorder"]) body,
+html:has([data-window="permission"]),
+html:has([data-window="permission"]) body {
+  background: transparent !important;
+}
+
+html:has([data-window="recorder"]),
+html:has([data-window="recorder"]) body {
+  height: 100%;
+  overflow: hidden;
+}

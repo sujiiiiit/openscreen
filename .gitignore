@@ -18,6 +18,9 @@ packages/node_modules
 
 # production
 /build
+!/build/
+!/build/entitlements.mac.plist
+!/build/entitlements.mac.inherit.plist
 
 # electron
 /dist-electron/
