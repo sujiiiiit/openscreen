@@ -3,18 +3,24 @@
   "version": "0.0.1",
   "type": "module",
   "private": true,
+  "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "pnpm --filter @openscreen/mac-addon build && pnpm format && next dev --turbopack",
-    "build": "next build",
-    "start": "next start",
+    "dev:next": "next dev --turbopack -p 3000",
+    "dev:electron": "pnpm --filter @openscreen/mac-addon build && tsc -p electron && cp electron/dist-package.json dist-electron/package.json && concurrently -k -n NEXT,ELEC -c blue,green \"pnpm dev:next\" \"wait-on tcp:3000 && cross-env NODE_ENV=development electron . --trace-warnings\"",
+    "dev": "pnpm dev:electron",
+    "build:next": "cross-env NEXT_EXPORT=1 next build",
+    "build:electron": "tsc -p electron && cp electron/dist-package.json dist-electron/package.json",
+    "build": "pnpm --filter @openscreen/mac-addon build && pnpm build:next && pnpm build:electron",
+    "package": "pnpm build && electron-builder --mac",
     "lint": "eslint",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p electron --noEmit"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",
     "@hugeicons/core-free-icons": "^4.1.3",
     "@hugeicons/react": "^1.1.6",
+    "@openscreen/mac-addon": "workspace:*",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "next": "16.1.7",
@@ -31,12 +37,24 @@
     "@types/node": "^25.6.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^42.0.1",
+    "electron-builder": "^26.8.1",
     "eslint": "^9.39.4",
     "eslint-config-next": "16.1.7",
     "postcss": "^8.5.14",
     "prettier": "^3.8.3",
     "prettier-plugin-tailwindcss": "^0.7.4",
     "tailwindcss": "^4.3.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "wait-on": "^9.0.10"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@openscreen/mac-addon",
+      "electron",
+      "esbuild"
+    ]
   }
 }

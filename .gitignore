@@ -19,6 +19,10 @@ packages/node_modules
 # production
 /build
 
+# electron
+/dist-electron/
+/release/
+
 # misc
 .DS_Store
 *.pem

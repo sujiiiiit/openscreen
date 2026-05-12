@@ -1,0 +1,18 @@
+appId: com.openscreen.app
+productName: OpenScreen
+directories:
+  output: release
+files:
+  - dist-electron/**/*
+  - out/**/*
+  - package.json
+  - "!**/node_modules/*/{CHANGELOG.md,README.md,*.d.ts,*.map}"
+  - "!**/node_modules/.cache"
+asarUnpack:
+  - "**/node_modules/@openscreen/mac-addon/build/Release/*.node"
+  - "**/node_modules/@openscreen/mac-addon/index.js"
+  - "**/node_modules/@openscreen/mac-addon/index.d.ts"
+  - "**/node_modules/@openscreen/mac-addon/package.json"
+mac:
+  target: dmg
+  category: public.app-category.video
