@@ -75,6 +75,8 @@ static NSString *ProfileLevelForCodec(AVVideoCodecType codec) {
   // color tags match what SCKit captured into.
   NSString *_configuredColorPrimaries;     // AVVideoColorPrimaries_* constant
   NSString *_configuredGamut;              // "P3" | "Rec.709"
+  NSInteger _configuredBitRate;
+  NSInteger _configuredKeyframeInterval;
 }
 
 - (instancetype)initWithOptions:(const RecordingOptions &)options
@@ -332,14 +334,22 @@ static NSString *ProfileLevelForCodec(AVVideoCodecType codec) {
   }
   configuration.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
 
+  // Compute compression properties up front so the bitrate / keyframe
+  // values show up in the startup log alongside the rest of the config.
+  // -prepareWriter: will read them later via -videoCompressionProperties.
+  (void)[self videoCompressionProperties];
+
   NSLog(@"[openscreen.recorder] screen config: %ldx%ld @ %dfps  codec=%@  "
         @"pixelFormat=ARGB2101010LEPacked(l10r)  colorSpace=%@  "
-        @"primaries=%@ (gamut=%@)  scale=%.2fx  pixelSizeSource=%@  "
-        @"scalesToFit=NO  queueDepth=8",
+        @"primaries=%@ (gamut=%@)  bitrate=%.1f Mbps  keyframeInterval=%ldf  "
+        @"scale=%.2fx  pixelSizeSource=%@  scalesToFit=NO  queueDepth=8  "
+        @"allowFrameReordering=NO",
         (long)_configuredWidth, (long)_configuredHeight,
         (int)(_options.fps > 0 ? _options.fps : 60),
         [self codecString], _configuredColorSpace,
         _configuredColorPrimaries, _configuredGamut,
+        _configuredBitRate / 1'000'000.0,
+        (long)_configuredKeyframeInterval,
         _configuredScaleFactor, _pixelSizeSource);
 
   return configuration;
@@ -361,12 +371,41 @@ static NSString *ProfileLevelForCodec(AVVideoCodecType codec) {
 }
 
 - (NSDictionary *)videoCompressionProperties {
-  // No average-bit-rate override: VideoToolbox's defaults for Main10 are
-  // already in the same ballpark as the native macOS recorder. Forcing a
-  // bitrate here usually produces softer output than leaving it adaptive.
+  NSInteger fps = _options.fps > 0 ? _options.fps : 60;
+
+  // Bitrate tuned for SCREEN content (text, UI, fine edges) rather than
+  // generic video. VideoToolbox's adaptive default for HEVC Main10 targets
+  // around 5-10 Mbps even at 4K, which is fine for live-action but visibly
+  // soft for desktop content. The native macOS screen recorder runs much
+  // higher.
+  //
+  // Formula: ~0.1 bits per pixel per frame.
+  //   3024 × 1964 @ 60fps  ≈ 36 Mbps   (matches QuickTime native recordings)
+  //   1920 × 1080 @ 60fps  ≈ 12 Mbps
+  //   3840 × 2160 @ 30fps  ≈ 25 Mbps
+  // Floor at 8 Mbps so small displays still get crisp text.
+  double bpp = 0.1;
+  NSInteger bitRate = (NSInteger)(_configuredWidth * _configuredHeight * fps * bpp);
+  if (bitRate < 8'000'000) bitRate = 8'000'000;
+
+  // Keyframe every ~1 second. Screen content tends to be static for long
+  // stretches; refreshing the I-frame regularly stops detail from drifting
+  // through long P-frame chains.
+  NSInteger maxKeyframeInterval = fps;
+
+  _configuredBitRate = bitRate;
+  _configuredKeyframeInterval = maxKeyframeInterval;
+
   return @{
-    AVVideoExpectedSourceFrameRateKey: @(_options.fps > 0 ? _options.fps : 60),
+    AVVideoAverageBitRateKey:          @(bitRate),
+    AVVideoMaxKeyFrameIntervalKey:     @(maxKeyframeInterval),
+    AVVideoExpectedSourceFrameRateKey: @(fps),
     AVVideoProfileLevelKey:            ProfileLevelForCodec(_codec),
+    // Disable B-frames. They reference both past and future frames; on
+    // text/UI content the bidirectional averaging produces a faint
+    // smudging that's perceptible even at high bitrates. P-only streams
+    // are slightly larger but visibly sharper.
+    AVVideoAllowFrameReorderingKey:    @NO,
   };
 }
 
@@ -657,6 +696,11 @@ static NSString *ProfileLevelForCodec(AVVideoCodecType codec) {
   meta[@"colorTransfer"] = @"ITU_R_709_2";
   meta[@"colorMatrix"] = @"ITU_R_709_2";
   if (_configuredGamut) meta[@"gamut"] = _configuredGamut;
+  if (_configuredBitRate > 0) meta[@"averageBitRate"] = @(_configuredBitRate);
+  if (_configuredKeyframeInterval > 0) {
+    meta[@"maxKeyFrameInterval"] = @(_configuredKeyframeInterval);
+  }
+  meta[@"allowFrameReordering"] = @NO;
   if (_configuredWidth > 0) meta[@"width"] = @(_configuredWidth);
   if (_configuredHeight > 0) meta[@"height"] = @(_configuredHeight);
   if (_configuredScaleFactor > 0) meta[@"scaleFactor"] = @(_configuredScaleFactor);

@@ -280,7 +280,9 @@ The single biggest quality lever. We mirror what OBS does in [mac-sck-video-capt
 | `AVVideoCodecKey` (Intel) | `AVVideoCodecTypeH264` | HW HEVC encoder availability is patchy on older Intel Macs. |
 | `AVVideoProfileLevelKey` (HEVC) | `kVTProfileLevel_HEVC_Main10_AutoLevel` (from `<VideoToolbox/VTCompressionProperties.h>`) | **Main10 = 10-bit encode**. Required to actually carry the 10-bit precision we capture in. Without this, the encoder downconverts to 8-bit and the wide-gamut capture is wasted. |
 | `AVVideoProfileLevelKey` (H.264) | `AVVideoProfileLevelH264HighAutoLevel` | Standard high-quality H.264 profile. |
-| `AVVideoAverageBitRateKey` | **unset** | VideoToolbox's auto-rate-control for Main10 already produces native-recorder-grade output. Manual bitrate overrides almost always produced softer output in testing — leave it alone. |
+| `AVVideoAverageBitRateKey` | `width × height × fps × 0.1` bits/s, floor 8 Mbps | VideoToolbox's adaptive default targets general video (~5–10 Mbps even at 4K) and looks soft on screen content. The native macOS recorder runs higher. Our formula gives ~36 Mbps for 3024×1964 @ 60fps, ~12 Mbps for 1080p @ 60fps — in line with QuickTime's native screen captures. |
+| `AVVideoMaxKeyFrameIntervalKey` | `fps` (1 keyframe / second) | Screen content tends to be static for long stretches. Refreshing the I-frame every second keeps fine detail from drifting across long P-frame chains. |
+| `AVVideoAllowFrameReorderingKey` | `NO` | Disables B-frames. They reference both past and future frames; on text/UI content the bidirectional averaging produces a faint perceptible smudging. P-only streams are slightly larger but visibly sharper. |
 | `AVVideoExpectedSourceFrameRateKey` | `_options.fps` (30 or 60) | Hint only; helps the encoder pre-allocate rate-control budget. |
 | Architecture detection | `sysctlbyname("hw.optional.arm64", …)` at runtime | One binary covers both arches. |
 
@@ -413,6 +415,9 @@ recording.json     manifest (below)
       "height": 1964,
       "scaleFactor": 2.0,
       "pixelSizeSource": "CGDisplayModeGetPixelWidth",
+      "averageBitRate": 35640960,
+      "maxKeyFrameInterval": 60,
+      "allowFrameReordering": false,
       "videoSamples": 1804
     },
     { "source": "camera", "path": "…", "started": true, "finished": true, … },
@@ -439,7 +444,9 @@ Every `streamConfigurationForContent:` call logs one summary line to the console
 [openscreen.recorder] screen config: 3024x1964 @ 60fps  codec=hevc-main10  \
   pixelFormat=ARGB2101010LEPacked(l10r)  colorSpace=DisplayP3  \
   primaries=AVVideoColorPrimaries_P3_D65 (gamut=P3)  \
-  scale=2.00x  pixelSizeSource=CGDisplayModeGetPixelWidth  scalesToFit=NO  queueDepth=8
+  bitrate=35.6 Mbps  keyframeInterval=60f  \
+  scale=2.00x  pixelSizeSource=CGDisplayModeGetPixelWidth  scalesToFit=NO  queueDepth=8  \
+  allowFrameReordering=NO
 ```
 
 On an sRGB-only display the line would instead read `colorSpace=sRGB  primaries=AVVideoColorPrimaries_ITU_R_709_2 (gamut=Rec.709)`.
@@ -525,7 +532,7 @@ A short log of why the pipeline looks the way it does, so future-you doesn't re-
 1. **We use `AVAssetWriter`, not `SCRecordingOutput`.** `SCRecordingOutput` is a convenience wrapper that doesn't expose `AVVideoColorPropertiesKey`. With Display P3 capture it writes inconsistent color tags (P3 primaries but Rec.709 matrix with no proper transfer), which causes opposite-direction shifts in P3-aware vs sRGB-only players. `AVAssetWriter` lets us write the canonical Display-P3 triplet explicitly — and lets us *match* the file's primaries tag to the gamut we asked SCKit to capture into (see #9).
 2. **We use 10-bit packed RGB (`l10r`) for the SCKit pixel format, not 10-bit YCbCr.** That's what OBS uses ([mac-sck-video-capture.m:213](https://github.com/obsproject/obs-studio/blob/master/plugins/mac-capture/mac-sck-video-capture.m#L213)). The RGB→YCbCr conversion happens inside AVFoundation's HEVC Main10 encoder; precision is preserved end-to-end.
 3. **Audio is muxed into the screen file.** A single `screen.mov` with video + sysaudio + mic is what downstream consumers want. Camera stays separate because it's not an SCKit source.
-4. **Bitrate is intentionally not set.** Every attempt to override `AVVideoAverageBitRateKey` produced softer output than VideoToolbox's adaptive default. The native macOS recorder doesn't override it either.
+4. **Bitrate is set explicitly, tuned for screen content.** We initially left `AVVideoAverageBitRateKey` unset on the theory that VideoToolbox's adaptive default would Just Work — and for general video it does. For *screen* content (text, fine UI edges) the default targets too low a bitrate and the output looks visibly soft even at native resolution + 10-bit + P3. We now set `bitrate = width × height × fps × 0.1` bits/s (floor 8 Mbps), which lines up with what QuickTime's native screen recorder writes. Paired with `AVVideoMaxKeyFrameIntervalKey = fps` (1-second keyframes) and `AVVideoAllowFrameReorderingKey = NO` (no B-frames, no inter-frame averaging blur).
 5. **Audio session start is anchored to the first video frame.** AVAssetWriter requires a single `startSessionAtSourceTime:` and we need the file to begin with a displayable frame. The handful of audio samples that arrive earlier are dropped (counted in the manifest).
 6. **`scalesToFit = NO`.** With macOS 14+'s default of `YES`, any rounding error between SCKit's source surface and our configured `width × height` causes silent resampling. `NO` makes those mismatches surface as letterboxing instead of blur, which is a louder failure mode.
 7. **Even-dimension rounding.** HW HEVC encoders silently rescale odd dimensions; we lose at most one row/column of pixels and avoid that rescaling.
