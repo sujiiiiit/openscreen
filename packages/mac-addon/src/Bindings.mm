@@ -67,13 +67,13 @@ static Napi::Value GetCapabilities(const Napi::CallbackInfo &info) {
                               (long)version.majorVersion,
                               (long)version.minorVersion,
                               (long)version.patchVersion].UTF8String);
-  result.Set("screenCaptureKit", IsMacOSAtLeast(13));
-  result.Set("systemAudio", IsMacOSAtLeast(13));
-  result.Set("screenCaptureKitMicrophone", IsMacOSAtLeast(15));
-  result.Set("microphoneFallback", true);
+  result.Set("screenCaptureKit", true);
+  result.Set("systemAudio", true);
+  result.Set("screenCaptureKitMicrophone", true);
+  result.Set("microphoneFallback", false);
   result.Set("camera", true);
-  result.Set("separateFiles", true);
-  result.Set("scRecordingOutput", IsMacOSAtLeast(15));
+  result.Set("separateFiles", false);
+  result.Set("scRecordingOutput", true);
   return result;
 }
 

@@ -29,7 +29,7 @@
       "conditions": [
         ["OS==\"mac\"", {
           "xcode_settings": {
-            "MACOSX_DEPLOYMENT_TARGET": "13.0",
+            "MACOSX_DEPLOYMENT_TARGET": "15.0",
             "GCC_ENABLE_CPP_EXCEPTIONS": "NO",
             "CLANG_CXX_LIBRARY": "libc++",
             "OTHER_CPLUSPLUSFLAGS": [
@@ -40,6 +40,7 @@
             "OTHER_LDFLAGS": [
               "-framework ScreenCaptureKit",
               "-framework AVFoundation",
+              "-framework VideoToolbox",
               "-framework CoreMedia",
               "-framework CoreVideo",
               "-framework CoreGraphics",

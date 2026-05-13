@@ -92,10 +92,10 @@ export type CameraDevice = CaptureDevice
 export type AudioDevice = CaptureDevice
 
 export interface RecordingFiles {
+  // Single .mov containing screen video plus, when enabled, system audio and
+  // microphone (all muxed by SCRecordingOutput).
   screen: string
   camera?: string
-  systemAudio?: string
-  microphone?: string
   manifest: string
 }
 
@@ -106,18 +106,29 @@ export interface RecordingSession {
 
 export interface RecordingOutputMetadata {
   source: 'screen' | 'camera' | 'systemAudio' | 'microphone'
-  path: string
-  started: boolean
-  finished: boolean
-  samples: number
-  fileSize: number
-  firstPtsMs: number
-  lastPtsMs: number
-  durationMs: number
+  path?: string
+  // True once SCRecordingOutput / AVAssetWriter has actually accepted a sample
+  // (per-source; camera reports its writer state, screen reports the
+  // SCRecordingOutput didStartRecordingAtFileURL callback).
+  started?: boolean
+  finished?: boolean
+  samples?: number
+  fileSize?: number
+  firstPtsMs?: number
+  lastPtsMs?: number
+  durationMs?: number
   width?: number
   height?: number
   sampleRate?: number
   channelCount?: number
+  // Codec actually used (screen track only): 'hevc' on Apple Silicon, 'h264' on Intel.
+  codec?: 'hevc' | 'h264' | string
+  // Mirrors which output file the source landed in. Present for systemAudio
+  // and microphone, where the audio is muxed into the screen .mov rather
+  // than written to its own file.
+  muxedInto?: 'screen'
+  // Microphone-only: the input device the SCStream was bound to.
+  deviceId?: string
   error?: string
   // Number of samples the writer dropped before they reached AVAssetWriter
   // due to backpressure. Absent when no samples were dropped.

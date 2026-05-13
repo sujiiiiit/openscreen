@@ -29,30 +29,23 @@
   self = [super init];
   if (self) {
     _options = options;
-    _screen = [[ScreenTrack alloc] initWithOptions:options];
+    _screen = [[ScreenTrack alloc] initWithOptions:options
+                                          sessionId:ToNSString(options.sessionId)];
     _camera = [[CameraTrack alloc] initWithOptions:options];
-    _systemAudio = [[SystemAudioTrack alloc] initWithOptions:options];
-    _microphone = [[MicrophoneTrack alloc] initWithOptions:options];
+    _systemAudio = [[SystemAudioTrack alloc] initWithOptions:options screenTrack:_screen];
+    _microphone = [[MicrophoneTrack alloc] initWithOptions:options screenTrack:_screen];
     _hostStartTime = kCMTimeInvalid;
   }
   return self;
 }
 
-- (NSString *)sessionId {
-  return ToNSString(_options.sessionId);
-}
-
-- (NSString *)cameraDeviceId {
-  return [_camera deviceId];
-}
+- (NSString *)sessionId      { return ToNSString(_options.sessionId); }
+- (NSString *)cameraDeviceId { return [_camera deviceId]; }
 
 - (BOOL)attachPreviewOutput:(NSError **)error {
   return [_camera attachPreviewOutput:error];
 }
-
-- (void)detachPreviewOutput {
-  [_camera detachPreviewOutput];
-}
+- (void)detachPreviewOutput { [_camera detachPreviewOutput]; }
 
 - (NSString *)fileNameForSource:(NSString *)source extension:(NSString *)extension {
   NSString *prefix = ToNSString(_options.basename);
@@ -64,14 +57,11 @@
 
 - (BOOL)prepareOutputFiles:(NSError **)error {
   if (_options.outputDir.empty()) {
-    if (error) {
-      *error = MakeError(2001, @"startRecording requires outputDir");
-    }
+    if (error) *error = MakeError(2001, @"startRecording requires outputDir");
     return NO;
   }
 
-  _outputDirectory = [NSURL fileURLWithPath:ToNSString(_options.outputDir)
-                                isDirectory:YES];
+  _outputDirectory = [NSURL fileURLWithPath:ToNSString(_options.outputDir) isDirectory:YES];
   BOOL isDir = NO;
   NSFileManager *manager = [NSFileManager defaultManager];
   if (![manager fileExistsAtPath:[_outputDirectory path] isDirectory:&isDir]) {
@@ -80,15 +70,11 @@
            withIntermediateDirectories:YES
                             attributes:nil
                                  error:&createError]) {
-      if (error) {
-        *error = createError;
-      }
+      if (error) *error = createError;
       return NO;
     }
   } else if (!isDir) {
-    if (error) {
-      *error = MakeError(2002, @"outputDir exists but is not a directory");
-    }
+    if (error) *error = MakeError(2002, @"outputDir exists but is not a directory");
     return NO;
   }
 
@@ -96,37 +82,23 @@
       [self fileNameForSource:@"screen" extension:@"mov"]]];
   [_camera setOutputURL:[_outputDirectory URLByAppendingPathComponent:
       [self fileNameForSource:@"camera" extension:@"mov"]]];
-  [_systemAudio setOutputURL:[_outputDirectory URLByAppendingPathComponent:
-      [self fileNameForSource:@"system-audio" extension:@"m4a"]]];
-  [_microphone setOutputURL:[_outputDirectory URLByAppendingPathComponent:
-      [self fileNameForSource:@"microphone" extension:@"m4a"]]];
   _manifestURL = [_outputDirectory URLByAppendingPathComponent:
       [self fileNameForSource:@"recording" extension:@"json"]];
 
-  [_screen prepareWriter];
-  [_systemAudio prepareWriter];
-  [_microphone prepareWriter];
   [_camera prepareWriter];
   return YES;
 }
 
 - (void)teardownPartialStart {
-  // Reverses anything -startSync may have already started. Safe to call
-  // multiple times and from any failure branch below; AVCaptureSession's
-  // stopRunning is a no-op when the session never started.
-  if ([_camera hasCaptureSession]) {
-    [_camera stopCapture];
-  }
-  [_microphone stopFallback];
-  // Cancel any writer that might have created an empty .mov/.m4a stub on
-  // disk before the failure. cancel is idempotent.
+  if ([_camera hasCaptureSession]) [_camera stopCapture];
   [_screen cancelWriter];
   [_camera cancelWriter];
-  [_systemAudio cancelWriter];
-  [_microphone cancelWriter];
   _stream = nil;
   [_camera resetCapture];
-  [_microphone resetFallback];
+  NSURL *screenURL = [_screen url];
+  if (screenURL) {
+    [[NSFileManager defaultManager] removeItemAtURL:screenURL error:nil];
+  }
   _running = NO;
 }
 
@@ -149,16 +121,30 @@
       return NO;
     }
 
-    SCStreamConfiguration *configuration =
-        [_screen streamConfigurationForContent:content];
+    // Build the configuration first — that resolves dimensions and codec,
+    // which the writer needs.
+    SCStreamConfiguration *configuration = [_screen streamConfigurationForContent:content];
     [_systemAudio configureSCStreamConfig:configuration];
     [_microphone configureSCStreamConfig:configuration];
 
-    if (![_camera setupAVCaptureSession:error]) {
+    if (![_screen prepareWriter:error]) {
       [self teardownPartialStart];
       return NO;
     }
-    if (![_microphone setupFallbackIfNeeded:error]) {
+    if ([_systemAudio isEnabled]) {
+      if (![_screen addSystemAudioInput:error]) {
+        [self teardownPartialStart];
+        return NO;
+      }
+    }
+    if ([_microphone isEnabled]) {
+      if (![_screen addMicrophoneInput:error]) {
+        [self teardownPartialStart];
+        return NO;
+      }
+    }
+
+    if (![_camera setupAVCaptureSession:error]) {
       [self teardownPartialStart];
       return NO;
     }
@@ -175,7 +161,7 @@
       [self teardownPartialStart];
       return NO;
     }
-    if (![_microphone addSCKitOutputToStream:_stream error:error]) {
+    if (![_microphone addToStream:_stream error:error]) {
       [self teardownPartialStart];
       return NO;
     }
@@ -184,10 +170,7 @@
     _hostStartTime = CMClockGetTime(CMClockGetHostTimeClock());
     _running = YES;
 
-    if ([_camera hasCaptureSession]) {
-      [_camera startCapture];
-    }
-    [_microphone startFallback];
+    if ([_camera hasCaptureSession]) [_camera startCapture];
 
     __block NSError *startError = nil;
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
@@ -198,31 +181,21 @@
     dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
 
     if (startError) {
-      if (error) {
-        *error = startError;
-      }
-      // The capture sessions for camera/microphone are already running at
-      // this point — leaving them running would keep the camera LED on and
-      // pin the audio device after we report failure. Stop them explicitly
-      // instead of relying on ARC to clean up eventually.
+      if (error) *error = startError;
       [self teardownPartialStart];
       return NO;
     }
 
     EmitEvent({"started", _options.sessionId, "", "", 0});
-
     SetActiveRecorder(self);
     AdoptPendingPreviewForRecorder(self);
-
     return YES;
   }
 }
 
 - (BOOL)stopSync:(NSError **)error {
   @autoreleasepool {
-    if (!_running && !_stream) {
-      return YES;
-    }
+    if (!_running && !_stream) return YES;
 
     _stopping = YES;
     [_screen markStopping];
@@ -241,36 +214,20 @@
       dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
     }
 
-    if ([_camera hasCaptureSession]) {
-      [_camera stopCapture];
-    }
+    if ([_camera hasCaptureSession]) [_camera stopCapture];
     ReleasePreviewForRecorderOnStop(self);
-    [_microphone stopFallback];
 
-    NSMutableArray<NSError *> *finishErrors = [NSMutableArray array];
-    for (id<NSObject> trackObj in @[ _screen, _camera, _systemAudio, _microphone ]) {
-      NSError *finishError = nil;
-      BOOL ok = YES;
-      if (trackObj == _screen) {
-        ok = [_screen finishWriterSync:&finishError];
-      } else if (trackObj == _camera) {
-        ok = [_camera finishWriterSync:&finishError];
-      } else if (trackObj == _systemAudio) {
-        ok = [_systemAudio finishWriterSync:&finishError];
-      } else if (trackObj == _microphone) {
-        ok = [_microphone finishWriterSync:&finishError];
-      }
-      if (!ok && finishError) {
-        [finishErrors addObject:finishError];
-      }
-    }
+    NSError *screenFinishError = nil;
+    BOOL screenOk = [_screen finishWriterSync:&screenFinishError];
+    NSError *cameraFinishError = nil;
+    BOOL cameraOk = [_camera finishWriterSync:&cameraFinishError];
 
     _running = NO;
     [self writeManifest];
 
-    if (streamStopError || finishErrors.count > 0) {
+    if (streamStopError || !screenOk || !cameraOk) {
       if (error) {
-        *error = streamStopError ?: [finishErrors firstObject];
+        *error = streamStopError ?: screenFinishError ?: cameraFinishError;
       }
       return NO;
     }
@@ -296,11 +253,9 @@
   }
   [_camera stopCapture];
   ReleasePreviewForRecorderOnStop(self);
-  [_microphone stopFallback];
   [_screen cancelWriter];
   [_camera cancelWriter];
-  [_systemAudio cancelWriter];
-  [_microphone cancelWriter];
+  [[NSFileManager defaultManager] removeItemAtURL:[_screen url] error:nil];
   [[NSFileManager defaultManager] removeItemAtURL:_manifestURL error:nil];
   _running = NO;
   EmitEvent({"cancelled", _options.sessionId, "", "", 0});
@@ -312,12 +267,6 @@
   if ([_camera hasWriter]) {
     files[@"camera"] = [[_camera url] path];
   }
-  if ([_systemAudio hasWriter]) {
-    files[@"systemAudio"] = [[_systemAudio url] path];
-  }
-  if ([_microphone hasWriter]) {
-    files[@"microphone"] = [[_microphone url] path];
-  }
   files[@"manifest"] = [_manifestURL path];
   return files;
 }
@@ -325,12 +274,8 @@
 - (NSDictionary *)targetDictionary {
   NSMutableDictionary *target = [NSMutableDictionary dictionary];
   target[@"type"] = ToNSString(_options.target.type);
-  if (_options.target.displayId) {
-    target[@"displayId"] = @(_options.target.displayId);
-  }
-  if (_options.target.windowId) {
-    target[@"windowId"] = @(_options.target.windowId);
-  }
+  if (_options.target.displayId) target[@"displayId"] = @(_options.target.displayId);
+  if (_options.target.windowId)  target[@"windowId"]  = @(_options.target.windowId);
   if (!_options.target.bundleId.empty()) {
     target[@"bundleId"] = ToNSString(_options.target.bundleId);
   }
@@ -339,13 +284,13 @@
 
 - (NSArray *)writerMetadata {
   NSMutableArray *outputs = [NSMutableArray array];
-  NSDictionary *screenMeta = [_screen writerMetadata];
+  NSDictionary *screenMeta = [_screen metadata];
   if (screenMeta) [outputs addObject:screenMeta];
   NSDictionary *cameraMeta = [_camera writerMetadata];
   if (cameraMeta) [outputs addObject:cameraMeta];
-  NSDictionary *systemAudioMeta = [_systemAudio writerMetadata];
+  NSDictionary *systemAudioMeta = [_systemAudio metadata];
   if (systemAudioMeta) [outputs addObject:systemAudioMeta];
-  NSDictionary *microphoneMeta = [_microphone writerMetadata];
+  NSDictionary *microphoneMeta = [_microphone metadata];
   if (microphoneMeta) [outputs addObject:microphoneMeta];
   return outputs;
 }
@@ -362,8 +307,7 @@
   manifest[@"excludeOwnApp"] = @(_options.excludeOwnApp);
   manifest[@"files"] = [self filesDictionary];
   manifest[@"outputs"] = [self writerMetadata];
-  manifest[@"microphoneSource"] =
-      [_microphone usesScreenCaptureKit] ? @"screenCaptureKit" : @"avFoundation";
+  manifest[@"microphoneSource"] = @"screenCaptureKit";
   if (!_options.cameraDeviceId.empty()) {
     manifest[@"cameraDeviceId"] = ToNSString(_options.cameraDeviceId);
   }
@@ -401,7 +345,8 @@
 
 - (void)stream:(SCStream *)stream didStopWithError:(NSError *)error {
   if (error) {
-    EmitEvent({"error", _options.sessionId, "screen", ToStdString([error localizedDescription]), 0});
+    EmitEvent({"error", _options.sessionId, "screen",
+               ToStdString([error localizedDescription]), 0});
   }
 }
 
