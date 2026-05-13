@@ -9,9 +9,20 @@ export type PermissionState =
   | 'unsupported'
 
 export type CaptureTarget =
-  | { type: 'display'; displayId?: number }
-  | { type: 'window'; windowId: number }
-  | { type: 'application'; bundleId: string; displayId?: number }
+  | (CaptureTargetMetadata & { type: 'display'; displayId?: number })
+  | (CaptureTargetMetadata & { type: 'window'; windowId: number })
+  | (CaptureTargetMetadata & { type: 'application'; bundleId: string; displayId?: number })
+
+export interface CaptureTargetMetadata {
+  title?: string
+  applicationName?: string
+  bundleId?: string
+  processId?: number
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+}
 
 export interface StartRecordingOptions {
   outputDir: string
@@ -54,6 +65,7 @@ export interface WindowSource {
   title: string
   applicationName: string
   bundleId: string
+  iconDataUrl?: string
   processId: number
   onScreen: boolean
   x: number
@@ -133,6 +145,25 @@ export interface RecordingOutputMetadata {
   // Number of samples the writer dropped before they reached AVAssetWriter
   // due to backpressure. Absent when no samples were dropped.
   droppedSamples?: number
+  droppedVideoSamples?: number
+  completeFrames?: number
+  idleFrames?: number
+  blankFrames?: number
+  suspendedFrames?: number
+  startedFrames?: number
+  stoppedFrames?: number
+  unknownFrames?: number
+  dirtyFrames?: number
+  dirtyRects?: number
+  maxDirtyRectsInFrame?: number
+  lastContentScale?: number
+  lastFrameScaleFactor?: number
+  lastContentRect?: { x: number; y: number; width: number; height: number }
+  lastBoundingRect?: { x: number; y: number; width: number; height: number }
+  lastScreenRect?: { x: number; y: number; width: number; height: number }
+  captureScope?: 'owningApplication' | 'filter' | string
+  applicationName?: string
+  bundleId?: string
 }
 
 export interface RecordingManifest {
@@ -192,6 +223,8 @@ export declare function requestPermissions(
   kinds: PermissionKind[],
 ): Promise<Record<PermissionKind, PermissionState>>
 export declare function listShareableContent(): Promise<ShareableContent>
+export declare function getWindowUnderCursor(includeIcon?: boolean): WindowSource | null
+export declare function getDisplayUnderCursor(): DisplaySource | null
 export declare function listCameras(): CameraDevice[]
 export declare function listMicrophones(): AudioDevice[]
 export declare function startRecording(
@@ -212,6 +245,8 @@ declare const _default: {
   getPermissions: typeof getPermissions
   requestPermissions: typeof requestPermissions
   listShareableContent: typeof listShareableContent
+  getWindowUnderCursor: typeof getWindowUnderCursor
+  getDisplayUnderCursor: typeof getDisplayUnderCursor
   listCameras: typeof listCameras
   listMicrophones: typeof listMicrophones
   startRecording: typeof startRecording

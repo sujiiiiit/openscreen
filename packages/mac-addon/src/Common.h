@@ -14,6 +14,13 @@ struct CaptureTarget {
   uint32_t displayId = 0;
   uint32_t windowId = 0;
   std::string bundleId;
+  std::string title;
+  std::string applicationName;
+  int processId = 0;
+  double x = 0;
+  double y = 0;
+  double width = 0;
+  double height = 0;
 };
 
 struct RecordingOptions {
@@ -46,6 +53,7 @@ struct WindowInfo {
   std::string title;
   std::string appName;
   std::string bundleId;
+  std::string iconDataUrl;
   int pid = 0;
   bool onScreen = false;
   double x = 0;
@@ -74,6 +82,7 @@ std::string GetStringProp(Napi::Object object,
                           const std::string &fallback = "");
 bool GetBoolProp(Napi::Object object, const char *name, bool fallback = false);
 int GetIntProp(Napi::Object object, const char *name, int fallback = 0);
+double GetDoubleProp(Napi::Object object, const char *name, double fallback = 0);
 uint32_t GetUint32Prop(Napi::Object object,
                        const char *name,
                        uint32_t fallback = 0);

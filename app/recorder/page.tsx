@@ -13,7 +13,9 @@ import {
   Settings01Icon,
   StopIcon,
   VolumeHighIcon,
+  ModernTvIcon,
   VolumeOffIcon,
+  BrowserIcon,
 } from "@hugeicons/core-free-icons"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
@@ -21,6 +23,7 @@ import { DRAG, NO_DRAG } from "@/lib/window-drag"
 import type {
   RecorderInputKind,
   RecorderMenuAnchor,
+  RecorderPickerMode,
   RecorderState,
 } from "@/types/api"
 
@@ -42,6 +45,7 @@ const EMPTY_STATE: RecorderState = {
   activeFiles: null,
   lastResult: null,
   lastError: null,
+  pickerMode: null,
 }
 
 function menuAnchor(element: HTMLElement): RecorderMenuAnchor {
@@ -55,9 +59,10 @@ function menuAnchor(element: HTMLElement): RecorderMenuAnchor {
 export default function RecorderPage() {
   const [state, setState] = useState<RecorderState>(EMPTY_STATE)
 
-  const isRecording = state.status === "recording" || state.status === "stopping"
+  const isRecording =
+    state.status === "recording" || state.status === "stopping"
   const isBusy = state.status === "starting" || state.status === "stopping"
-  const canChangeInputs = state.status === "idle"
+  const canChangeInputs = state.status === "idle" && state.pickerMode === null
   const canClose = state.status === "idle"
   const systemAudioLabel = state.settings.systemAudio
     ? "System audio"
@@ -82,13 +87,19 @@ export default function RecorderPage() {
 
   async function showInputMenu(
     kind: RecorderInputKind,
-    event: MouseEvent<HTMLButtonElement>,
+    event: MouseEvent<HTMLButtonElement>
   ) {
     if (!window.api?.recorder || !canChangeInputs) return
     const next = await window.api.recorder.showInputMenu(
       kind,
-      menuAnchor(event.currentTarget),
+      menuAnchor(event.currentTarget)
     )
+    setState(next)
+  }
+
+  async function startPicker(mode: RecorderPickerMode) {
+    if (!window.api?.recorder || !canChangeInputs) return
+    const next = await window.api.recorder.startPicker(mode)
     setState(next)
   }
 
@@ -116,28 +127,57 @@ export default function RecorderPage() {
           disabled={!canClose}
           aria-label="Close recorder"
         >
-          <HugeiconsIcon icon={Cancel01Icon} color="currentColor"/>
+          <HugeiconsIcon icon={Cancel01Icon} color="currentColor" />
         </Button>
 
+        <Separator />
+        <Button
+          variant={state.pickerMode === "display" ? "secondary" : "ghost"}
+          size="icon-lg"
+          className="hover:bg-white/20 dark:hover:bg-white/5"
+          style={NO_DRAG}
+          onClick={() => startPicker("display")}
+          disabled={!canChangeInputs}
+          title="Display"
+          aria-label="Select display to record"
+        >
+          <HugeiconsIcon icon={ModernTvIcon} />
+        </Button>
+        <Button
+          variant={state.pickerMode === "window" ? "secondary" : "ghost"}
+          size="icon-lg"
+          className="hover:bg-white/20 dark:hover:bg-white/5"
+          style={NO_DRAG}
+          onClick={() => startPicker("window")}
+          disabled={!canChangeInputs}
+          title="Window"
+          aria-label="Select window to record"
+        >
+          <HugeiconsIcon icon={BrowserIcon} />
+        </Button>
         <Separator />
 
         <Button
           variant="ghost"
           size="sm"
-          className="min-w-0 max-w-34 justify-start text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
-          style={{
-            "--label-color": state.settings.cameraDeviceId
-              ? "var(--color-foreground)"
-              : "var(--color-muted-foreground)",
-            ...NO_DRAG,
-          } as React.CSSProperties}
+          className="max-w-34 min-w-0 justify-start text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
+          style={
+            {
+              "--label-color": state.settings.cameraDeviceId
+                ? "var(--color-foreground)"
+                : "var(--color-muted-foreground)",
+              ...NO_DRAG,
+            } as React.CSSProperties
+          }
           onClick={(event) => showInputMenu("camera", event)}
           disabled={!canChangeInputs}
           title={state.settings.cameraLabel}
           aria-label={`Camera - ${state.settings.cameraLabel}`}
         >
           <HugeiconsIcon
-            icon={state.settings.cameraDeviceId ? Camera01Icon : CameraOff01Icon}
+            icon={
+              state.settings.cameraDeviceId ? Camera01Icon : CameraOff01Icon
+            }
             size={15}
             color="currentColor"
           />
@@ -147,13 +187,15 @@ export default function RecorderPage() {
         <Button
           variant="ghost"
           size="sm"
-          className="min-w-0 max-w-38 justify-start text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
-          style={{
-            "--label-color": state.settings.microphoneDeviceId
-              ? "var(--color-foreground)"
-              : "var(--color-muted-foreground)",
-            ...NO_DRAG,
-          } as React.CSSProperties}
+          className="max-w-38 min-w-0 justify-start text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
+          style={
+            {
+              "--label-color": state.settings.microphoneDeviceId
+                ? "var(--color-foreground)"
+                : "var(--color-muted-foreground)",
+              ...NO_DRAG,
+            } as React.CSSProperties
+          }
           onClick={(event) => showInputMenu("microphone", event)}
           disabled={!canChangeInputs}
           title={state.settings.microphoneLabel}
@@ -170,13 +212,15 @@ export default function RecorderPage() {
         <Button
           variant="ghost"
           size="sm"
-          className="min-w-0 max-w-36 justify-start text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
-          style={{
-            "--label-color": state.settings.systemAudio
-              ? "var(--color-foreground)"
-              : "var(--color-muted-foreground)",
-            ...NO_DRAG,
-          } as React.CSSProperties}
+          className="max-w-36 min-w-0 justify-start text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
+          style={
+            {
+              "--label-color": state.settings.systemAudio
+                ? "var(--color-foreground)"
+                : "var(--color-muted-foreground)",
+              ...NO_DRAG,
+            } as React.CSSProperties
+          }
           onClick={(event) => showInputMenu("systemAudio", event)}
           disabled={!canChangeInputs}
           aria-label={`System audio - ${systemAudioLabel}`}

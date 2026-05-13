@@ -1,8 +1,11 @@
 #include <napi.h>
 
 #import <AVFoundation/AVFoundation.h>
+#import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
+
+#include <unistd.h>
 
 #include <string>
 #include <utility>
@@ -48,9 +51,194 @@ static RecordingOptions ParseRecordingOptions(const Napi::CallbackInfo &info) {
     options.target.displayId = GetUint32Prop(target, "displayId", 0);
     options.target.windowId = GetUint32Prop(target, "windowId", 0);
     options.target.bundleId = GetStringProp(target, "bundleId");
+    options.target.title = GetStringProp(target, "title");
+    options.target.applicationName = GetStringProp(target, "applicationName");
+    options.target.processId = GetIntProp(target, "processId", 0);
+    options.target.x = GetDoubleProp(target, "x", 0);
+    options.target.y = GetDoubleProp(target, "y", 0);
+    options.target.width = GetDoubleProp(target, "width", 0);
+    options.target.height = GetDoubleProp(target, "height", 0);
   }
 
   return options;
+}
+
+static CGPoint CurrentCursorPoint() {
+  CGEventRef event = CGEventCreate(NULL);
+  CGPoint point = event ? CGEventGetLocation(event) : CGPointZero;
+  if (event) CFRelease(event);
+  return point;
+}
+
+static bool CGRectFromWindowDictionary(NSDictionary *dictionary, CGRect *rect) {
+  id boundsValue = dictionary[(id)kCGWindowBounds];
+  if (!boundsValue) return false;
+  return CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)boundsValue, rect);
+}
+
+static NSString *IconDataURLForProcess(pid_t pid) {
+  static NSMutableDictionary<NSNumber *, NSString *> *cache = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    cache = [NSMutableDictionary dictionary];
+  });
+
+  NSNumber *key = @(pid);
+  NSString *cached = cache[key];
+  if (cached) return cached;
+
+  NSRunningApplication *app =
+      [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+  NSImage *icon = app.icon;
+  if (!icon) return nil;
+
+  NSData *tiff = [icon TIFFRepresentation];
+  if (!tiff) return nil;
+  NSBitmapImageRep *rep = [NSBitmapImageRep imageRepWithData:tiff];
+  if (!rep) return nil;
+  NSData *png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+  if (!png) return nil;
+  NSString *dataURL = [NSString stringWithFormat:@"data:image/png;base64,%@",
+                                                 [png base64EncodedStringWithOptions:0]];
+  cache[key] = dataURL;
+  return dataURL;
+}
+
+static Napi::Value WindowSourceToNapi(Napi::Env env,
+                                      NSDictionary *windowInfo,
+                                      CGRect bounds,
+                                      bool includeIcon) {
+  NSNumber *windowNumber = windowInfo[(id)kCGWindowNumber];
+  NSNumber *ownerPid = windowInfo[(id)kCGWindowOwnerPID];
+  NSString *title = windowInfo[(id)kCGWindowName] ?: @"";
+  NSString *ownerName = windowInfo[(id)kCGWindowOwnerName] ?: @"";
+  pid_t pid = ownerPid ? ownerPid.intValue : 0;
+  NSRunningApplication *app =
+      pid > 0 ? [NSRunningApplication runningApplicationWithProcessIdentifier:pid] : nil;
+  NSString *applicationName = ownerName.length > 0
+      ? ownerName
+      : (app.localizedName ?: @"");
+  NSString *bundleIdentifier = app.bundleIdentifier ?: @"";
+
+  Napi::Object item = Napi::Object::New(env);
+  item.Set("windowId", windowNumber ? windowNumber.unsignedIntValue : 0);
+  item.Set("title", ToStdString(title));
+  item.Set("onScreen", true);
+  item.Set("x", bounds.origin.x);
+  item.Set("y", bounds.origin.y);
+  item.Set("width", bounds.size.width);
+  item.Set("height", bounds.size.height);
+  item.Set("applicationName", ToStdString(applicationName));
+  item.Set("bundleId", ToStdString(bundleIdentifier));
+  item.Set("processId", pid);
+  if (includeIcon && pid > 0) {
+    NSString *iconDataUrl = IconDataURLForProcess(pid);
+    if (iconDataUrl.length > 0) {
+      item.Set("iconDataUrl", ToStdString(iconDataUrl));
+    }
+  }
+  return item;
+}
+
+static Napi::Value DisplaySourceToNapi(Napi::Env env, CGDirectDisplayID displayID) {
+  CGRect bounds = CGDisplayBounds(displayID);
+  Napi::Object item = Napi::Object::New(env);
+  item.Set("displayId", displayID);
+  item.Set("width", (double)CGDisplayPixelsWide(displayID));
+  item.Set("height", (double)CGDisplayPixelsHigh(displayID));
+  item.Set("x", bounds.origin.x);
+  item.Set("y", bounds.origin.y);
+  return item;
+}
+
+static bool IsIgnoredBundleIdentifier(NSString *bundleIdentifier) {
+  if (bundleIdentifier.length == 0) return false;
+  static NSSet<NSString *> *ignoredBundles = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    ignoredBundles = [NSSet setWithArray:@[
+      @"com.apple.dock",
+      @"com.apple.finder.desktop",
+      @"com.apple.notificationcenterui",
+      @"com.apple.WindowManager",
+      @"com.apple.controlcenter"
+    ]];
+  });
+  return [ignoredBundles containsObject:bundleIdentifier];
+}
+
+static Napi::Value GetWindowUnderCursor(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (!CGPreflightScreenCaptureAccess()) {
+    return env.Null();
+  }
+
+  bool includeIcon = true;
+  if (info.Length() > 0 && info[0].IsBoolean()) {
+    includeIcon = info[0].As<Napi::Boolean>().Value();
+  }
+
+  CGPoint cursor = CurrentCursorPoint();
+  CFArrayRef rawWindows = CGWindowListCopyWindowInfo(
+      kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+      kCGNullWindowID);
+  NSArray *windows = CFBridgingRelease(rawWindows);
+  pid_t ownPid = getpid();
+  NSDictionary *candidateWindowInfo = nil;
+  CGRect candidateBounds = CGRectNull;
+
+  for (NSDictionary *windowInfo in windows) {
+    NSNumber *windowNumber = windowInfo[(id)kCGWindowNumber];
+    NSNumber *layer = windowInfo[(id)kCGWindowLayer];
+    NSNumber *ownerPid = windowInfo[(id)kCGWindowOwnerPID];
+    NSNumber *alpha = windowInfo[(id)kCGWindowAlpha];
+    if (!windowNumber || !layer || layer.integerValue != 0) continue;
+    pid_t pid = ownerPid ? ownerPid.intValue : 0;
+    if (pid == ownPid) continue;
+    if (alpha && alpha.doubleValue <= 0.05) continue;
+
+    CGRect bounds = CGRectZero;
+    if (!CGRectFromWindowDictionary(windowInfo, &bounds)) continue;
+    if (bounds.size.width < 320 || bounds.size.height < 220) continue;
+    if (!CGRectContainsPoint(bounds, cursor)) continue;
+
+    NSRunningApplication *app =
+        pid > 0 ? [NSRunningApplication runningApplicationWithProcessIdentifier:pid] : nil;
+    NSString *bundleIdentifier = app.bundleIdentifier ?: @"";
+    NSString *ownBundleId = [[NSBundle mainBundle] bundleIdentifier];
+    if (ownBundleId.length > 0 && [bundleIdentifier isEqualToString:ownBundleId]) continue;
+    if (IsIgnoredBundleIdentifier(bundleIdentifier)) continue;
+
+    candidateWindowInfo = windowInfo;
+    candidateBounds = bounds;
+    break;
+  }
+
+  if (!candidateWindowInfo) return env.Null();
+  return WindowSourceToNapi(env, candidateWindowInfo, candidateBounds, includeIcon);
+}
+
+static Napi::Value GetDisplayUnderCursor(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (!CGPreflightScreenCaptureAccess()) {
+    return env.Null();
+  }
+
+  CGPoint cursor = CurrentCursorPoint();
+  uint32_t displayCount = 0;
+  CGGetActiveDisplayList(0, nullptr, &displayCount);
+  if (displayCount == 0) return env.Null();
+
+  std::vector<CGDirectDisplayID> displays(displayCount);
+  CGGetActiveDisplayList(displayCount, displays.data(), &displayCount);
+  for (uint32_t i = 0; i < displayCount; ++i) {
+    CGDirectDisplayID displayID = displays[i];
+    if (CGRectContainsPoint(CGDisplayBounds(displayID), cursor)) {
+      return DisplaySourceToNapi(env, displayID);
+    }
+  }
+
+  return env.Null();
 }
 
 static Napi::Value Hello(const Napi::CallbackInfo &info) {
@@ -236,6 +424,8 @@ static Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("getPermissions", Napi::Function::New(env, GetPermissions));
   exports.Set("requestPermissions", Napi::Function::New(env, RequestPermissions));
   exports.Set("listShareableContent", Napi::Function::New(env, ListShareableContent));
+  exports.Set("getWindowUnderCursor", Napi::Function::New(env, GetWindowUnderCursor));
+  exports.Set("getDisplayUnderCursor", Napi::Function::New(env, GetDisplayUnderCursor));
   exports.Set("listCameras", Napi::Function::New(env, ListCameras));
   exports.Set("listMicrophones", Napi::Function::New(env, ListMicrophones));
   exports.Set("startRecording", Napi::Function::New(env, StartRecording));

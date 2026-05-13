@@ -4,8 +4,10 @@ import type { MacPermissionKind, PermissionChangeEvent } from './ipc/permissions
 import type {
   RecorderInputKind,
   RecorderMenuAnchor,
+  RecorderPickerMode,
   RecorderState,
 } from './ipc/recorder'
+import type { PickerOverlayTarget } from './ipc/window-picker'
 
 function subscribe<T>(channel: string, callback: (payload: T) => void): () => void {
   const listener = (_event: Electron.IpcRendererEvent, payload: T) => callback(payload)
@@ -18,6 +20,9 @@ const api = {
     getState: (): Promise<RecorderState> => ipcRenderer.invoke('recorder:getState'),
     showInputMenu: (kind: RecorderInputKind, anchor: RecorderMenuAnchor) =>
       ipcRenderer.invoke('recorder:showInputMenu', kind, anchor),
+    startPicker: (mode: RecorderPickerMode): Promise<RecorderState> =>
+      ipcRenderer.invoke('recorder:startPicker', mode),
+    cancelPicker: (): Promise<RecorderState> => ipcRenderer.invoke('recorder:cancelPicker'),
     start: (): Promise<RecorderState> => ipcRenderer.invoke('recorder:start'),
     stop: (): Promise<RecorderState> => ipcRenderer.invoke('recorder:stop'),
     close: (): Promise<void> => ipcRenderer.invoke('recorder:close'),
@@ -38,6 +43,14 @@ const api = {
       subscribe<CameraPreviewFrame>('cameraPreview:frame', callback),
     onError: (callback: (message: string) => void) =>
       subscribe<string>('cameraPreview:error', callback),
+  },
+  windowPicker: {
+    confirm: (): Promise<void> => ipcRenderer.invoke('windowPicker:confirm'),
+    cancel: (): Promise<void> => ipcRenderer.invoke('windowPicker:cancel'),
+    setInteractive: (interactive: boolean): Promise<void> =>
+      ipcRenderer.invoke('windowPicker:setInteractive', interactive),
+    onTargetChanged: (callback: (target: PickerOverlayTarget) => void) =>
+      subscribe<PickerOverlayTarget>('windowPicker:targetChanged', callback),
   },
 }
 

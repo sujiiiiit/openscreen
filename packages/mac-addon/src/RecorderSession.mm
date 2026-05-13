@@ -279,6 +279,21 @@
   if (!_options.target.bundleId.empty()) {
     target[@"bundleId"] = ToNSString(_options.target.bundleId);
   }
+  if (!_options.target.title.empty()) {
+    target[@"title"] = ToNSString(_options.target.title);
+  }
+  if (!_options.target.applicationName.empty()) {
+    target[@"applicationName"] = ToNSString(_options.target.applicationName);
+  }
+  if (_options.target.processId) {
+    target[@"processId"] = @(_options.target.processId);
+  }
+  if (_options.target.width > 0 && _options.target.height > 0) {
+    target[@"x"] = @(_options.target.x);
+    target[@"y"] = @(_options.target.y);
+    target[@"width"] = @(_options.target.width);
+    target[@"height"] = @(_options.target.height);
+  }
   return target;
 }
 

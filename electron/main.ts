@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url'
 import {
   startCameraPreview as startNativeCameraPreview,
   stopCameraPreview as stopNativeCameraPreview,
-} from './ipc/cameraPreview'
+} from './ipc/camera-preview'
 import { disposeMacAddon, registerMacAddonHandlers } from './ipc/mac-addon'
 import {
   hasRequiredPermissions,
@@ -13,7 +13,17 @@ import {
   startPermissionPolling,
   stopPermissionPolling,
 } from './ipc/permissions'
-import { registerRecorderHandlers } from './ipc/recorder'
+import {
+  finishPickerMode,
+  registerRecorderHandlers,
+  startRecording,
+} from './ipc/recorder'
+import {
+  disposeWindowPicker,
+  registerWindowPickerHandlers,
+  startWindowPicker,
+  cancelWindowPicker,
+} from './ipc/window-picker'
 import { windowConfigs } from './windowConfigs'
 
 const isDev = !app.isPackaged
@@ -169,6 +179,8 @@ function showCameraWindow(deviceId: string): void {
 
 function createCameraWindow(deviceId: string): void {
   if (cameraWin && !cameraWin.isDestroyed()) {
+    cameraWin.setAlwaysOnTop(true, 'screen-saver', 2)
+    keepWindowOnEveryWorkspace(cameraWin)
     if (!cameraWin.isVisible()) cameraWin.show()
     startCameraPreviewForCurrentWindow(deviceId)
     return
@@ -187,8 +199,8 @@ function createCameraWindow(deviceId: string): void {
     webPreferences: SHARED_WEB_PREFERENCES,
   })
 
-  cameraWin.setAlwaysOnTop(true, 'floating')
-  cameraWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  cameraWin.setAlwaysOnTop(true, 'screen-saver', 2)
+  keepWindowOnEveryWorkspace(cameraWin)
   cameraWin.setAspectRatio(1)
   if (process.platform === 'darwin') {
     cameraWin.setWindowButtonVisibility(false)
@@ -244,6 +256,15 @@ function focusWindow(win: BrowserWindow): void {
   win.moveTop()
 }
 
+function keepWindowOnEveryWorkspace(win: BrowserWindow): void {
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+}
+
+function keepRecorderBarOnTop(win: BrowserWindow): void {
+  win.setAlwaysOnTop(true, 'screen-saver', 3)
+  keepWindowOnEveryWorkspace(win)
+}
+
 function loadAppRoute(win: BrowserWindow, route: string): void {
   if (isDev) {
     void win.loadURL(`${DEV_URL}${route}`)
@@ -281,7 +302,7 @@ function createPermissionWindow(): void {
   })
 
   permissionWin.setAlwaysOnTop(true, 'modal-panel')
-  permissionWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  keepWindowOnEveryWorkspace(permissionWin)
   if (process.platform === 'darwin') {
     permissionWin.setWindowButtonVisibility(false)
   }
@@ -360,6 +381,7 @@ function createRecorderBarWindow(): void {
   }
 
   if (recorderBarWin && !recorderBarWin.isDestroyed()) {
+    keepRecorderBarOnTop(recorderBarWin)
     focusWindow(recorderBarWin)
     return
   }
@@ -377,8 +399,7 @@ function createRecorderBarWindow(): void {
     webPreferences: SHARED_WEB_PREFERENCES,
   })
 
-  recorderBarWin.setAlwaysOnTop(true, 'pop-up-menu')
-  recorderBarWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  keepRecorderBarOnTop(recorderBarWin)
   if (process.platform === 'darwin') {
     recorderBarWin.setWindowButtonVisibility(false)
   }
@@ -427,6 +448,17 @@ app.whenReady().then(() => {
         hideCameraWindow()
       }
     },
+    startPicker: startWindowPicker,
+    cancelPicker: cancelWindowPicker,
+  })
+  registerWindowPickerHandlers({
+    webPreferences: SHARED_WEB_PREFERENCES,
+    loadAppRoute,
+    showRecorderWindow: showRecorderWindowOnly,
+    onPickerFinished: finishPickerMode,
+    startRecordingForTarget: async (target) => {
+      await startRecording(target)
+    },
   })
   showPermissionGate('startup')
 
@@ -441,6 +473,7 @@ app.whenReady().then(() => {
 })
 
 app.on('before-quit', () => {
+  disposeWindowPicker()
   stopNativeCameraPreview()
   disposeMacAddon()
 })

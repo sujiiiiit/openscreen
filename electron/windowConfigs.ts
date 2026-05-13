@@ -63,6 +63,27 @@ const permissionBase: WindowConfig = {
   acceptFirstMouse: true,
 }
 
+const windowPickerBase: WindowConfig = {
+  title: 'OpenScreen Picker',
+  width: 1,
+  height: 1,
+  show: false,
+  backgroundColor: '#00000000',
+  alwaysOnTop: true,
+  roundedCorners: false,
+  hasShadow: false,
+  fullscreen: false,
+  fullscreenable: false,
+  resizable: false,
+  maximizable: false,
+  minimizable: false,
+  movable: false,
+  acceptFirstMouse: true,
+  skipTaskbar: true,
+  frame: false,
+  transparent: true,
+}
+
 if (process.platform === 'darwin') {
   // titleBarStyle 'hidden' keeps a real titled NSWindow under the hood, so
   // AppKit draws the native rounded corners (system ~10pt), the hairline edge
@@ -99,4 +120,5 @@ export const windowConfigs = {
   recorderBarWin: recorderBarBase,
   permissionWin: permissionBase,
   cameraWin: cameraBase,
+  windowPickerWin: windowPickerBase,
 }

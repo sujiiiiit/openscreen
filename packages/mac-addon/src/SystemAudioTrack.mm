@@ -53,13 +53,25 @@
 
 - (NSDictionary *)metadata {
   if (!_options.recordSystemAudio) return nil;
-  return @{
+  NSMutableDictionary *meta = [@{
     @"source": @"systemAudio",
     @"muxedInto": @"screen",
     @"sampleRate": @48000,
     @"channelCount": @2,
     @"samplesForwarded": @(_samplesForwarded),
-  };
+  } mutableCopy];
+  if (_options.target.type == "window") {
+    meta[@"captureScope"] = @"owningApplication";
+    if (!_options.target.applicationName.empty()) {
+      meta[@"applicationName"] = ToNSString(_options.target.applicationName);
+    }
+    if (!_options.target.bundleId.empty()) {
+      meta[@"bundleId"] = ToNSString(_options.target.bundleId);
+    }
+  } else {
+    meta[@"captureScope"] = @"filter";
+  }
+  return meta;
 }
 
 - (void)stream:(SCStream *)stream

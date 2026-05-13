@@ -7,6 +7,7 @@
 // matching IPC module (and vice versa).
 import type {
   CameraPreviewFrame,
+  CaptureTarget,
   RecordingFiles,
   RecordingResult,
   Unsubscribe,
@@ -42,6 +43,7 @@ export interface PermissionChangeEvent {
 }
 
 export type RecorderInputKind = 'microphone' | 'camera' | 'systemAudio'
+export type RecorderPickerMode = 'display' | 'window'
 
 export interface RecorderMenuAnchor {
   x: number
@@ -66,6 +68,17 @@ export interface RecorderState {
   activeFiles: RecordingFiles | null
   lastResult: RecordingResult | null
   lastError: string | null
+  pickerMode: RecorderPickerMode | null
+}
+
+export interface PickerOverlayTarget {
+  mode: RecorderPickerMode
+  title: string
+  sizeLabel: string
+  modeLabel: string
+  bounds: { x: number; y: number; width: number; height: number }
+  iconDataUrl?: string
+  target: CaptureTarget
 }
 
 export interface Api {
@@ -75,6 +88,8 @@ export interface Api {
       kind: RecorderInputKind,
       anchor: RecorderMenuAnchor,
     ) => Promise<RecorderState>
+    startPicker: (mode: RecorderPickerMode) => Promise<RecorderState>
+    cancelPicker: () => Promise<RecorderState>
     start: () => Promise<RecorderState>
     stop: () => Promise<RecorderState>
     close: () => Promise<void>
@@ -91,6 +106,12 @@ export interface Api {
   cameraPreview: {
     onFrame: (callback: (frame: CameraPreviewFrame) => void) => Unsubscribe
     onError: (callback: (message: string) => void) => Unsubscribe
+  }
+  windowPicker: {
+    confirm: () => Promise<void>
+    cancel: () => Promise<void>
+    setInteractive: (interactive: boolean) => Promise<void>
+    onTargetChanged: (callback: (target: PickerOverlayTarget) => void) => Unsubscribe
   }
 }
 

@@ -38,6 +38,27 @@ static NSString *ProfileLevelForCodec(AVVideoCodecType codec) {
   return AVVideoProfileLevelH264HighAutoLevel;
 }
 
+static BOOL CGRectFromFrameAttachment(id value, CGRect *rect) {
+  if (!value) return NO;
+  if ([value isKindOfClass:[NSValue class]]) {
+    *rect = [(NSValue *)value rectValue];
+    return YES;
+  }
+  if ([value isKindOfClass:[NSDictionary class]]) {
+    return CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)value, rect);
+  }
+  return NO;
+}
+
+static NSDictionary *DictionaryFromCGRect(CGRect rect) {
+  return @{
+    @"x": @(rect.origin.x),
+    @"y": @(rect.origin.y),
+    @"width": @(rect.size.width),
+    @"height": @(rect.size.height),
+  };
+}
+
 @implementation ScreenTrack {
   RecordingOptions _options;
   NSString *_sessionId;
@@ -64,6 +85,26 @@ static NSString *ProfileLevelForCodec(AVVideoCodecType codec) {
   NSInteger _droppedSystemAudioBeforeStart;
   NSInteger _droppedMicrophoneBeforeStart;
   NSInteger _videoSamplesAppended;
+  NSInteger _videoSamplesDropped;
+  BOOL _videoBackpressureEventSent;
+  NSInteger _completeFrameCount;
+  NSInteger _idleFrameCount;
+  NSInteger _blankFrameCount;
+  NSInteger _suspendedFrameCount;
+  NSInteger _startedFrameCount;
+  NSInteger _stoppedFrameCount;
+  NSInteger _unknownFrameCount;
+  NSInteger _dirtyFrameCount;
+  NSInteger _dirtyRectCount;
+  NSInteger _maxDirtyRectsInFrame;
+  CGRect _lastContentRect;
+  BOOL _hasLastContentRect;
+  CGRect _lastBoundingRect;
+  BOOL _hasLastBoundingRect;
+  CGRect _lastScreenRect;
+  BOOL _hasLastScreenRect;
+  CGFloat _lastContentScale;
+  CGFloat _lastFrameScaleFactor;
 
   // Cached configuration values for the manifest + startup log.
   NSInteger _configuredWidth;
@@ -301,9 +342,16 @@ static NSString *ProfileLevelForCodec(AVVideoCodecType codec) {
 
   configuration.width = width;
   configuration.height = height;
-  configuration.scalesToFit = NO;
+  BOOL isWindowCapture = _options.target.type == "window";
+  configuration.scalesToFit = isWindowCapture ? YES : NO;
+  configuration.preservesAspectRatio = YES;
+  if (isWindowCapture) {
+    configuration.ignoreGlobalClipSingleWindow = YES;
+    configuration.ignoreShadowsSingleWindow = YES;
+    configuration.includeChildWindows = NO;
+  }
   configuration.minimumFrameInterval = CMTimeMake(1, _options.fps > 0 ? _options.fps : 60);
-  configuration.queueDepth = 8;
+  configuration.queueDepth = 5;
   configuration.showsCursor = _options.includeCursor;
   // 10-bit packed RGB — same as OBS uses ([mac-sck-video-capture.m]). Carries
   // the full Display-P3 gamut with no chroma subsampling between capture and
@@ -342,7 +390,7 @@ static NSString *ProfileLevelForCodec(AVVideoCodecType codec) {
   NSLog(@"[openscreen.recorder] screen config: %ldx%ld @ %dfps  codec=%@  "
         @"pixelFormat=ARGB2101010LEPacked(l10r)  colorSpace=%@  "
         @"primaries=%@ (gamut=%@)  bitrate=%.1f Mbps  keyframeInterval=%ldf  "
-        @"scale=%.2fx  pixelSizeSource=%@  scalesToFit=NO  queueDepth=8  "
+        @"scale=%.2fx  pixelSizeSource=%@  scalesToFit=%@  queueDepth=5  "
         @"allowFrameReordering=NO",
         (long)_configuredWidth, (long)_configuredHeight,
         (int)(_options.fps > 0 ? _options.fps : 60),
@@ -350,7 +398,8 @@ static NSString *ProfileLevelForCodec(AVVideoCodecType codec) {
         _configuredColorPrimaries, _configuredGamut,
         _configuredBitRate / 1'000'000.0,
         (long)_configuredKeyframeInterval,
-        _configuredScaleFactor, _pixelSizeSource);
+        _configuredScaleFactor, _pixelSizeSource,
+        configuration.scalesToFit ? @"YES" : @"NO");
 
   return configuration;
 }
@@ -522,15 +571,87 @@ static NSString *ProfileLevelForCodec(AVVideoCodecType codec) {
   return YES;
 }
 
-- (BOOL)isCompleteScreenFrame:(CMSampleBufferRef)sampleBuffer {
+- (NSDictionary *)frameAttachments:(CMSampleBufferRef)sampleBuffer {
   CFArrayRef attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
-  if (!attachmentsArray || CFArrayGetCount(attachmentsArray) == 0) return YES;
-  NSDictionary *attachments =
-      (__bridge NSDictionary *)CFArrayGetValueAtIndex(attachmentsArray, 0);
+  if (!attachmentsArray || CFArrayGetCount(attachmentsArray) == 0) return nil;
+  return (__bridge NSDictionary *)CFArrayGetValueAtIndex(attachmentsArray, 0);
+}
+
+- (void)recordFrameMetadata:(NSDictionary *)attachments {
+  if (!attachments) {
+    _unknownFrameCount++;
+    return;
+  }
+
   NSNumber *statusNumber = attachments[SCStreamFrameInfoStatus];
-  if (!statusNumber) return YES;
-  SCFrameStatus status = (SCFrameStatus)[statusNumber integerValue];
-  return status == SCFrameStatusComplete || status == SCFrameStatusStarted;
+  if (!statusNumber) {
+    _unknownFrameCount++;
+  } else {
+    SCFrameStatus status = (SCFrameStatus)[statusNumber integerValue];
+    switch (status) {
+      case SCFrameStatusComplete:
+        _completeFrameCount++;
+        break;
+      case SCFrameStatusIdle:
+        _idleFrameCount++;
+        break;
+      case SCFrameStatusBlank:
+        _blankFrameCount++;
+        break;
+      case SCFrameStatusSuspended:
+        _suspendedFrameCount++;
+        break;
+      case SCFrameStatusStarted:
+        _startedFrameCount++;
+        break;
+      case SCFrameStatusStopped:
+        _stoppedFrameCount++;
+        break;
+      default:
+        _unknownFrameCount++;
+        break;
+    }
+  }
+
+  NSNumber *contentScale = attachments[SCStreamFrameInfoContentScale];
+  if (contentScale) _lastContentScale = contentScale.doubleValue;
+
+  NSNumber *scaleFactor = attachments[SCStreamFrameInfoScaleFactor];
+  if (scaleFactor) _lastFrameScaleFactor = scaleFactor.doubleValue;
+
+  CGRect rect = CGRectZero;
+  if (CGRectFromFrameAttachment(attachments[SCStreamFrameInfoContentRect], &rect)) {
+    _lastContentRect = rect;
+    _hasLastContentRect = YES;
+  }
+  if (@available(macOS 13.1, *)) {
+    if (CGRectFromFrameAttachment(attachments[SCStreamFrameInfoScreenRect], &rect)) {
+      _lastScreenRect = rect;
+      _hasLastScreenRect = YES;
+    }
+  }
+  if (@available(macOS 14.0, *)) {
+    if (CGRectFromFrameAttachment(attachments[SCStreamFrameInfoBoundingRect], &rect)) {
+      _lastBoundingRect = rect;
+      _hasLastBoundingRect = YES;
+    }
+  }
+
+  NSArray *dirtyRects = attachments[SCStreamFrameInfoDirtyRects];
+  if ([dirtyRects isKindOfClass:[NSArray class]] && dirtyRects.count > 0) {
+    _dirtyFrameCount++;
+    _dirtyRectCount += dirtyRects.count;
+    if ((NSInteger)dirtyRects.count > _maxDirtyRectsInFrame) {
+      _maxDirtyRectsInFrame = dirtyRects.count;
+    }
+  }
+}
+
+- (BOOL)isCompleteScreenFrameFromAttachments:(NSDictionary *)attachments {
+  if (!attachments) return NO;
+  NSNumber *statusNumber = attachments[SCStreamFrameInfoStatus];
+  if (!statusNumber) return NO;
+  return (SCFrameStatus)[statusNumber integerValue] == SCFrameStatusComplete;
 }
 
 - (void)stream:(SCStream *)stream
@@ -538,7 +659,9 @@ static NSString *ProfileLevelForCodec(AVVideoCodecType codec) {
                    ofType:(SCStreamOutputType)type {
   if (_stopping || !CMSampleBufferIsValid(sampleBuffer)) return;
   if (type != SCStreamOutputTypeScreen) return;
-  if (![self isCompleteScreenFrame:sampleBuffer]) return;
+  NSDictionary *attachments = [self frameAttachments:sampleBuffer];
+  [self recordFrameMetadata:attachments];
+  if (![self isCompleteScreenFrameFromAttachments:attachments]) return;
   [self appendVideoSampleBuffer:sampleBuffer];
 }
 
@@ -584,6 +707,15 @@ static NSString *ProfileLevelForCodec(AVVideoCodecType codec) {
   if (_videoInput.readyForMoreMediaData) {
     if ([_videoInput appendSampleBuffer:sampleBuffer]) {
       _videoSamplesAppended++;
+    } else {
+      _videoSamplesDropped++;
+    }
+  } else {
+    _videoSamplesDropped++;
+    if (!_videoBackpressureEventSent) {
+      _videoBackpressureEventSent = YES;
+      EmitEvent({"backpressure", ToStdString(_sessionId), "screen",
+                 "Video writer is not ready for more frame data", 0});
     }
   }
 }
@@ -701,12 +833,29 @@ static NSString *ProfileLevelForCodec(AVVideoCodecType codec) {
     meta[@"maxKeyFrameInterval"] = @(_configuredKeyframeInterval);
   }
   meta[@"allowFrameReordering"] = @NO;
+  meta[@"queueDepth"] = @5;
   if (_configuredWidth > 0) meta[@"width"] = @(_configuredWidth);
   if (_configuredHeight > 0) meta[@"height"] = @(_configuredHeight);
   if (_configuredScaleFactor > 0) meta[@"scaleFactor"] = @(_configuredScaleFactor);
   if (_pixelSizeSource) meta[@"pixelSizeSource"] = _pixelSizeSource;
   if (_configuredColorSpace) meta[@"colorSpace"] = _configuredColorSpace;
   meta[@"videoSamples"] = @(_videoSamplesAppended);
+  meta[@"droppedVideoSamples"] = @(_videoSamplesDropped);
+  meta[@"completeFrames"] = @(_completeFrameCount);
+  meta[@"idleFrames"] = @(_idleFrameCount);
+  meta[@"blankFrames"] = @(_blankFrameCount);
+  meta[@"suspendedFrames"] = @(_suspendedFrameCount);
+  meta[@"startedFrames"] = @(_startedFrameCount);
+  meta[@"stoppedFrames"] = @(_stoppedFrameCount);
+  meta[@"unknownFrames"] = @(_unknownFrameCount);
+  meta[@"dirtyFrames"] = @(_dirtyFrameCount);
+  meta[@"dirtyRects"] = @(_dirtyRectCount);
+  meta[@"maxDirtyRectsInFrame"] = @(_maxDirtyRectsInFrame);
+  if (_lastContentScale > 0) meta[@"lastContentScale"] = @(_lastContentScale);
+  if (_lastFrameScaleFactor > 0) meta[@"lastFrameScaleFactor"] = @(_lastFrameScaleFactor);
+  if (_hasLastContentRect) meta[@"lastContentRect"] = DictionaryFromCGRect(_lastContentRect);
+  if (_hasLastBoundingRect) meta[@"lastBoundingRect"] = DictionaryFromCGRect(_lastBoundingRect);
+  if (_hasLastScreenRect) meta[@"lastScreenRect"] = DictionaryFromCGRect(_lastScreenRect);
   if (_droppedSystemAudioBeforeStart > 0) {
     meta[@"droppedSystemAudioBeforeStart"] = @(_droppedSystemAudioBeforeStart);
   }

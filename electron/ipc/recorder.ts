@@ -12,6 +12,7 @@ import * as path from 'node:path'
 import addon, {
   type AudioDevice,
   type CameraDevice,
+  type CaptureTarget,
   type RecordingFiles,
   type RecordingResult,
   type StartRecordingOptions,
@@ -22,6 +23,7 @@ import addon, {
 // `electron/` (which the Next.js tsconfig excludes). Edits here MUST be
 // reflected there.
 export type RecorderInputKind = 'microphone' | 'camera' | 'systemAudio'
+export type RecorderPickerMode = 'display' | 'window'
 
 export interface RecorderMenuAnchor {
   x: number
@@ -46,11 +48,14 @@ export interface RecorderState {
   activeFiles: RecordingFiles | null
   lastResult: RecordingResult | null
   lastError: string | null
+  pickerMode: RecorderPickerMode | null
 }
 
 interface RegisterRecorderHandlersOptions {
   getRecorderWindow: () => BrowserWindow | null
   onCameraSelectionChanged?: (deviceId: string | null) => void
+  startPicker?: (mode: RecorderPickerMode) => void
+  cancelPicker?: () => void
 }
 
 let cameraSelectionListener: ((deviceId: string | null) => void) | null = null
@@ -75,6 +80,7 @@ const state: RecorderState = {
   activeFiles: null,
   lastResult: null,
   lastError: null,
+  pickerMode: null,
 }
 
 function publicState(): RecorderState {
@@ -105,7 +111,7 @@ function outputDirectory(): string {
 }
 
 function canChangeSettings(): boolean {
-  return state.status === 'idle'
+  return state.status === 'idle' && state.pickerMode === null
 }
 
 function deviceLabel(device: AudioDevice | CameraDevice): string {
@@ -339,7 +345,7 @@ function showInputMenu(
   return publicState()
 }
 
-async function startRecording(): Promise<RecorderState> {
+export async function startRecording(targetOverride?: CaptureTarget): Promise<RecorderState> {
   if (state.status !== 'idle') return publicState()
   if (process.platform !== 'darwin') {
     state.lastError = 'Screen recording is only available on macOS in this build.'
@@ -347,6 +353,7 @@ async function startRecording(): Promise<RecorderState> {
   }
 
   state.status = 'starting'
+  state.pickerMode = null
   state.lastError = null
   state.lastResult = null
   emitState()
@@ -359,7 +366,7 @@ async function startRecording(): Promise<RecorderState> {
     const outputDir = outputDirectory()
     const options: StartRecordingOptions = {
       outputDir,
-      target: {
+      target: targetOverride ?? {
         type: 'display',
         displayId: screen.getPrimaryDisplay().id,
       },
@@ -388,6 +395,43 @@ async function startRecording(): Promise<RecorderState> {
   }
 
   return emitState()
+}
+
+export function finishPickerMode(): RecorderState {
+  if (state.pickerMode === null) return publicState()
+  state.pickerMode = null
+  return emitState()
+}
+
+function startPicker(
+  mode: RecorderPickerMode,
+  options: RegisterRecorderHandlersOptions,
+): RecorderState {
+  if (mode !== 'display' && mode !== 'window') {
+    state.lastError = 'Unknown recording picker mode.'
+    return emitState()
+  }
+  if (state.status !== 'idle') return publicState()
+  if (!options.startPicker) {
+    state.lastError = 'Recording picker is not available.'
+    return emitState()
+  }
+
+  try {
+    state.pickerMode = mode
+    state.lastError = null
+    options.startPicker(mode)
+  } catch (error) {
+    state.pickerMode = null
+    state.lastError = errorMessage(error)
+  }
+
+  return emitState()
+}
+
+function cancelPicker(options: RegisterRecorderHandlersOptions): RecorderState {
+  options.cancelPicker?.()
+  return finishPickerMode()
 }
 
 async function stopRecording(): Promise<RecorderState> {
@@ -432,7 +476,13 @@ export function registerRecorderHandlers(options: RegisterRecorderHandlersOption
   )
   ipcMain.handle('recorder:start', () => startRecording())
   ipcMain.handle('recorder:stop', () => stopRecording())
+  ipcMain.handle('recorder:startPicker', (_event, mode: RecorderPickerMode) =>
+    startPicker(mode, options),
+  )
+  ipcMain.handle('recorder:cancelPicker', () => cancelPicker(options))
   ipcMain.handle('recorder:close', (event) => {
+    options.cancelPicker?.()
+    finishPickerMode()
     const window = options.getRecorderWindow() ?? BrowserWindow.fromWebContents(event.sender)
     window?.close()
   })

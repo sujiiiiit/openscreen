@@ -75,6 +75,11 @@ int GetIntProp(Napi::Object object, const char *name, int fallback) {
   return value.IsNumber() ? value.As<Napi::Number>().Int32Value() : fallback;
 }
 
+double GetDoubleProp(Napi::Object object, const char *name, double fallback) {
+  Napi::Value value = object.Get(name);
+  return value.IsNumber() ? value.As<Napi::Number>().DoubleValue() : fallback;
+}
+
 uint32_t GetUint32Prop(Napi::Object object,
                        const char *name,
                        uint32_t fallback) {
