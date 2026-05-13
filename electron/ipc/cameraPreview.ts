@@ -1,4 +1,4 @@
-import { type BrowserWindow } from "electron"
+import { app, type BrowserWindow } from "electron"
 import addon, { type CameraPreviewFrame } from "@openscreen/mac-addon"
 
 interface CameraPreviewControllerOptions {
@@ -8,25 +8,15 @@ interface CameraPreviewControllerOptions {
 
 let currentDeviceId: string | null = null
 let requestId = 0
-let didLogFrameDeliveryError = false
 let didLogFirstFrame = false
+const isDev = !app.isPackaged
+
+function devLog(...args: unknown[]): void {
+  if (isDev) console.log(...args)
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-function frameWindow(
-  options: CameraPreviewControllerOptions
-): BrowserWindow | null {
-  const win = options.getCameraWindow()
-  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return null
-  return win
-}
-
-function logFrameDeliveryError(error: unknown): void {
-  if (didLogFrameDeliveryError) return
-  didLogFrameDeliveryError = true
-  console.error("[cameraPreview] failed to deliver frame", error)
 }
 
 export function startCameraPreview(
@@ -39,9 +29,8 @@ export function startCameraPreview(
 
   const activeRequestId = ++requestId
   currentDeviceId = deviceId
-  didLogFrameDeliveryError = false
   didLogFirstFrame = false
-  console.log("[cameraPreview] start", { deviceId })
+  devLog("[cameraPreview] start", { deviceId })
 
   const handleStartError = (error: unknown): void => {
     if (activeRequestId !== requestId) return
@@ -54,42 +43,28 @@ export function startCameraPreview(
   try {
     void addon
       .startCameraPreview({ deviceId }, (frame: CameraPreviewFrame) => {
-        console.log("[cameraPreview] JS callback invoked", {
-          width: frame.width,
-          height: frame.height,
-          activeRequestId,
-          requestId,
-          currentDeviceId,
-          deviceId,
-        })
-        if (activeRequestId !== requestId || currentDeviceId !== deviceId)
-          return
+        if (activeRequestId !== requestId) return
 
-        try {
-          const win = frameWindow(options)
-          if (!win) return
+        const win = options.getCameraWindow()
+        if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return
 
-          if (!didLogFirstFrame) {
-            didLogFirstFrame = true
-            console.log("[cameraPreview] first frame sent", {
-              width: frame.width,
-              height: frame.height,
-              bytes: (frame.data as { length?: number } | undefined)?.length,
-            })
-          }
-
-          win.webContents.send("cameraPreview:frame", {
+        if (!didLogFirstFrame) {
+          didLogFirstFrame = true
+          devLog("[cameraPreview] first frame forwarded", {
             width: frame.width,
             height: frame.height,
-            rowBytes: frame.rowBytes,
-            data: Buffer.from(frame.data),
           })
-        } catch (error) {
-          logFrameDeliveryError(error)
         }
+
+        win.webContents.send("cameraPreview:frame", {
+          width: frame.width,
+          height: frame.height,
+          rowBytes: frame.rowBytes,
+          data: frame.data,
+        })
       })
       .then(() => {
-        console.log("[cameraPreview] addon ready", { deviceId })
+        devLog("[cameraPreview] addon ready", { deviceId })
       })
       .catch(handleStartError)
   } catch (error) {
@@ -102,15 +77,7 @@ export function stopCameraPreview(): void {
   if (currentDeviceId === null) return
   requestId++
   currentDeviceId = null
-  try {
-    void addon.stopCameraPreview().catch((error: unknown) => {
-      console.error("[cameraPreview] failed to stop", error)
-    })
-  } catch (error) {
+  void addon.stopCameraPreview().catch((error: unknown) => {
     console.error("[cameraPreview] failed to stop", error)
-  }
-}
-
-export function getCurrentCameraPreviewDevice(): string | null {
-  return currentDeviceId
+  })
 }

@@ -1,4 +1,4 @@
-import { BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain } from 'electron'
 import {
   askForAccessibilityAccess,
   askForCameraAccess,
@@ -9,6 +9,10 @@ import {
   type PermissionType,
 } from 'node-mac-permissions'
 
+// IMPORTANT: the exported types below are mirrored in `types/api.d.ts` so
+// the renderer can typecheck the preload bridge without importing from
+// `electron/` (which the Next.js tsconfig excludes). Edits here MUST be
+// reflected there.
 export type MacPermissionKind =
   | 'screen'
   | 'microphone'
@@ -83,12 +87,14 @@ function snapshotChanged(a: PermissionSnapshot | null, b: PermissionSnapshot): b
 }
 
 function emitPermissionChange(snapshot: PermissionSnapshot, reason: string): void {
-  console.log('[permissions] snapshot', {
-    reason,
-    allGranted: snapshot.allGranted,
-    permissions: snapshot.permissions,
-    missing: snapshot.missing,
-  })
+  if (!app.isPackaged) {
+    console.log('[permissions] snapshot', {
+      reason,
+      allGranted: snapshot.allGranted,
+      permissions: snapshot.permissions,
+      missing: snapshot.missing,
+    })
+  }
 
   const event: PermissionChangeEvent = { reason, snapshot }
   const target = callbacks?.getPermissionWindow()

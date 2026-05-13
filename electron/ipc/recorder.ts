@@ -17,6 +17,10 @@ import addon, {
   type StartRecordingOptions,
 } from '@openscreen/mac-addon'
 
+// IMPORTANT: the exported types below are mirrored in `types/api.d.ts` so
+// the renderer can typecheck the preload bridge without importing from
+// `electron/` (which the Next.js tsconfig excludes). Edits here MUST be
+// reflected there.
 export type RecorderInputKind = 'microphone' | 'camera' | 'systemAudio'
 
 export interface RecorderMenuAnchor {
@@ -42,7 +46,6 @@ export interface RecorderState {
   activeFiles: RecordingFiles | null
   lastResult: RecordingResult | null
   lastError: string | null
-  platform: NodeJS.Platform
 }
 
 interface RegisterRecorderHandlersOptions {
@@ -72,7 +75,6 @@ const state: RecorderState = {
   activeFiles: null,
   lastResult: null,
   lastError: null,
-  platform: process.platform,
 }
 
 function publicState(): RecorderState {
@@ -361,7 +363,7 @@ async function startRecording(): Promise<RecorderState> {
         type: 'display',
         displayId: screen.getPrimaryDisplay().id,
       },
-      fps: 30,
+      fps: 60,
       includeCursor: true,
       excludeOwnApp: true,
       recordSystemAudio: state.settings.systemAudio,

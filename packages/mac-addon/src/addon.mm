@@ -1557,15 +1557,10 @@ static void DeliverPreviewFrame(CVPixelBufferRef pixelBuffer);
 @end
 
 static void DeliverPreviewFrame(CVPixelBufferRef pixelBuffer) {
-  if (!pixelBuffer) {
-    NSLog(@"[cameraPreview/native] DeliverPreviewFrame: pixelBuffer is nil");
-    return;
-  }
+  if (!pixelBuffer) return;
   if (CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) {
-    NSLog(@"[cameraPreview/native] DeliverPreviewFrame: LockBaseAddress failed");
     return;
   }
-  NSLog(@"[cameraPreview/native] DeliverPreviewFrame: locked pixelBuffer");
 
   size_t width = CVPixelBufferGetWidth(pixelBuffer);
   size_t height = CVPixelBufferGetHeight(pixelBuffer);
@@ -1598,15 +1593,12 @@ static void DeliverPreviewFrame(CVPixelBufferRef pixelBuffer) {
   vImagePermuteChannels_ARGB8888(&src, &dst, permute, kvImageNoFlags);
 
   CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
-  NSLog(@"[cameraPreview/native] DeliverPreviewFrame: unlocked, width=%zu height=%zu", width, height);
 
   CameraPreviewFrame *raw = nullptr;
   napi_status status = napi_closing;
   {
     std::lock_guard<std::mutex> lock(gPreviewMutex);
     if (!gPreviewCallback) {
-      NSLog(@"[cameraPreview/native] DeliverPreviewFrame: no gPreviewCallback, dropping frame");
-      // No consumer; return the buffer to the pool and bail.
       RecyclePreviewFrame(std::move(frame));
       return;
     }
@@ -1614,32 +1606,31 @@ static void DeliverPreviewFrame(CVPixelBufferRef pixelBuffer) {
     status = gPreviewCallback->NonBlockingCall(
         raw,
         [](Napi::Env env, Napi::Function callback, CameraPreviewFrame *f) {
+          std::unique_ptr<CameraPreviewFrame> owned(f);
           Napi::HandleScope scope(env);
-          // Hand the underlying buffer to V8 without copying. The finalizer
-          // (run when V8 GCs the Buffer) returns the frame object — vector
-          // and all — to the pool so subsequent frames reuse the allocation.
-          Napi::Buffer<uint8_t> buf = Napi::Buffer<uint8_t>::New(
-              env,
-              f->data.data(),
-              f->data.size(),
-              [](Napi::Env /*env*/, uint8_t * /*data*/, CameraPreviewFrame *hint) {
-                RecyclePreviewFrame(std::unique_ptr<CameraPreviewFrame>(hint));
-              },
-              f);
+
+          // Node 22+ rejects external buffers. Copy into a V8-owned buffer
+          // and recycle the source frame immediately.
+          Napi::Buffer<uint8_t> buf =
+              Napi::Buffer<uint8_t>::Copy(env, owned->data.data(), owned->data.size());
+          if (env.IsExceptionPending()) {
+            ClearPendingPreviewException(env);
+            RecyclePreviewFrame(std::move(owned));
+            return;
+          }
+
           Napi::Object obj = Napi::Object::New(env);
-          obj.Set("width", Napi::Number::New(env, f->width));
-          obj.Set("height", Napi::Number::New(env, f->height));
-          obj.Set("rowBytes", Napi::Number::New(env, f->rowBytes));
+          obj.Set("width", Napi::Number::New(env, owned->width));
+          obj.Set("height", Napi::Number::New(env, owned->height));
+          obj.Set("rowBytes", Napi::Number::New(env, owned->rowBytes));
           obj.Set("data", buf);
+
           callback.Call({obj});
           ClearPendingPreviewException(env);
-          // Ownership of `f` now lives in the Buffer finalizer; do not delete.
+          RecyclePreviewFrame(std::move(owned));
         });
-    NSLog(@"[cameraPreview/native] DeliverPreviewFrame: NonBlockingCall status=%d", (int)status);
   }
   if (status != napi_ok && raw != nullptr) {
-    // Queue was full or TSFN was closing — recycle so we don't leak.
-    NSLog(@"[cameraPreview/native] DeliverPreviewFrame: TSFN call failed, recycling frame");
     RecyclePreviewFrame(std::unique_ptr<CameraPreviewFrame>(raw));
   }
 }
@@ -1709,14 +1700,17 @@ static void DeliverPreviewFrame(CVPixelBufferRef pixelBuffer) {
   }
   [_session addOutput:_output];
 
-  AVCaptureConnection *connection = [_output connectionWithMediaType:AVMediaTypeVideo];
-  if (connection.isVideoMinFrameDurationSupported) {
-    connection.videoMinFrameDuration = CMTimeMake(1, 30);
-  }
-  if (connection.isVideoMaxFrameDurationSupported) {
-    connection.videoMaxFrameDuration = CMTimeMake(1, 30);
-  }
   [_session commitConfiguration];
+
+  NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+  [nc addObserver:self
+         selector:@selector(handleSessionRuntimeError:)
+             name:AVCaptureSessionRuntimeErrorNotification
+           object:_session];
+  [nc addObserver:self
+         selector:@selector(handleSessionInterrupted:)
+             name:AVCaptureSessionWasInterruptedNotification
+           object:_session];
 
   _running = true;
   [_session startRunning];
@@ -1725,6 +1719,7 @@ static void DeliverPreviewFrame(CVPixelBufferRef pixelBuffer) {
 
 - (void)stop {
   if (!_running.exchange(false)) return;
+  [[NSNotificationCenter defaultCenter] removeObserver:self];
   [_session stopRunning];
   if (_output) {
     [_output setSampleBufferDelegate:nil queue:nil];
@@ -1733,16 +1728,22 @@ static void DeliverPreviewFrame(CVPixelBufferRef pixelBuffer) {
   _session = nil;
 }
 
+- (void)handleSessionRuntimeError:(NSNotification *)note {
+  NSError *err = note.userInfo[AVCaptureSessionErrorKey];
+  NSString *msg = err.localizedDescription ?: @"unknown runtime error";
+  EmitEvent({"error", "", "cameraPreview", ToStdString(msg), 0});
+}
+
+- (void)handleSessionInterrupted:(NSNotification *)note {
+  (void)note;
+  EmitEvent({"error", "", "cameraPreview", "Camera capture interrupted", 0});
+}
+
 - (void)captureOutput:(AVCaptureOutput *)output
     didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
            fromConnection:(AVCaptureConnection *)connection {
-  if (!_running.load()) {
-    NSLog(@"[cameraPreview/native] captureOutput called but not running");
-    return;
-  }
-  CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
-  NSLog(@"[cameraPreview/native] captureOutput got pixelBuffer %p", pixelBuffer);
-  DeliverPreviewFrame(pixelBuffer);
+  if (!_running.load()) return;
+  DeliverPreviewFrame(CMSampleBufferGetImageBuffer(sampleBuffer));
 }
 
 @end

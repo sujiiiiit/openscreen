@@ -1,9 +1,5 @@
-import { BrowserWindow, ipcMain } from 'electron'
-import addon, {
-  type PermissionKind,
-  type RecordingEvent,
-  type StartRecordingOptions,
-} from '@openscreen/mac-addon'
+import { BrowserWindow } from 'electron'
+import addon, { type RecordingEvent } from '@openscreen/mac-addon'
 
 interface RegisterMacAddonHandlersOptions {
   // Only the recorder bar surfaces recording events. Every other window we
@@ -21,7 +17,7 @@ function sendRecordingEvent(event: RecordingEvent): void {
   if (!target || target.isDestroyed() || target.webContents.isDestroyed()) return
 
   try {
-    target.webContents.send('macAddon:recordingEvent', event)
+    target.webContents.send('recorder:event', event)
   } catch (error) {
     if (didLogRecordingEventDeliveryError) return
     didLogRecordingEventDeliveryError = true
@@ -29,31 +25,17 @@ function sendRecordingEvent(event: RecordingEvent): void {
   }
 }
 
+// The addon's API surface is intentionally NOT exposed to the renderer via
+// ipcMain.handle. Anything the renderer can drive must go through the
+// `recorder:*` / `permissions:*` channels so main owns paths, device choices,
+// and lifecycle. Direct addon access would let a compromised renderer pick its
+// own outputDir or start a recording that bypasses our state machine.
 export function registerMacAddonHandlers(options: RegisterMacAddonHandlersOptions): void {
   getRecorderWindowRef = options.getRecorderWindow
 
   if (!unsubscribeNativeEvents) {
     unsubscribeNativeEvents = addon.onRecordingEvent(sendRecordingEvent)
   }
-
-  ipcMain.handle('macAddon:hello', () => addon.hello())
-  ipcMain.handle('macAddon:getCapabilities', () => addon.getCapabilities())
-  ipcMain.handle('macAddon:getPermissions', () => addon.getPermissions())
-  ipcMain.handle('macAddon:requestPermissions', (_event, kinds: PermissionKind[]) =>
-    addon.requestPermissions(kinds),
-  )
-  ipcMain.handle('macAddon:listShareableContent', () => addon.listShareableContent())
-  ipcMain.handle('macAddon:listCameras', () => addon.listCameras())
-  ipcMain.handle('macAddon:listMicrophones', () => addon.listMicrophones())
-  ipcMain.handle('macAddon:startRecording', (_event, options: StartRecordingOptions) =>
-    addon.startRecording(options),
-  )
-  ipcMain.handle('macAddon:stopRecording', (_event, sessionId: string) =>
-    addon.stopRecording(sessionId),
-  )
-  ipcMain.handle('macAddon:cancelRecording', (_event, sessionId: string) =>
-    addon.cancelRecording(sessionId),
-  )
 }
 
 // Release the native ThreadSafeFunction so its underlying worker thread exits

@@ -9,10 +9,11 @@ export default function Page() {
   async function ping() {
     setError(null)
     try {
-      if (!window.api?.macAddon?.hello) {
-        throw new Error('window.api.macAddon is not available — preload not loaded?')
+      if (!window.api?.recorder?.getState) {
+        throw new Error('window.api.recorder is not available — preload not loaded?')
       }
-      setResult(await window.api.macAddon.hello())
+      const state = await window.api.recorder.getState()
+      setResult(`recorder status: ${state.status}`)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }
@@ -25,7 +26,7 @@ export default function Page() {
         onClick={ping}
         className="rounded border px-4 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-900"
       >
-        Call mac-addon hello()
+        Ping recorder bridge
       </button>
       {result && <pre className="text-sm">{result}</pre>}
       {error && <pre className="text-sm text-red-500">{error}</pre>}

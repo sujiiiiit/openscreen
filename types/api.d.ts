@@ -1,16 +1,14 @@
+// IMPORTANT: these renderer-facing types are duplicated from
+// `electron/ipc/permissions.ts` and `electron/ipc/recorder.ts`. They are
+// the contract for the preload bridge in `electron/preload.ts`. The Next.js
+// tsconfig excludes `electron/` and the electron tsconfig's rootDir is
+// `electron/`, so neither side can directly import the other; until we
+// refactor into a shared workspace, edits here MUST be mirrored in the
+// matching IPC module (and vice versa).
 import type {
-  AudioDevice,
-  CameraDevice,
   CameraPreviewFrame,
-  Capabilities,
-  PermissionKind,
-  PermissionState,
-  RecordingEvent,
   RecordingFiles,
   RecordingResult,
-  RecordingSession,
-  ShareableContent,
-  StartRecordingOptions,
   Unsubscribe,
 } from '@openscreen/mac-addon'
 
@@ -68,7 +66,6 @@ export interface RecorderState {
   activeFiles: RecordingFiles | null
   lastResult: RecordingResult | null
   lastError: string | null
-  platform: string
 }
 
 export interface Api {
@@ -94,22 +91,6 @@ export interface Api {
   cameraPreview: {
     onFrame: (callback: (frame: CameraPreviewFrame) => void) => Unsubscribe
     onError: (callback: (message: string) => void) => Unsubscribe
-    signalReady: () => Promise<boolean>
-  }
-  macAddon: {
-    hello: () => Promise<string>
-    getCapabilities: () => Promise<Capabilities>
-    getPermissions: () => Promise<Record<PermissionKind, PermissionState>>
-    requestPermissions: (
-      kinds: PermissionKind[],
-    ) => Promise<Record<PermissionKind, PermissionState>>
-    listShareableContent: () => Promise<ShareableContent>
-    listCameras: () => Promise<CameraDevice[]>
-    listMicrophones: () => Promise<AudioDevice[]>
-    startRecording: (options: StartRecordingOptions) => Promise<RecordingSession>
-    stopRecording: (sessionId: string) => Promise<RecordingResult>
-    cancelRecording: (sessionId: string) => Promise<void>
-    onRecordingEvent: (callback: (event: RecordingEvent) => void) => Unsubscribe
   }
 }
 

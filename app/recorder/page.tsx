@@ -7,7 +7,6 @@ import {
   Cancel01Icon,
   Camera01Icon,
   CameraOff01Icon,
-  ComputerScreenShareIcon,
   Mic01Icon,
   MicOff01Icon,
   RecordIcon,
@@ -15,8 +14,6 @@ import {
   StopIcon,
   VolumeHighIcon,
   VolumeOffIcon,
-  DashedLine02Icon,
-  BrowserIcon
 } from "@hugeicons/core-free-icons"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
@@ -45,7 +42,6 @@ const EMPTY_STATE: RecorderState = {
   activeFiles: null,
   lastResult: null,
   lastError: null,
-  platform: "darwin",
 }
 
 function menuAnchor(element: HTMLElement): RecorderMenuAnchor {
@@ -107,7 +103,7 @@ export default function RecorderPage() {
   return (
     <div
       data-window="recorder"
-      className="flex overeflow-hidden h-13 w-full items-center justify-center overflow-hidden"
+      className="flex h-13 w-full items-center justify-center overflow-hidden"
       style={DRAG}
     >
       <div className="flex h-full w-190 items-center overflow-hidden px-2 select-none">
@@ -119,50 +115,8 @@ export default function RecorderPage() {
           onClick={handleClose}
           disabled={!canClose}
           aria-label="Close recorder"
-
         >
           <HugeiconsIcon icon={Cancel01Icon} color="currentColor"/>
-        </Button>
-
-        <Separator />
-
-        <Button
-          variant="ghost"
-          size="icon-lg"
-          title="Entire screen"
-          className="text-xs dark:hover:bg-white/5 "
-          style={NO_DRAG}
-          aria-pressed="true"
-          aria-label="Display source"
-        >
-          <HugeiconsIcon
-            icon={ComputerScreenShareIcon}
-            size={15}
-            color="currentColor"
-          />
-        </Button>
-        <Button
-          variant="ghost"
-          title="window"
-          size="icon-lg"
-          className="text-xs dark:hover:bg-white/5"
-          style={NO_DRAG}
-          aria-pressed="true"
-          aria-label="Display source"
-        >
-          <HugeiconsIcon icon={BrowserIcon} />
-       
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon-lg"
-          title="Region capture"
-          className="text-xs dark:hover:bg-white/5"
-          style={NO_DRAG}
-          aria-pressed="true"
-          aria-label="Display source"
-        >
-         <HugeiconsIcon icon={DashedLine02Icon} />
         </Button>
 
         <Separator />
