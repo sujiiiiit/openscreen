@@ -34,7 +34,8 @@
               "-framework IOSurface",
               "-framework AudioToolbox",
               "-framework AppKit",
-              "-framework Foundation"
+              "-framework Foundation",
+              "-framework Accelerate"
             ]
           }
         }]

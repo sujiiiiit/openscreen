@@ -132,12 +132,16 @@
 html:has([data-window="recorder"]),
 html:has([data-window="recorder"]) body,
 html:has([data-window="permission"]),
-html:has([data-window="permission"]) body {
+html:has([data-window="permission"]) body,
+html:has([data-window="camera"]),
+html:has([data-window="camera"]) body {
   background: transparent !important;
 }
 
 html:has([data-window="recorder"]),
-html:has([data-window="recorder"]) body {
+html:has([data-window="recorder"]) body,
+html:has([data-window="camera"]),
+html:has([data-window="camera"]) body {
   height: 100%;
   overflow: hidden;
 }

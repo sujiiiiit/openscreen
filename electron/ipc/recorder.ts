@@ -47,7 +47,11 @@ export interface RecorderState {
 
 interface RegisterRecorderHandlersOptions {
   getRecorderWindow: () => BrowserWindow | null
+  onCameraSelectionChanged?: (deviceId: string | null) => void
 }
+
+let cameraSelectionListener: ((deviceId: string | null) => void) | null = null
+let getRecorderWindowRef: (() => BrowserWindow | null) | null = null
 
 const NO_MICROPHONE_LABEL = 'No microphone'
 const NO_CAMERA_LABEL = 'No camera'
@@ -77,10 +81,9 @@ function publicState(): RecorderState {
 
 function emitState(): RecorderState {
   const snapshot = publicState()
-  for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.isDestroyed()) {
-      window.webContents.send('recorder:changed', snapshot)
-    }
+  const target = getRecorderWindowRef?.()
+  if (target && !target.isDestroyed()) {
+    target.webContents.send('recorder:changed', snapshot)
   }
   return snapshot
 }
@@ -126,9 +129,11 @@ function refreshSelectedDevices(): {
   microphones: AudioDevice[]
   cameras: CameraDevice[]
   changed: boolean
+  cameraChanged: boolean
 } {
   const microphones = listMicrophones()
   const cameras = listCameras()
+  const previousCameraDeviceId = state.settings.cameraDeviceId
   let changed = false
 
   const selectedMicrophone = state.settings.microphoneDeviceId
@@ -161,7 +166,18 @@ function refreshSelectedDevices(): {
     }
   }
 
-  return { microphones, cameras, changed }
+  return {
+    microphones,
+    cameras,
+    changed,
+    cameraChanged: previousCameraDeviceId !== state.settings.cameraDeviceId,
+  }
+}
+
+function notifyCameraSelectionChanged(cameraChanged: boolean): void {
+  if (cameraChanged && cameraSelectionListener) {
+    cameraSelectionListener(state.settings.cameraDeviceId)
+  }
 }
 
 function selectMicrophone(device: AudioDevice | null): void {
@@ -174,10 +190,15 @@ function selectMicrophone(device: AudioDevice | null): void {
 
 function selectCamera(device: CameraDevice | null): void {
   if (!canChangeSettings()) return
-  state.settings.cameraDeviceId = device?.deviceId ?? null
+  const previousDeviceId = state.settings.cameraDeviceId
+  const nextDeviceId = device?.deviceId ?? null
+  state.settings.cameraDeviceId = nextDeviceId
   state.settings.cameraLabel = device ? deviceLabel(device) : NO_CAMERA_LABEL
   state.lastError = null
   emitState()
+  if (cameraSelectionListener && previousDeviceId !== nextDeviceId) {
+    cameraSelectionListener(nextDeviceId)
+  }
 }
 
 function selectSystemAudio(enabled: boolean): void {
@@ -298,8 +319,9 @@ function showInputMenu(
   }
 
   try {
-    const { microphones, cameras, changed } = refreshSelectedDevices()
+    const { microphones, cameras, changed, cameraChanged } = refreshSelectedDevices()
     if (changed) emitState()
+    notifyCameraSelectionChanged(cameraChanged)
     popupMenu(
       event,
       kind === 'microphone'
@@ -328,8 +350,9 @@ async function startRecording(): Promise<RecorderState> {
   emitState()
 
   try {
-    const { changed } = refreshSelectedDevices()
+    const { changed, cameraChanged } = refreshSelectedDevices()
     if (changed) emitState()
+    notifyCameraSelectionChanged(cameraChanged)
 
     const outputDir = outputDirectory()
     const options: StartRecordingOptions = {
@@ -392,6 +415,8 @@ async function stopRecording(): Promise<RecorderState> {
 }
 
 export function registerRecorderHandlers(options: RegisterRecorderHandlersOptions): void {
+  cameraSelectionListener = options.onCameraSelectionChanged ?? null
+  getRecorderWindowRef = options.getRecorderWindow
   ipcMain.handle('recorder:getState', () => publicState())
   ipcMain.handle(
     'recorder:showInputMenu',

@@ -42,6 +42,7 @@ interface PermissionHandlerOptions {
   openPermissionWindow: () => void
   closePermissionWindow: () => void
   ensureRecorderBarWindow: () => void
+  getPermissionWindow: () => BrowserWindow | null
 }
 
 const REQUIRED_PERMISSIONS: RequiredMacPermissionKind[] = [
@@ -90,10 +91,9 @@ function emitPermissionChange(snapshot: PermissionSnapshot, reason: string): voi
   })
 
   const event: PermissionChangeEvent = { reason, snapshot }
-  for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.isDestroyed()) {
-      window.webContents.send('permissions:changed', event)
-    }
+  const target = callbacks?.getPermissionWindow()
+  if (target && !target.isDestroyed()) {
+    target.webContents.send('permissions:changed', event)
   }
 }
 

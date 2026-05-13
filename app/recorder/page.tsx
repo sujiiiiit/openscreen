@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState, type MouseEvent } from "react"
+import React, { useEffect, useMemo, useState, type MouseEvent } from "react"
 import { HugeiconsIcon } from "@hugeicons/react"
 import {
   ArrowDown01Icon,
@@ -15,8 +15,11 @@ import {
   StopIcon,
   VolumeHighIcon,
   VolumeOffIcon,
+  DashedLine02Icon,
+  BrowserIcon
 } from "@hugeicons/core-free-icons"
 import { Button } from "@/components/ui/button"
+import { Spinner } from "@/components/ui/spinner"
 import { DRAG, NO_DRAG } from "@/lib/window-drag"
 import type {
   RecorderInputKind,
@@ -104,28 +107,30 @@ export default function RecorderPage() {
   return (
     <div
       data-window="recorder"
-      className="flex h-[52px] max-h-[52px] min-h-[52px] w-full items-center justify-center overflow-hidden"
+      className="flex overeflow-hidden h-13 w-full items-center justify-center overflow-hidden"
       style={DRAG}
     >
       <div className="flex h-full w-190 items-center overflow-hidden px-2 select-none">
         <Button
           variant="ghost"
-          size="icon-sm"
-          className="text-neutral-400"
+          size="icon"
+          className="hover:bg-white/20 dark:hover:bg-white/5"
           style={NO_DRAG}
           onClick={handleClose}
           disabled={!canClose}
           aria-label="Close recorder"
+
         >
-          <HugeiconsIcon icon={Cancel01Icon} size={16} color="currentColor" />
+          <HugeiconsIcon icon={Cancel01Icon} color="currentColor"/>
         </Button>
 
-        <div className="w-2 shrink-0" />
+        <Separator />
 
         <Button
-          variant="secondary"
-          size="sm"
-          className="text-xs"
+          variant="ghost"
+          size="icon-lg"
+          title="Entire screen"
+          className="text-xs dark:hover:bg-white/5 "
           style={NO_DRAG}
           aria-pressed="true"
           aria-label="Display source"
@@ -136,14 +141,42 @@ export default function RecorderPage() {
             color="currentColor"
           />
         </Button>
+        <Button
+          variant="ghost"
+          title="window"
+          size="icon-lg"
+          className="text-xs dark:hover:bg-white/5"
+          style={NO_DRAG}
+          aria-pressed="true"
+          aria-label="Display source"
+        >
+          <HugeiconsIcon icon={BrowserIcon} />
+       
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-lg"
+          title="Region capture"
+          className="text-xs dark:hover:bg-white/5"
+          style={NO_DRAG}
+          aria-pressed="true"
+          aria-label="Display source"
+        >
+         <HugeiconsIcon icon={DashedLine02Icon} />
+        </Button>
 
         <Separator />
 
         <Button
           variant="ghost"
           size="sm"
-          className="min-w-0 max-w-34 justify-start text-xs text-muted-foreground"
-          style={NO_DRAG}
+          className="min-w-0 max-w-34 justify-start text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
+          style={{
+            "--label-color": state.settings.cameraDeviceId
+              ? "var(--color-foreground)"
+              : "var(--color-muted-foreground)",
+            ...NO_DRAG,
+          } as React.CSSProperties}
           onClick={(event) => showInputMenu("camera", event)}
           disabled={!canChangeInputs}
           title={state.settings.cameraLabel}
@@ -160,8 +193,13 @@ export default function RecorderPage() {
         <Button
           variant="ghost"
           size="sm"
-          className="min-w-0 max-w-38 justify-start text-xs text-muted-foreground"
-          style={NO_DRAG}
+          className="min-w-0 max-w-38 justify-start text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
+          style={{
+            "--label-color": state.settings.microphoneDeviceId
+              ? "var(--color-foreground)"
+              : "var(--color-muted-foreground)",
+            ...NO_DRAG,
+          } as React.CSSProperties}
           onClick={(event) => showInputMenu("microphone", event)}
           disabled={!canChangeInputs}
           title={state.settings.microphoneLabel}
@@ -178,8 +216,13 @@ export default function RecorderPage() {
         <Button
           variant="ghost"
           size="sm"
-          className="min-w-0 max-w-36 justify-start text-xs text-muted-foreground"
-          style={NO_DRAG}
+          className="min-w-0 max-w-36 justify-start text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
+          style={{
+            "--label-color": state.settings.systemAudio
+              ? "var(--color-foreground)"
+              : "var(--color-muted-foreground)",
+            ...NO_DRAG,
+          } as React.CSSProperties}
           onClick={(event) => showInputMenu("systemAudio", event)}
           disabled={!canChangeInputs}
           aria-label={`System audio - ${systemAudioLabel}`}
@@ -204,18 +247,22 @@ export default function RecorderPage() {
           title={state.lastError ?? undefined}
           aria-label={isRecording ? "Stop recording" : "Start recording"}
         >
-          <HugeiconsIcon
-            icon={isRecording ? StopIcon : RecordIcon}
-            size={15}
-            color="currentColor"
-          />
+          {isBusy ? (
+            <Spinner size={15} className="text-current" />
+          ) : (
+            <HugeiconsIcon
+              icon={isRecording ? StopIcon : RecordIcon}
+              size={15}
+              color="currentColor"
+            />
+          )}
           {recordLabel}
         </Button>
 
         <Button
           variant="ghost"
           size="sm"
-          className="gap-1"
+          className="gap-1 hover:bg-white/20 dark:hover:bg-white/5"
           style={NO_DRAG}
           aria-label="Recorder settings"
         >

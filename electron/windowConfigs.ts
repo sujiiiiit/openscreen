@@ -24,6 +24,27 @@ const recorderBarBase: WindowConfig = {
   acceptFirstMouse: true,
 }
 
+const cameraBase: WindowConfig = {
+  title: 'OpenScreen Camera',
+  width: 240,
+  height: 240,
+  minWidth: 140,
+  minHeight: 140,
+  show: false,
+  backgroundColor: '#00000000',
+  alwaysOnTop: true,
+  roundedCorners: true,
+  hasShadow: true,
+  fullscreen: false,
+  fullscreenable: false,
+  resizable: true,
+  maximizable: false,
+  minimizable: false,
+  movable: true,
+  acceptFirstMouse: true,
+  skipTaskbar: true,
+}
+
 const permissionBase: WindowConfig = {
   title: 'OpenScreen Permissions',
   width: 380,
@@ -54,6 +75,9 @@ if (process.platform === 'darwin') {
   permissionBase.titleBarStyle = 'hidden'
   permissionBase.vibrancy = 'under-window'
   permissionBase.visualEffectState = 'active'
+  cameraBase.titleBarStyle = 'hidden'
+  cameraBase.vibrancy = 'under-window'
+  cameraBase.visualEffectState = 'active'
 } else {
   // Windows / Linux: no NSWindow chrome to inherit — go fully frameless and
   // transparent. backgroundMaterial 'acrylic' provides the native blur on
@@ -62,13 +86,17 @@ if (process.platform === 'darwin') {
   recorderBarBase.transparent = true
   permissionBase.frame = false
   permissionBase.transparent = true
+  cameraBase.frame = false
+  cameraBase.transparent = true
   if (process.platform === 'win32') {
     recorderBarBase.backgroundMaterial = 'acrylic'
     permissionBase.backgroundMaterial = 'acrylic'
+    cameraBase.backgroundMaterial = 'acrylic'
   }
 }
 
 export const windowConfigs = {
   recorderBarWin: recorderBarBase,
   permissionWin: permissionBase,
+  cameraWin: cameraBase,
 }

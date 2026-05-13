@@ -5,7 +5,8 @@
   "private": true,
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "pnpm --filter @openscreen/mac-addon build && tsc -p electron && cp electron/dist-package.json dist-electron/package.json && concurrently -k -n NEXT,ELEC -c blue,green \"next dev --turbopack -p 3000\" \"wait-on tcp:3000 && cross-env NODE_ENV=development electron . --trace-warnings\"",
+    "dev:prebuild": "pnpm --filter @openscreen/mac-addon build && tsc -p electron && cp electron/dist-package.json dist-electron/package.json",
+    "dev": "pnpm dev:prebuild && concurrently -k -n NEXT,TSC,ELEC -c blue,yellow,green \"next dev --turbopack -p 3000\" \"tsc -w -p electron --preserveWatchOutput\" \"wait-on tcp:3000 dist-electron/main.js && cross-env NODE_ENV=development electronmon . --trace-warnings\"",
     "build:next": "cross-env NEXT_EXPORT=1 next build",
     "build:electron": "tsc -p electron && cp electron/dist-package.json dist-electron/package.json",
     "build": "pnpm --filter @openscreen/mac-addon build && pnpm build:next && pnpm build:electron",
@@ -13,6 +14,12 @@
     "lint": "eslint",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit && tsc -p electron --noEmit"
+  },
+  "electronmon": {
+    "patterns": [
+      "dist-electron/**/*"
+    ],
+    "logLevel": "quiet"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",
@@ -40,6 +47,7 @@
     "cross-env": "^10.1.0",
     "electron": "^42.0.1",
     "electron-builder": "^26.8.1",
+    "electronmon": "^2.0.4",
     "eslint": "^9.39.4",
     "eslint-config-next": "16.1.7",
     "postcss": "^8.5.14",

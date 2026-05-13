@@ -5,19 +5,35 @@ import addon, {
   type StartRecordingOptions,
 } from '@openscreen/mac-addon'
 
-let unsubscribeNativeEvents: (() => void) | null = null
+interface RegisterMacAddonHandlersOptions {
+  // Only the recorder bar surfaces recording events. Every other window we
+  // own (camera, permission) ignores them, so broadcasting wakes context
+  // isolation up for nothing on each frameDropped/error tick.
+  getRecorderWindow: () => BrowserWindow | null
+}
 
-function broadcastRecordingEvent(event: RecordingEvent): void {
-  for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.isDestroyed()) {
-      window.webContents.send('macAddon:recordingEvent', event)
-    }
+let unsubscribeNativeEvents: (() => void) | null = null
+let getRecorderWindowRef: (() => BrowserWindow | null) | null = null
+let didLogRecordingEventDeliveryError = false
+
+function sendRecordingEvent(event: RecordingEvent): void {
+  const target = getRecorderWindowRef?.()
+  if (!target || target.isDestroyed() || target.webContents.isDestroyed()) return
+
+  try {
+    target.webContents.send('macAddon:recordingEvent', event)
+  } catch (error) {
+    if (didLogRecordingEventDeliveryError) return
+    didLogRecordingEventDeliveryError = true
+    console.error('[macAddon] failed to deliver recording event', error)
   }
 }
 
-export function registerMacAddonHandlers(): void {
+export function registerMacAddonHandlers(options: RegisterMacAddonHandlersOptions): void {
+  getRecorderWindowRef = options.getRecorderWindow
+
   if (!unsubscribeNativeEvents) {
-    unsubscribeNativeEvents = addon.onRecordingEvent(broadcastRecordingEvent)
+    unsubscribeNativeEvents = addon.onRecordingEvent(sendRecordingEvent)
   }
 
   ipcMain.handle('macAddon:hello', () => addon.hello())
@@ -38,4 +54,15 @@ export function registerMacAddonHandlers(): void {
   ipcMain.handle('macAddon:cancelRecording', (_event, sessionId: string) =>
     addon.cancelRecording(sessionId),
   )
+}
+
+// Release the native ThreadSafeFunction so its underlying worker thread exits
+// cleanly. Without this, on macOS the process can sit for a beat at shutdown
+// waiting for libuv to drain the TSFN.
+export function disposeMacAddon(): void {
+  if (unsubscribeNativeEvents) {
+    unsubscribeNativeEvents()
+    unsubscribeNativeEvents = null
+  }
+  getRecorderWindowRef = null
 }

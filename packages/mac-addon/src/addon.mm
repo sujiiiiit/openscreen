@@ -1,5 +1,6 @@
 #include <napi.h>
 
+#import <Accelerate/Accelerate.h>
 #import <AVFoundation/AVFoundation.h>
 #import <AppKit/AppKit.h>
 #import <AudioToolbox/AudioToolbox.h>
@@ -185,6 +186,9 @@ static void EmitEvent(const EventPayload &payload) {
           object.Set("durationMs", event->durationMs);
         }
         callback.Call({object});
+        if (env.IsExceptionPending()) {
+          env.GetAndClearPendingException();
+        }
         delete event;
       });
 
@@ -194,6 +198,99 @@ static void EmitEvent(const EventPayload &payload) {
 }
 
 }  // namespace
+
+@class RecorderSession;
+
+@interface OSCameraPreviewSession : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
+- (instancetype)initWithDeviceId:(NSString *)deviceId;
+- (BOOL)startWithError:(NSError **)error;
+- (void)stop;
+@end
+
+struct CameraPreviewFrame {
+  std::vector<uint8_t> data;
+  int width = 0;
+  int height = 0;
+  int rowBytes = 0;
+};
+
+static std::mutex gPreviewMutex;
+static std::mutex gPreviewOperationMutex;
+static std::unique_ptr<Napi::ThreadSafeFunction> gPreviewCallback;
+static NSString *gPreviewDeviceId = nil;
+static __weak RecorderSession *gPreviewHostRecorder = nil;
+static __weak RecorderSession *gActiveRecorder = nil;
+static OSCameraPreviewSession *gPreviewSession = nil;
+static uint64_t gPreviewGeneration = 0;
+static std::atomic<bool> gPreviewCallbackExceptionLogged(false);
+
+// Free-list of reusable preview frame buffers. Bounded so we don't pin large
+// vectors after the preview stops; surplus frames are dropped at recycle time.
+static std::mutex gPreviewPoolMutex;
+static std::vector<std::unique_ptr<CameraPreviewFrame>> gPreviewPool;
+static constexpr size_t kPreviewPoolCap = 6;
+
+static std::unique_ptr<CameraPreviewFrame> AcquirePreviewFrame() {
+  std::lock_guard<std::mutex> lock(gPreviewPoolMutex);
+  if (gPreviewPool.empty()) {
+    return std::unique_ptr<CameraPreviewFrame>(new CameraPreviewFrame());
+  }
+  std::unique_ptr<CameraPreviewFrame> frame = std::move(gPreviewPool.back());
+  gPreviewPool.pop_back();
+  return frame;
+}
+
+static void RecyclePreviewFrame(std::unique_ptr<CameraPreviewFrame> frame) {
+  if (!frame) return;
+  std::lock_guard<std::mutex> lock(gPreviewPoolMutex);
+  if (gPreviewPool.size() < kPreviewPoolCap) {
+    gPreviewPool.push_back(std::move(frame));
+  }
+}
+
+static void ClearPreviewPool() {
+  std::lock_guard<std::mutex> lock(gPreviewPoolMutex);
+  gPreviewPool.clear();
+}
+
+static void ClearPendingPreviewException(Napi::Env env) {
+  if (!env.IsExceptionPending()) return;
+
+  Napi::Error error = env.GetAndClearPendingException();
+  if (!gPreviewCallbackExceptionLogged.exchange(true, std::memory_order_relaxed)) {
+    EmitEvent({"error", "", "cameraPreview", error.Message(), 0});
+  }
+}
+
+static uint64_t NextPreviewGeneration() {
+  std::lock_guard<std::mutex> lock(gPreviewMutex);
+  gPreviewCallbackExceptionLogged.store(false, std::memory_order_relaxed);
+  return ++gPreviewGeneration;
+}
+
+static BOOL IsCurrentPreviewGeneration(uint64_t generation) {
+  std::lock_guard<std::mutex> lock(gPreviewMutex);
+  return gPreviewGeneration == generation;
+}
+
+static RecorderSession *ActiveRecorderForPreview() {
+  std::lock_guard<std::mutex> lock(gPreviewMutex);
+  return gActiveRecorder;
+}
+
+static void SetActiveRecorder(RecorderSession *recorder) {
+  std::lock_guard<std::mutex> lock(gPreviewMutex);
+  gActiveRecorder = recorder;
+}
+
+static void ClearActiveRecorder(RecorderSession *recorder) {
+  std::lock_guard<std::mutex> lock(gPreviewMutex);
+  if (gActiveRecorder == recorder) {
+    gActiveRecorder = nil;
+  }
+}
+
+static void DeliverPreviewFrame(CVPixelBufferRef pixelBuffer);
 
 @interface OSMediaFileWriter : NSObject
 - (instancetype)initWithURL:(NSURL *)url
@@ -229,6 +326,16 @@ static void EmitEvent(const EventPayload &payload) {
   NSInteger _sampleRate;
   NSInteger _channelCount;
   int64_t _sampleCount;
+  // Bounded-inflight backpressure. _inflight counts buffers retained by the
+  // producer and enqueued onto _queue but not yet appended; if it crosses
+  // _inflightCap we drop the next sample (with CFRelease elided) and bump
+  // _droppedCount so the manifest records the loss. Without this, a stalled
+  // disk or encoder would let CMSampleBuffers (and the IOSurfaces they pin)
+  // accumulate without bound.
+  std::atomic<int> _inflight;
+  std::atomic<int64_t> _droppedCount;
+  int _inflightCap;
+  BOOL _backpressureEventSent;
 }
 
 - (instancetype)initWithURL:(NSURL *)url
@@ -247,6 +354,14 @@ static void EmitEvent(const EventPayload &payload) {
     _firstPTS = kCMTimeInvalid;
     _lastPTS = kCMTimeInvalid;
     _firstHostOffset = kCMTimeInvalid;
+    // std::atomic default-ctor leaves the value indeterminate pre-C++20; init
+    // explicitly so the very first compare/load is well-defined.
+    _inflight.store(0, std::memory_order_relaxed);
+    _droppedCount.store(0, std::memory_order_relaxed);
+    // Video frames pin large IOSurfaces, so the cap is tight. Audio packets
+    // are tiny (a few KB) and can buffer more comfortably.
+    _inflightCap = [mediaType isEqualToString:AVMediaTypeVideo] ? 8 : 64;
+    _backpressureEventSent = NO;
   }
   return self;
 }
@@ -306,6 +421,10 @@ static void EmitEvent(const EventPayload &payload) {
     }
     if (_error) {
       metadata[@"error"] = [_error localizedDescription];
+    }
+    int64_t dropped = _droppedCount.load(std::memory_order_relaxed);
+    if (dropped > 0) {
+      metadata[@"droppedSamples"] = @(dropped);
     }
     result = metadata;
   });
@@ -415,12 +534,34 @@ static void EmitEvent(const EventPayload &payload) {
   if (!sampleBuffer) {
     return;
   }
+  // A late append racing with -cancel/-finishSync would do real work for
+  // nothing and could touch a writer that's already torn down; bail early.
+  if (_finishing || _finished) {
+    return;
+  }
 
+  // Bounded backpressure: if the writer queue is already saturated, drop
+  // this sample rather than enqueue another and let memory grow without
+  // bound. We emit a single event so the UI can warn the user; subsequent
+  // drops are tallied in _droppedCount and reported via -metadata.
+  int current = _inflight.load(std::memory_order_acquire);
+  if (current >= _inflightCap) {
+    _droppedCount.fetch_add(1, std::memory_order_relaxed);
+    if (!_backpressureEventSent) {
+      _backpressureEventSent = YES;
+      EmitEvent({"backpressure", "", ToStdString(_source),
+                 "writer dropping samples to bound memory", 0});
+    }
+    return;
+  }
+
+  _inflight.fetch_add(1, std::memory_order_acq_rel);
   CFRetain(sampleBuffer);
   dispatch_async(_queue, ^{
     @autoreleasepool {
       [self appendRetainedSampleBuffer:sampleBuffer];
       CFRelease(sampleBuffer);
+      _inflight.fetch_sub(1, std::memory_order_acq_rel);
     }
   });
 }
@@ -489,6 +630,9 @@ static void EmitEvent(const EventPayload &payload) {
 - (NSDictionary *)startResult;
 - (NSDictionary *)stopResult;
 - (NSString *)sessionId;
+- (NSString *)cameraDeviceId;
+- (BOOL)attachPreviewOutput:(NSError **)error;
+- (void)detachPreviewOutput;
 @end
 
 @implementation RecorderSession {
@@ -506,12 +650,14 @@ static void EmitEvent(const EventPayload &payload) {
   SCStream *_stream;
   AVCaptureSession *_cameraSession;
   AVCaptureVideoDataOutput *_cameraOutput;
+  AVCaptureVideoDataOutput *_previewOutput;
   AVCaptureSession *_microphoneSession;
   AVCaptureAudioDataOutput *_microphoneOutput;
   dispatch_queue_t _screenQueue;
   dispatch_queue_t _systemAudioQueue;
   dispatch_queue_t _microphoneQueue;
   dispatch_queue_t _cameraQueue;
+  dispatch_queue_t _previewQueue;
   NSDate *_startedAt;
   CMTime _hostStartTime;
   BOOL _running;
@@ -527,9 +673,61 @@ static void EmitEvent(const EventPayload &payload) {
     _systemAudioQueue = dispatch_queue_create("openscreen.sck.system-audio", DISPATCH_QUEUE_SERIAL);
     _microphoneQueue = dispatch_queue_create("openscreen.sck.microphone", DISPATCH_QUEUE_SERIAL);
     _cameraQueue = dispatch_queue_create("openscreen.av.camera", DISPATCH_QUEUE_SERIAL);
+    _previewQueue = dispatch_queue_create("openscreen.av.camera-preview-tap", DISPATCH_QUEUE_SERIAL);
     _hostStartTime = kCMTimeInvalid;
   }
   return self;
+}
+
+- (NSString *)cameraDeviceId {
+  return ToNSString(_options.cameraDeviceId);
+}
+
+- (BOOL)attachPreviewOutput:(NSError **)error {
+  if (_previewOutput != nil) {
+    return YES;
+  }
+  if (_cameraSession == nil) {
+    if (error) *error = MakeError(2601, @"Cannot attach preview output: no camera session");
+    return NO;
+  }
+
+  AVCaptureVideoDataOutput *output = [[AVCaptureVideoDataOutput alloc] init];
+  output.videoSettings = @{
+    (__bridge NSString *)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+  };
+  output.alwaysDiscardsLateVideoFrames = YES;
+  [output setSampleBufferDelegate:self queue:_previewQueue];
+
+  [_cameraSession beginConfiguration];
+  if (![_cameraSession canAddOutput:output]) {
+    [_cameraSession commitConfiguration];
+    if (error) *error = MakeError(2602, @"Could not attach preview output to camera session");
+    return NO;
+  }
+  [_cameraSession addOutput:output];
+  AVCaptureConnection *connection = [output connectionWithMediaType:AVMediaTypeVideo];
+  if (connection.isVideoMinFrameDurationSupported) {
+    connection.videoMinFrameDuration = CMTimeMake(1, 30);
+  }
+  if (connection.isVideoMaxFrameDurationSupported) {
+    connection.videoMaxFrameDuration = CMTimeMake(1, 30);
+  }
+  [_cameraSession commitConfiguration];
+  _previewOutput = output;
+  return YES;
+}
+
+- (void)detachPreviewOutput {
+  if (_previewOutput == nil) return;
+  AVCaptureVideoDataOutput *output = _previewOutput;
+  _previewOutput = nil;
+  [output setSampleBufferDelegate:nil queue:nil];
+  if (_cameraSession) {
+    [_cameraSession beginConfiguration];
+    [_cameraSession removeOutput:output];
+    [_cameraSession commitConfiguration];
+  }
 }
 
 - (NSString *)sessionId {
@@ -889,19 +1087,46 @@ static void EmitEvent(const EventPayload &payload) {
   return YES;
 }
 
+- (void)teardownPartialStart {
+  // Reverses anything -startSync may have already started. Safe to call
+  // multiple times and from any failure branch below; AVCaptureSession's
+  // stopRunning is a no-op when the session never started.
+  if (_cameraSession) {
+    [_cameraSession stopRunning];
+  }
+  if (_microphoneSession) {
+    [_microphoneSession stopRunning];
+  }
+  // Cancel any writer that might have created an empty .mov/.m4a stub on
+  // disk before the failure. cancel is idempotent.
+  [_screenWriter cancel];
+  [_cameraWriter cancel];
+  [_systemAudioWriter cancel];
+  [_microphoneWriter cancel];
+  _stream = nil;
+  _cameraSession = nil;
+  _cameraOutput = nil;
+  _microphoneSession = nil;
+  _microphoneOutput = nil;
+  _running = NO;
+}
+
 - (BOOL)startSync:(NSError **)error {
   @autoreleasepool {
     if (![self prepareOutputFiles:error]) {
+      [self teardownPartialStart];
       return NO;
     }
 
     SCShareableContent *content = nil;
     if (![self getShareableContent:&content error:error]) {
+      [self teardownPartialStart];
       return NO;
     }
 
     SCContentFilter *filter = [self contentFilterFromContent:content error:error];
     if (!filter) {
+      [self teardownPartialStart];
       return NO;
     }
 
@@ -909,9 +1134,11 @@ static void EmitEvent(const EventPayload &payload) {
         [self streamConfigurationForContent:content filter:filter];
 
     if (![self setupCameraCapture:error]) {
+      [self teardownPartialStart];
       return NO;
     }
     if (![self setupMicrophoneFallback:error]) {
+      [self teardownPartialStart];
       return NO;
     }
 
@@ -927,6 +1154,7 @@ static void EmitEvent(const EventPayload &payload) {
       if (error) {
         *error = addOutputError ?: MakeError(2501, @"Could not add screen stream output");
       }
+      [self teardownPartialStart];
       return NO;
     }
 
@@ -938,6 +1166,7 @@ static void EmitEvent(const EventPayload &payload) {
         if (error) {
           *error = addOutputError ?: MakeError(2502, @"Could not add system audio output");
         }
+        [self teardownPartialStart];
         return NO;
       }
     }
@@ -951,6 +1180,7 @@ static void EmitEvent(const EventPayload &payload) {
           if (error) {
             *error = addOutputError ?: MakeError(2503, @"Could not add microphone output");
           }
+          [self teardownPartialStart];
           return NO;
         }
       }
@@ -979,13 +1209,111 @@ static void EmitEvent(const EventPayload &payload) {
       if (error) {
         *error = startError;
       }
-      _running = NO;
+      // The capture sessions for camera/microphone are already running at
+      // this point — leaving them running would keep the camera LED on and
+      // pin the audio device after we report failure. Stop them explicitly
+      // instead of relying on ARC to clean up eventually.
+      [self teardownPartialStart];
       return NO;
     }
 
     EmitEvent({"started", _options.sessionId, "", "", 0});
+
+    SetActiveRecorder(self);
+    [self adoptPendingPreviewIfMatching];
+
     return YES;
   }
+}
+
+- (void)adoptPendingPreviewIfMatching {
+  std::lock_guard<std::mutex> operationLock(gPreviewOperationMutex);
+  if (_cameraSession == nil) return;
+  NSString *deviceId = [self cameraDeviceId];
+  if (deviceId.length == 0) return;
+
+  OSCameraPreviewSession *standalone = nil;
+  {
+    std::lock_guard<std::mutex> lock(gPreviewMutex);
+    if (!gPreviewCallback) return;
+    if (gPreviewDeviceId.length == 0 || ![gPreviewDeviceId isEqualToString:deviceId]) {
+      return;
+    }
+    standalone = gPreviewSession;
+    gPreviewSession = nil;
+  }
+
+  [standalone stop];
+
+  NSError *attachError = nil;
+  if ([self attachPreviewOutput:&attachError]) {
+    std::lock_guard<std::mutex> lock(gPreviewMutex);
+    gPreviewHostRecorder = self;
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(gPreviewMutex);
+  if (gPreviewCallback) {
+    gPreviewCallback->Release();
+    gPreviewCallback.reset();
+  }
+  gPreviewDeviceId = nil;
+}
+
+- (void)releasePreviewOnStop {
+  std::lock_guard<std::mutex> operationLock(gPreviewOperationMutex);
+  NSString *handBackDeviceId = nil;
+  {
+    std::lock_guard<std::mutex> lock(gPreviewMutex);
+    if (gPreviewHostRecorder == self) {
+      gPreviewHostRecorder = nil;
+      if (gPreviewCallback && gPreviewDeviceId.length > 0) {
+        handBackDeviceId = [gPreviewDeviceId copy];
+      }
+    }
+  }
+
+  [self detachPreviewOutput];
+
+  if (handBackDeviceId.length == 0) return;
+
+  OSCameraPreviewSession *replacement =
+      [[OSCameraPreviewSession alloc] initWithDeviceId:handBackDeviceId];
+  NSError *replaceError = nil;
+  if ([replacement startWithError:&replaceError]) {
+    BOOL keep = NO;
+    {
+      std::lock_guard<std::mutex> lock(gPreviewMutex);
+      // The TSFN may have been torn down between the time we took the device
+      // id above and now. If it's gone, throw away the new session too — the
+      // consumer has already moved on.
+      if (gPreviewCallback) {
+        gPreviewSession = replacement;
+        keep = YES;
+      }
+    }
+    if (!keep) {
+      [replacement stop];
+    }
+    return;
+  }
+
+  // Replacement failed to start. We can no longer deliver frames; clear the
+  // preview state so the TSFN doesn't sit around forever waiting for frames
+  // that will never arrive, and drop the pooled buffers that targeted it.
+  EmitEvent({"error", "", "cameraPreview",
+             ToStdString([replaceError localizedDescription]
+                             ?: @"Camera preview could not be rehanded after recording stopped"),
+             0});
+  {
+    std::lock_guard<std::mutex> lock(gPreviewMutex);
+    if (gPreviewCallback) {
+      gPreviewCallback->Release();
+      gPreviewCallback.reset();
+    }
+    gPreviewDeviceId = nil;
+  }
+  ClearPreviewPool();
 }
 
 - (BOOL)stopSync:(NSError **)error {
@@ -995,6 +1323,8 @@ static void EmitEvent(const EventPayload &payload) {
     }
 
     _stopping = YES;
+    ClearActiveRecorder(self);
+
     __block NSError *streamStopError = nil;
     if (_stream) {
       dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
@@ -1008,6 +1338,7 @@ static void EmitEvent(const EventPayload &payload) {
     if (_cameraSession) {
       [_cameraSession stopRunning];
     }
+    [self releasePreviewOnStop];
     if (_microphoneSession) {
       [_microphoneSession stopRunning];
     }
@@ -1045,6 +1376,7 @@ static void EmitEvent(const EventPayload &payload) {
 
 - (void)cancelSync {
   _stopping = YES;
+  ClearActiveRecorder(self);
   if (_stream) {
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
     [_stream stopCaptureWithCompletionHandler:^(__unused NSError *error) {
@@ -1053,6 +1385,7 @@ static void EmitEvent(const EventPayload &payload) {
     dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
   }
   [_cameraSession stopRunning];
+  [self releasePreviewOnStop];
   [_microphoneSession stopRunning];
   [_screenWriter cancel];
   [_cameraWriter cancel];
@@ -1211,12 +1544,230 @@ static void EmitEvent(const EventPayload &payload) {
 
   if (output == _cameraOutput) {
     [_cameraWriter appendSampleBuffer:sampleBuffer];
+  } else if (output == _previewOutput) {
+    CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+    if (pixelBuffer) {
+      DeliverPreviewFrame(pixelBuffer);
+    }
   } else if (output == _microphoneOutput) {
     [_microphoneWriter appendSampleBuffer:sampleBuffer];
   }
 }
 
 @end
+
+static void DeliverPreviewFrame(CVPixelBufferRef pixelBuffer) {
+  if (!pixelBuffer) {
+    NSLog(@"[cameraPreview/native] DeliverPreviewFrame: pixelBuffer is nil");
+    return;
+  }
+  if (CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) {
+    NSLog(@"[cameraPreview/native] DeliverPreviewFrame: LockBaseAddress failed");
+    return;
+  }
+  NSLog(@"[cameraPreview/native] DeliverPreviewFrame: locked pixelBuffer");
+
+  size_t width = CVPixelBufferGetWidth(pixelBuffer);
+  size_t height = CVPixelBufferGetHeight(pixelBuffer);
+  size_t srcRowBytes = CVPixelBufferGetBytesPerRow(pixelBuffer);
+  uint8_t *base = (uint8_t *)CVPixelBufferGetBaseAddress(pixelBuffer);
+  const size_t needed = width * height * 4;
+
+  std::unique_ptr<CameraPreviewFrame> frame = AcquirePreviewFrame();
+  frame->width = (int)width;
+  frame->height = (int)height;
+  frame->rowBytes = (int)(width * 4);
+  if (frame->data.size() != needed) {
+    frame->data.resize(needed);
+  }
+
+  // BGRA -> RGBA via vImage SIMD permute; also drops any row padding.
+  vImage_Buffer src = {
+    .data = base,
+    .height = (vImagePixelCount)height,
+    .width = (vImagePixelCount)width,
+    .rowBytes = srcRowBytes,
+  };
+  vImage_Buffer dst = {
+    .data = frame->data.data(),
+    .height = (vImagePixelCount)height,
+    .width = (vImagePixelCount)width,
+    .rowBytes = width * 4,
+  };
+  const uint8_t permute[4] = {2, 1, 0, 3};
+  vImagePermuteChannels_ARGB8888(&src, &dst, permute, kvImageNoFlags);
+
+  CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+  NSLog(@"[cameraPreview/native] DeliverPreviewFrame: unlocked, width=%zu height=%zu", width, height);
+
+  CameraPreviewFrame *raw = nullptr;
+  napi_status status = napi_closing;
+  {
+    std::lock_guard<std::mutex> lock(gPreviewMutex);
+    if (!gPreviewCallback) {
+      NSLog(@"[cameraPreview/native] DeliverPreviewFrame: no gPreviewCallback, dropping frame");
+      // No consumer; return the buffer to the pool and bail.
+      RecyclePreviewFrame(std::move(frame));
+      return;
+    }
+    raw = frame.release();
+    status = gPreviewCallback->NonBlockingCall(
+        raw,
+        [](Napi::Env env, Napi::Function callback, CameraPreviewFrame *f) {
+          Napi::HandleScope scope(env);
+          // Hand the underlying buffer to V8 without copying. The finalizer
+          // (run when V8 GCs the Buffer) returns the frame object — vector
+          // and all — to the pool so subsequent frames reuse the allocation.
+          Napi::Buffer<uint8_t> buf = Napi::Buffer<uint8_t>::New(
+              env,
+              f->data.data(),
+              f->data.size(),
+              [](Napi::Env /*env*/, uint8_t * /*data*/, CameraPreviewFrame *hint) {
+                RecyclePreviewFrame(std::unique_ptr<CameraPreviewFrame>(hint));
+              },
+              f);
+          Napi::Object obj = Napi::Object::New(env);
+          obj.Set("width", Napi::Number::New(env, f->width));
+          obj.Set("height", Napi::Number::New(env, f->height));
+          obj.Set("rowBytes", Napi::Number::New(env, f->rowBytes));
+          obj.Set("data", buf);
+          callback.Call({obj});
+          ClearPendingPreviewException(env);
+          // Ownership of `f` now lives in the Buffer finalizer; do not delete.
+        });
+    NSLog(@"[cameraPreview/native] DeliverPreviewFrame: NonBlockingCall status=%d", (int)status);
+  }
+  if (status != napi_ok && raw != nullptr) {
+    // Queue was full or TSFN was closing — recycle so we don't leak.
+    NSLog(@"[cameraPreview/native] DeliverPreviewFrame: TSFN call failed, recycling frame");
+    RecyclePreviewFrame(std::unique_ptr<CameraPreviewFrame>(raw));
+  }
+}
+
+@implementation OSCameraPreviewSession {
+  NSString *_deviceId;
+  AVCaptureSession *_session;
+  AVCaptureVideoDataOutput *_output;
+  dispatch_queue_t _queue;
+  std::atomic<bool> _running;
+}
+
+- (instancetype)initWithDeviceId:(NSString *)deviceId {
+  self = [super init];
+  if (self) {
+    _deviceId = [deviceId copy];
+    _queue = dispatch_queue_create("openscreen.camera.preview", DISPATCH_QUEUE_SERIAL);
+    _running = false;
+  }
+  return self;
+}
+
+- (BOOL)startWithError:(NSError **)error {
+  AVCaptureDevice *device = nil;
+  if (_deviceId.length > 0) {
+    device = [AVCaptureDevice deviceWithUniqueID:_deviceId];
+  }
+  if (!device) {
+    device = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
+  }
+  if (!device) {
+    if (error) *error = MakeError(2501, @"No camera device available for preview");
+    return NO;
+  }
+
+  NSError *inputError = nil;
+  AVCaptureDeviceInput *input = [AVCaptureDeviceInput deviceInputWithDevice:device error:&inputError];
+  if (!input) {
+    if (error) *error = inputError ?: MakeError(2502, @"Could not create camera preview input");
+    return NO;
+  }
+
+  _session = [[AVCaptureSession alloc] init];
+  if ([_session canSetSessionPreset:AVCaptureSessionPreset640x480]) {
+    _session.sessionPreset = AVCaptureSessionPreset640x480;
+  } else {
+    _session.sessionPreset = AVCaptureSessionPresetMedium;
+  }
+  [_session beginConfiguration];
+  if (![_session canAddInput:input]) {
+    [_session commitConfiguration];
+    if (error) *error = MakeError(2503, @"Could not add camera preview input");
+    return NO;
+  }
+  [_session addInput:input];
+
+  _output = [[AVCaptureVideoDataOutput alloc] init];
+  _output.videoSettings = @{
+    (NSString *)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+  };
+  _output.alwaysDiscardsLateVideoFrames = YES;
+  [_output setSampleBufferDelegate:self queue:_queue];
+  if (![_session canAddOutput:_output]) {
+    [_session commitConfiguration];
+    if (error) *error = MakeError(2504, @"Could not add camera preview output");
+    return NO;
+  }
+  [_session addOutput:_output];
+
+  AVCaptureConnection *connection = [_output connectionWithMediaType:AVMediaTypeVideo];
+  if (connection.isVideoMinFrameDurationSupported) {
+    connection.videoMinFrameDuration = CMTimeMake(1, 30);
+  }
+  if (connection.isVideoMaxFrameDurationSupported) {
+    connection.videoMaxFrameDuration = CMTimeMake(1, 30);
+  }
+  [_session commitConfiguration];
+
+  _running = true;
+  [_session startRunning];
+  return YES;
+}
+
+- (void)stop {
+  if (!_running.exchange(false)) return;
+  [_session stopRunning];
+  if (_output) {
+    [_output setSampleBufferDelegate:nil queue:nil];
+  }
+  _output = nil;
+  _session = nil;
+}
+
+- (void)captureOutput:(AVCaptureOutput *)output
+    didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
+           fromConnection:(AVCaptureConnection *)connection {
+  if (!_running.load()) {
+    NSLog(@"[cameraPreview/native] captureOutput called but not running");
+    return;
+  }
+  CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+  NSLog(@"[cameraPreview/native] captureOutput got pixelBuffer %p", pixelBuffer);
+  DeliverPreviewFrame(pixelBuffer);
+}
+
+@end
+
+static void StopCameraPreviewInternal() {
+  OSCameraPreviewSession *toStop = nil;
+  RecorderSession *hostToDetach = nil;
+  {
+    std::lock_guard<std::mutex> lock(gPreviewMutex);
+    toStop = gPreviewSession;
+    gPreviewSession = nil;
+    hostToDetach = gPreviewHostRecorder;
+    gPreviewHostRecorder = nil;
+    gPreviewDeviceId = nil;
+    if (gPreviewCallback) {
+      gPreviewCallback->Release();
+      gPreviewCallback.reset();
+    }
+  }
+  [toStop stop];
+  [hostToDetach detachPreviewOutput];
+  // After stop there is no consumer for pooled buffers — free them so they
+  // don't sit in memory until the next preview starts.
+  ClearPreviewPool();
+}
 
 static NSMutableDictionary<NSString *, RecorderSession *> *SessionStore() {
   static NSMutableDictionary<NSString *, RecorderSession *> *store;
@@ -1258,6 +1809,128 @@ class PromiseWorker : public Napi::AsyncWorker {
 
  protected:
   Napi::Promise::Deferred deferred_;
+};
+
+class StartCameraPreviewWorker final : public PromiseWorker {
+ public:
+  StartCameraPreviewWorker(
+      Napi::Env env,
+      std::string deviceId,
+      Napi::ThreadSafeFunction tsfn,
+      uint64_t generation)
+      : PromiseWorker(env),
+        deviceId_(std::move(deviceId)),
+        tsfn_(tsfn),
+        generation_(generation) {}
+
+  void Execute() override {
+    @autoreleasepool {
+      std::lock_guard<std::mutex> operationLock(gPreviewOperationMutex);
+      if (!IsCurrentPreviewGeneration(generation_)) {
+        return;
+      }
+
+      StopCameraPreviewInternal();
+      if (!IsCurrentPreviewGeneration(generation_)) {
+        return;
+      }
+
+      NSString *requestedDeviceId = ToNSString(deviceId_);
+      RecorderSession *activeRecorder = ActiveRecorderForPreview();
+      BOOL hostOnRecorder = activeRecorder != nil &&
+          requestedDeviceId.length > 0 &&
+          [[activeRecorder cameraDeviceId] isEqualToString:requestedDeviceId];
+
+      if (hostOnRecorder) {
+        NSError *attachError = nil;
+        if (![activeRecorder attachPreviewOutput:&attachError]) {
+          failed_ = true;
+          errorMessage_ = ToStdString(
+              attachError.localizedDescription ?: @"Failed to attach preview to recorder");
+          return;
+        }
+
+        {
+          std::lock_guard<std::mutex> lock(gPreviewMutex);
+          if (gPreviewGeneration == generation_) {
+            gPreviewCallback = std::make_unique<Napi::ThreadSafeFunction>(tsfn_);
+            gPreviewDeviceId = [requestedDeviceId copy];
+            gPreviewHostRecorder = activeRecorder;
+            published_ = true;
+          }
+        }
+        if (!published_) {
+          [activeRecorder detachPreviewOutput];
+        }
+        return;
+      }
+
+      OSCameraPreviewSession *session =
+          [[OSCameraPreviewSession alloc] initWithDeviceId:requestedDeviceId];
+      NSError *startError = nil;
+      if (![session startWithError:&startError]) {
+        failed_ = true;
+        errorMessage_ = ToStdString(
+            startError.localizedDescription ?: @"Failed to start camera preview");
+        return;
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(gPreviewMutex);
+        if (gPreviewGeneration == generation_) {
+          gPreviewCallback = std::make_unique<Napi::ThreadSafeFunction>(tsfn_);
+          gPreviewSession = session;
+          gPreviewDeviceId = [requestedDeviceId copy];
+          published_ = true;
+        }
+      }
+
+      if (!published_) {
+        [session stop];
+      }
+    }
+  }
+
+  void OnOK() override {
+    if (!published_) {
+      tsfn_.Release();
+    }
+    if (failed_) {
+      deferred_.Reject(Napi::Error::New(Env(), errorMessage_).Value());
+      return;
+    }
+    deferred_.Resolve(Env().Undefined());
+  }
+
+ private:
+  std::string deviceId_;
+  Napi::ThreadSafeFunction tsfn_;
+  uint64_t generation_;
+  bool failed_ = false;
+  bool published_ = false;
+  std::string errorMessage_;
+};
+
+class StopCameraPreviewWorker final : public PromiseWorker {
+ public:
+  StopCameraPreviewWorker(Napi::Env env, uint64_t generation)
+      : PromiseWorker(env), generation_(generation) {}
+
+  void Execute() override {
+    @autoreleasepool {
+      std::lock_guard<std::mutex> operationLock(gPreviewOperationMutex);
+      if (IsCurrentPreviewGeneration(generation_)) {
+        StopCameraPreviewInternal();
+      }
+    }
+  }
+
+  void OnOK() override {
+    deferred_.Resolve(Env().Undefined());
+  }
+
+ private:
+  uint64_t generation_;
 };
 
 static Napi::Object NSDictionaryToNapi(Napi::Env env, NSDictionary *dictionary);
@@ -1820,6 +2493,40 @@ static Napi::Value OnRecordingEvent(const Napi::CallbackInfo &info) {
   });
 }
 
+static Napi::Value StartCameraPreview(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 2 || !info[0].IsObject() || !info[1].IsFunction()) {
+    Napi::TypeError::New(env, "startCameraPreview(options, callback) requires an options object and a callback")
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  if ([AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo] !=
+      AVAuthorizationStatusAuthorized) {
+    Napi::Error::New(env, "Camera permission is not granted").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  Napi::Object options = info[0].As<Napi::Object>();
+  std::string deviceId = GetStringProp(options, "deviceId");
+
+  Napi::ThreadSafeFunction tsfn = Napi::ThreadSafeFunction::New(
+      env, info[1].As<Napi::Function>(), "OpenScreenCameraPreview", 4, 1);
+
+  auto *worker = new StartCameraPreviewWorker(
+      env, std::move(deviceId), tsfn, NextPreviewGeneration());
+  Napi::Promise promise = worker->Promise();
+  worker->Queue();
+  return promise;
+}
+
+static Napi::Value StopCameraPreview(const Napi::CallbackInfo &info) {
+  auto *worker = new StopCameraPreviewWorker(info.Env(), NextPreviewGeneration());
+  Napi::Promise promise = worker->Promise();
+  worker->Queue();
+  return promise;
+}
+
 static Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("hello", Napi::Function::New(env, Hello));
   exports.Set("getCapabilities", Napi::Function::New(env, GetCapabilities));
@@ -1832,6 +2539,8 @@ static Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("stopRecording", Napi::Function::New(env, StopRecording));
   exports.Set("cancelRecording", Napi::Function::New(env, CancelRecording));
   exports.Set("onRecordingEvent", Napi::Function::New(env, OnRecordingEvent));
+  exports.Set("startCameraPreview", Napi::Function::New(env, StartCameraPreview));
+  exports.Set("stopCameraPreview", Napi::Function::New(env, StopCameraPreview));
   return exports;
 }
 

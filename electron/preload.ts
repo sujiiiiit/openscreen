@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
+  CameraPreviewFrame,
   PermissionKind,
   RecordingEvent,
   StartRecordingOptions,
@@ -15,6 +16,32 @@ function subscribe<T>(channel: string, callback: (payload: T) => void): () => vo
   const listener = (_event: Electron.IpcRendererEvent, payload: T) => callback(payload)
   ipcRenderer.on(channel, listener)
   return () => ipcRenderer.removeListener(channel, listener)
+}
+
+let didLogFirstPreloadFrame = false
+
+function subscribeToCameraPreview(
+  callback: (frame: CameraPreviewFrame) => void,
+): () => void {
+  console.log('[cameraPreview/preload] subscribing to cameraPreview:frame')
+  const listener = (_event: Electron.IpcRendererEvent, frame: CameraPreviewFrame) => {
+    if (!didLogFirstPreloadFrame) {
+      didLogFirstPreloadFrame = true
+      const data = frame.data as unknown as { byteLength?: number; length?: number } | undefined
+      console.log('[cameraPreview/preload] first frame arrived in renderer process', {
+        width: frame.width,
+        height: frame.height,
+        dataKind: data?.constructor?.name ?? typeof data,
+        byteLength: data?.byteLength ?? data?.length,
+      })
+    }
+    callback(frame)
+  }
+  ipcRenderer.on('cameraPreview:frame', listener)
+  return () => {
+    didLogFirstPreloadFrame = false
+    ipcRenderer.removeListener('cameraPreview:frame', listener)
+  }
 }
 
 const api = {
@@ -36,6 +63,14 @@ const api = {
     closeWindow: (): Promise<void> => ipcRenderer.invoke('permissions:closeWindow'),
     onChanged: (callback: (event: PermissionChangeEvent) => void) =>
       subscribe<PermissionChangeEvent>('permissions:changed', callback),
+  },
+  cameraPreview: {
+    onFrame: (callback: (frame: CameraPreviewFrame) => void) =>
+      subscribeToCameraPreview(callback),
+    onError: (callback: (message: string) => void) =>
+      subscribe<string>('cameraPreview:error', callback),
+    signalReady: (): Promise<boolean> =>
+      ipcRenderer.invoke('cameraPreview:rendererReady'),
   },
   macAddon: {
     hello: (): Promise<string> => ipcRenderer.invoke('macAddon:hello'),

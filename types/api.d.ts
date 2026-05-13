@@ -1,6 +1,7 @@
 import type {
   AudioDevice,
   CameraDevice,
+  CameraPreviewFrame,
   Capabilities,
   PermissionKind,
   PermissionState,
@@ -89,6 +90,11 @@ export interface Api {
     openWindow: () => Promise<PermissionSnapshot>
     closeWindow: () => Promise<void>
     onChanged: (callback: (event: PermissionChangeEvent) => void) => Unsubscribe
+  }
+  cameraPreview: {
+    onFrame: (callback: (frame: CameraPreviewFrame) => void) => Unsubscribe
+    onError: (callback: (message: string) => void) => Unsubscribe
+    signalReady: () => Promise<boolean>
   }
   macAddon: {
     hello: () => Promise<string>

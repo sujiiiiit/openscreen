@@ -119,6 +119,9 @@ export interface RecordingOutputMetadata {
   sampleRate?: number
   channelCount?: number
   error?: string
+  // Number of samples the writer dropped before they reached AVAssetWriter
+  // due to backpressure. Absent when no samples were dropped.
+  droppedSamples?: number
 }
 
 export interface RecordingManifest {
@@ -143,11 +146,30 @@ export interface RecordingResult {
 }
 
 export interface RecordingEvent {
-  type: 'started' | 'stopped' | 'cancelled' | 'fileStarted' | 'error'
+  type:
+    | 'started'
+    | 'stopped'
+    | 'cancelled'
+    | 'fileStarted'
+    | 'error'
+    // Emitted once per writer the first time it has to drop samples to keep
+    // memory bounded. The source field identifies which writer.
+    | 'backpressure'
   sessionId?: string
   source?: string
   message?: string
   durationMs?: number
+}
+
+export interface CameraPreviewFrame {
+  width: number
+  height: number
+  rowBytes: number
+  data: Buffer
+}
+
+export interface StartCameraPreviewOptions {
+  deviceId?: string
 }
 
 export type Unsubscribe = () => void
@@ -167,6 +189,11 @@ export declare function startRecording(
 export declare function stopRecording(sessionId: string): Promise<RecordingResult>
 export declare function cancelRecording(sessionId: string): Promise<void>
 export declare function onRecordingEvent(callback: (event: RecordingEvent) => void): Unsubscribe
+export declare function startCameraPreview(
+  options: StartCameraPreviewOptions,
+  callback: (frame: CameraPreviewFrame) => void,
+): Promise<void>
+export declare function stopCameraPreview(): Promise<void>
 
 declare const _default: {
   hello: typeof hello
@@ -180,6 +207,8 @@ declare const _default: {
   stopRecording: typeof stopRecording
   cancelRecording: typeof cancelRecording
   onRecordingEvent: typeof onRecordingEvent
+  startCameraPreview: typeof startCameraPreview
+  stopCameraPreview: typeof stopCameraPreview
 }
 
 export default _default

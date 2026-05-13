@@ -1,7 +1,11 @@
-import { app, BrowserWindow, nativeTheme, net, protocol, screen, session, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, nativeTheme, net, protocol, screen, session, shell } from 'electron'
 import * as path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { registerMacAddonHandlers } from './ipc/mac-addon'
+import {
+  startCameraPreview as startNativeCameraPreview,
+  stopCameraPreview as stopNativeCameraPreview,
+} from './ipc/cameraPreview'
+import { disposeMacAddon, registerMacAddonHandlers } from './ipc/mac-addon'
 import {
   hasRequiredPermissions,
   refreshPermissions,
@@ -15,7 +19,10 @@ import { windowConfigs } from './windowConfigs'
 const isDev = !app.isPackaged
 let mainWin: BrowserWindow | null = null
 let recorderBarWin: BrowserWindow | null = null
+let cameraWin: BrowserWindow | null = null
 let permissionWin: BrowserWindow | null = null
+let pendingCameraDeviceId: string | null = null
+let cameraRendererReady = false
 const DEV_URL = 'http://localhost:3000'
 const OUT_DIR = path.resolve(__dirname, '..', 'out')
 const SHARED_WEB_PREFERENCES = {
@@ -112,6 +119,114 @@ function hideRecorderBarWindow(): void {
   }
 }
 
+function hideCameraWindow(): void {
+  pendingCameraDeviceId = null
+  // Don't reset cameraRendererReady here - the renderer component doesn't re-mount
+  // when the window is shown again, so it won't call signalReady() a second time.
+  stopNativeCameraPreview()
+  if (cameraWin && !cameraWin.isDestroyed()) {
+    cameraWin.hide()
+  }
+}
+
+function closeCameraWindow(): void {
+  pendingCameraDeviceId = null
+  cameraRendererReady = false
+  stopNativeCameraPreview()
+  if (cameraWin && !cameraWin.isDestroyed()) {
+    cameraWin.close()
+  }
+  cameraWin = null
+}
+
+function startCameraPreviewForCurrentWindow(deviceId: string): void {
+  startNativeCameraPreview(deviceId, {
+    getCameraWindow: () => cameraWin,
+    onStartError: (message) => {
+      const win = cameraWin
+      if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+        win.webContents.send('cameraPreview:error', message)
+      }
+    },
+  })
+}
+
+function showCameraWindow(deviceId: string): void {
+  if (!hasRequiredPermissions()) return
+  pendingCameraDeviceId = deviceId
+  if (!cameraWin || cameraWin.isDestroyed()) {
+    cameraRendererReady = false
+    createCameraWindow()
+  } else if (!cameraWin.isVisible()) {
+    cameraWin.show()
+    // Preview was stopped when window was hidden; restart it.
+    if (cameraRendererReady) {
+      startCameraPreviewForCurrentWindow(deviceId)
+    }
+  }
+  if (cameraRendererReady) {
+    console.log('[cameraPreview/main] renderer ready, starting preview immediately', { deviceId })
+    startCameraPreviewForCurrentWindow(deviceId)
+  } else {
+    console.log('[cameraPreview/main] deferring preview until renderer signals ready', { deviceId })
+  }
+}
+
+function createCameraWindow(): void {
+  if (cameraWin && !cameraWin.isDestroyed()) {
+    if (!cameraWin.isVisible()) cameraWin.show()
+    return
+  }
+
+  const { x: workX, y: workY, height: workH } = screen.getPrimaryDisplay().workArea
+  const winH = windowConfigs.cameraWin.height ?? 240
+  const margin = 20
+  const x = workX + margin
+  const y = workY + workH - winH - margin
+
+  cameraWin = new BrowserWindow({
+    x,
+    y,
+    ...windowConfigs.cameraWin,
+    webPreferences: SHARED_WEB_PREFERENCES,
+  })
+
+  cameraWin.setAlwaysOnTop(true, 'floating')
+  cameraWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  cameraWin.setAspectRatio(1)
+  if (process.platform === 'darwin') {
+    cameraWin.setWindowButtonVisibility(false)
+  }
+  hardenWebContents(cameraWin)
+  cameraWin.once('ready-to-show', () => {
+    cameraWin?.show()
+  })
+  cameraWin.webContents.on('did-finish-load', () => {
+    console.log('[cameraPreview/main] camera window did-finish-load', {
+      url: cameraWin?.webContents.getURL(),
+    })
+  })
+  cameraWin.webContents.on('did-fail-load', (_event, errorCode, errorDescription, url) => {
+    console.error('[cameraPreview/main] camera window did-fail-load', {
+      errorCode,
+      errorDescription,
+      url,
+    })
+  })
+  cameraWin.on('closed', () => {
+    cameraWin = null
+    cameraRendererReady = false
+    pendingCameraDeviceId = null
+    stopNativeCameraPreview()
+  })
+
+  if (isDev) {
+    cameraWin.webContents.openDevTools({ mode: 'detach' })
+  }
+
+  loadAppRoute(cameraWin, '/camera/')
+}
+
 function hideNonPermissionWindows(): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (permissionWin && win.id === permissionWin.id) continue
@@ -135,7 +250,8 @@ function loadAppRoute(win: BrowserWindow, route: string): void {
     return
   }
 
-  const routePath = route.replace(/^\/+/, '')
+  // Normalize route: strip leading/trailing slashes for consistent path construction
+  const routePath = route.replace(/^\/+|\/+$/g, '')
   const target = routePath ? `app://./${routePath}/index.html` : 'app://./index.html'
   void win.loadURL(target)
 }
@@ -193,7 +309,7 @@ function createPermissionWindow(): void {
     stopPermissionPolling()
   })
 
-  loadAppRoute(permissionWin, '/permissions')
+  loadAppRoute(permissionWin, '/permissions/')
   focusWindow(permissionWin)
   hideNonPermissionWindows()
   startPermissionPolling()
@@ -222,6 +338,7 @@ function showPermissionGate(reason: string): void {
   } else {
     hideMainWindow()
     hideRecorderBarWindow()
+    hideCameraWindow()
     hideNonPermissionWindows()
     createPermissionWindow()
   }
@@ -239,8 +356,7 @@ function createRecorderBarWindow(): void {
   }
 
   if (recorderBarWin && !recorderBarWin.isDestroyed()) {
-    recorderBarWin.show()
-    recorderBarWin.focus()
+    focusWindow(recorderBarWin)
     return
   }
 
@@ -263,10 +379,15 @@ function createRecorderBarWindow(): void {
     recorderBarWin.setWindowButtonVisibility(false)
   }
   hardenWebContents(recorderBarWin)
-  recorderBarWin.once('ready-to-show', () => recorderBarWin?.show())
-  recorderBarWin.on('closed', () => { recorderBarWin = null })
+  recorderBarWin.once('ready-to-show', () => {
+    if (recorderBarWin) focusWindow(recorderBarWin)
+  })
+  recorderBarWin.on('closed', () => {
+    recorderBarWin = null
+    closeCameraWindow()
+  })
 
-  loadAppRoute(recorderBarWin, '/recorder')
+  loadAppRoute(recorderBarWin, '/recorder/')
 }
 
 app.whenReady().then(() => {
@@ -286,14 +407,39 @@ app.whenReady().then(() => {
     })
   }
 
-  registerMacAddonHandlers()
+  ipcMain.handle('cameraPreview:rendererReady', (event) => {
+    const senderWin = BrowserWindow.fromWebContents(event.sender)
+    const isCameraWindow = senderWin != null && cameraWin != null && senderWin.id === cameraWin.id
+    console.log('[cameraPreview/main] renderer signaled ready', {
+      isCameraWindow,
+      pendingDeviceId: pendingCameraDeviceId,
+    })
+    if (!isCameraWindow) return false
+    cameraRendererReady = true
+    if (pendingCameraDeviceId) {
+      const deviceId = pendingCameraDeviceId
+      console.log('[cameraPreview/main] starting deferred preview', { deviceId })
+      startCameraPreviewForCurrentWindow(deviceId)
+    }
+    return true
+  })
+
+  registerMacAddonHandlers({ getRecorderWindow: () => recorderBarWin })
   registerPermissionHandlers({
     openPermissionWindow: createPermissionWindow,
     closePermissionWindow,
     ensureRecorderBarWindow: showRecorderWindowOnly,
+    getPermissionWindow: () => permissionWin,
   })
   registerRecorderHandlers({
     getRecorderWindow: () => recorderBarWin,
+    onCameraSelectionChanged: (deviceId) => {
+      if (deviceId) {
+        showCameraWindow(deviceId)
+      } else {
+        hideCameraWindow()
+      }
+    },
   })
   showPermissionGate('startup')
 
@@ -305,6 +451,11 @@ app.whenReady().then(() => {
       createPermissionWindow()
     }
   })
+})
+
+app.on('before-quit', () => {
+  stopNativeCameraPreview()
+  disposeMacAddon()
 })
 
 app.on('window-all-closed', () => {
