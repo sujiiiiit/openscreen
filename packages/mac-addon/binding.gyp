@@ -3,7 +3,19 @@
     {
       "target_name": "mac_addon",
       "sources": [
-        "src/addon.mm"
+        "src/Common.mm",
+        "src/Events.mm",
+        "src/Permissions.mm",
+        "src/Devices.mm",
+        "src/MediaFileWriter.mm",
+        "src/ScreenTrack.mm",
+        "src/CameraTrack.mm",
+        "src/SystemAudioTrack.mm",
+        "src/MicrophoneTrack.mm",
+        "src/CameraPreview.mm",
+        "src/RecorderSession.mm",
+        "src/RecordingWorkers.mm",
+        "src/Bindings.mm"
       ],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")"
