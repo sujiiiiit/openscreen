@@ -225,6 +225,7 @@ export declare function requestPermissions(
   kinds: PermissionKind[],
 ): Promise<Record<PermissionKind, PermissionState>>
 export declare function listShareableContent(): Promise<ShareableContent>
+export declare function listVisibleWindows(includeIcons?: boolean): WindowSource[]
 export declare function getWindowUnderCursor(includeIcon?: boolean): WindowSource | null
 export declare function getDisplayUnderCursor(): DisplaySource | null
 export declare function listCameras(): CameraDevice[]
@@ -258,6 +259,7 @@ declare const _default: {
   getPermissions: typeof getPermissions
   requestPermissions: typeof requestPermissions
   listShareableContent: typeof listShareableContent
+  listVisibleWindows: typeof listVisibleWindows
   getWindowUnderCursor: typeof getWindowUnderCursor
   getDisplayUnderCursor: typeof getDisplayUnderCursor
   listCameras: typeof listCameras

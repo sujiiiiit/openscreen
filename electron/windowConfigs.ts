@@ -114,9 +114,13 @@ if (process.platform === 'darwin') {
   // Space where it was first shown. window-picker.ts also drives the full
   // collectionBehavior mask via addon.pinWindowAcrossSpaces() after
   // setAlwaysOnTop, since AppKit clears that mask on level changes,
-  // setBounds, and some show/hide transitions. Leaving the panel focusable
+  // setBounds, and some show/hide transitions. Leaving these panels focusable
   // matters: a non-focusable NSPanel doesn't always get full Space-routing
-  // treatment from AppKit; clicks are gated via setIgnoreMouseEvents instead.
+  // treatment from AppKit. The picker gates clicks via setIgnoreMouseEvents;
+  // recorder, recording controls, and camera keep normal click handling.
+  recorderBarBase.type = 'panel'
+  recordingControlsBase.type = 'panel'
+  cameraBase.type = 'panel'
   windowPickerBase.type = 'panel'
 }
 

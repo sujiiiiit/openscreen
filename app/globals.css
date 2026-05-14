@@ -153,3 +153,9 @@ html:has([data-window="window-picker"]) body {
   height: 100%;
   overflow: hidden;
 }
+
+[data-window="window-picker"],
+[data-window="window-picker"] * {
+  transition-delay: 0ms !important;
+  transition-duration: 0ms !important;
+}

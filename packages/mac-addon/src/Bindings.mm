@@ -167,6 +167,43 @@ static bool IsIgnoredBundleIdentifier(NSString *bundleIdentifier) {
   return [ignoredBundles containsObject:bundleIdentifier];
 }
 
+static bool PickableWindowInfo(NSDictionary *windowInfo,
+                               pid_t ownPid,
+                               NSString *ownBundleId,
+                               CGRect *outBounds) {
+  NSNumber *windowNumber = windowInfo[(id)kCGWindowNumber];
+  NSNumber *layer = windowInfo[(id)kCGWindowLayer];
+  NSNumber *ownerPid = windowInfo[(id)kCGWindowOwnerPID];
+  NSNumber *alpha = windowInfo[(id)kCGWindowAlpha];
+  if (!windowNumber || !layer || layer.integerValue != 0) return false;
+
+  pid_t pid = ownerPid ? ownerPid.intValue : 0;
+  if (pid == ownPid) return false;
+  if (alpha && alpha.doubleValue <= 0.05) return false;
+
+  CGRect bounds = CGRectZero;
+  if (!CGRectFromWindowDictionary(windowInfo, &bounds)) return false;
+  if (bounds.size.width < 320 || bounds.size.height < 220) return false;
+
+  NSRunningApplication *app =
+      pid > 0 ? [NSRunningApplication runningApplicationWithProcessIdentifier:pid] : nil;
+  NSString *bundleIdentifier = app.bundleIdentifier ?: @"";
+  if (ownBundleId.length > 0 && [bundleIdentifier isEqualToString:ownBundleId]) {
+    return false;
+  }
+  if (IsIgnoredBundleIdentifier(bundleIdentifier)) return false;
+
+  if (outBounds) *outBounds = bounds;
+  return true;
+}
+
+static NSArray *CopyOnScreenWindowInfo() {
+  CFArrayRef rawWindows = CGWindowListCopyWindowInfo(
+      kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+      kCGNullWindowID);
+  return CFBridgingRelease(rawWindows);
+}
+
 static Napi::Value GetWindowUnderCursor(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
   if (!CGPreflightScreenCaptureAccess()) {
@@ -179,35 +216,16 @@ static Napi::Value GetWindowUnderCursor(const Napi::CallbackInfo &info) {
   }
 
   CGPoint cursor = CurrentCursorPoint();
-  CFArrayRef rawWindows = CGWindowListCopyWindowInfo(
-      kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
-      kCGNullWindowID);
-  NSArray *windows = CFBridgingRelease(rawWindows);
+  NSArray *windows = CopyOnScreenWindowInfo();
   pid_t ownPid = getpid();
+  NSString *ownBundleId = [[NSBundle mainBundle] bundleIdentifier];
   NSDictionary *candidateWindowInfo = nil;
   CGRect candidateBounds = CGRectNull;
 
   for (NSDictionary *windowInfo in windows) {
-    NSNumber *windowNumber = windowInfo[(id)kCGWindowNumber];
-    NSNumber *layer = windowInfo[(id)kCGWindowLayer];
-    NSNumber *ownerPid = windowInfo[(id)kCGWindowOwnerPID];
-    NSNumber *alpha = windowInfo[(id)kCGWindowAlpha];
-    if (!windowNumber || !layer || layer.integerValue != 0) continue;
-    pid_t pid = ownerPid ? ownerPid.intValue : 0;
-    if (pid == ownPid) continue;
-    if (alpha && alpha.doubleValue <= 0.05) continue;
-
     CGRect bounds = CGRectZero;
-    if (!CGRectFromWindowDictionary(windowInfo, &bounds)) continue;
-    if (bounds.size.width < 320 || bounds.size.height < 220) continue;
+    if (!PickableWindowInfo(windowInfo, ownPid, ownBundleId, &bounds)) continue;
     if (!CGRectContainsPoint(bounds, cursor)) continue;
-
-    NSRunningApplication *app =
-        pid > 0 ? [NSRunningApplication runningApplicationWithProcessIdentifier:pid] : nil;
-    NSString *bundleIdentifier = app.bundleIdentifier ?: @"";
-    NSString *ownBundleId = [[NSBundle mainBundle] bundleIdentifier];
-    if (ownBundleId.length > 0 && [bundleIdentifier isEqualToString:ownBundleId]) continue;
-    if (IsIgnoredBundleIdentifier(bundleIdentifier)) continue;
 
     candidateWindowInfo = windowInfo;
     candidateBounds = bounds;
@@ -216,6 +234,32 @@ static Napi::Value GetWindowUnderCursor(const Napi::CallbackInfo &info) {
 
   if (!candidateWindowInfo) return env.Null();
   return WindowSourceToNapi(env, candidateWindowInfo, candidateBounds, includeIcon);
+}
+
+static Napi::Value ListVisibleWindows(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  Napi::Array result = Napi::Array::New(env);
+  if (!CGPreflightScreenCaptureAccess()) {
+    return result;
+  }
+
+  bool includeIcons = false;
+  if (info.Length() > 0 && info[0].IsBoolean()) {
+    includeIcons = info[0].As<Napi::Boolean>().Value();
+  }
+
+  NSArray *windows = CopyOnScreenWindowInfo();
+  pid_t ownPid = getpid();
+  NSString *ownBundleId = [[NSBundle mainBundle] bundleIdentifier];
+  uint32_t index = 0;
+
+  for (NSDictionary *windowInfo in windows) {
+    CGRect bounds = CGRectZero;
+    if (!PickableWindowInfo(windowInfo, ownPid, ownBundleId, &bounds)) continue;
+    result.Set(index++, WindowSourceToNapi(env, windowInfo, bounds, includeIcons));
+  }
+
+  return result;
 }
 
 static Napi::Value GetDisplayUnderCursor(const Napi::CallbackInfo &info) {
@@ -577,6 +621,7 @@ static Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("getPermissions", Napi::Function::New(env, GetPermissions));
   exports.Set("requestPermissions", Napi::Function::New(env, RequestPermissions));
   exports.Set("listShareableContent", Napi::Function::New(env, ListShareableContent));
+  exports.Set("listVisibleWindows", Napi::Function::New(env, ListVisibleWindows));
   exports.Set("getWindowUnderCursor", Napi::Function::New(env, GetWindowUnderCursor));
   exports.Set("getDisplayUnderCursor", Napi::Function::New(env, GetDisplayUnderCursor));
   exports.Set("listCameras", Napi::Function::New(env, ListCameras));

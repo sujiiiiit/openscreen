@@ -1,4 +1,5 @@
 import { app, BrowserWindow, nativeTheme, net, protocol, screen, session, shell } from 'electron'
+import addon from '@openscreen/mac-addon'
 import * as path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
@@ -24,6 +25,7 @@ import {
   startWindowPicker,
   cancelWindowPicker,
 } from './ipc/window-picker'
+import { subscribeActiveSpaceChange } from './mac-spaces'
 import { windowConfigs } from './windowConfigs'
 
 const isDev = !app.isPackaged
@@ -36,6 +38,17 @@ let activeCameraDeviceId: string | null = null
 const fixedWindowSizeEnforcers = new WeakMap<BrowserWindow, () => void>()
 const DEV_URL = 'http://localhost:3535'
 const OUT_DIR = path.resolve(__dirname, '..', 'out')
+type AlwaysOnTopLevel = NonNullable<Parameters<BrowserWindow['setAlwaysOnTop']>[1]>
+interface WorkspacePinOptions {
+  level?: AlwaysOnTopLevel
+  relativeLevel?: number
+}
+
+const workspacePinnedWindows = new Map<BrowserWindow, WorkspacePinOptions>()
+const workspacePinCleanups = new WeakMap<BrowserWindow, () => void>()
+const workspacePinTimers = new WeakMap<BrowserWindow, ReturnType<typeof setTimeout>>()
+let unsubscribeLiveWindowSpaceChange: (() => void) | null = null
+
 const SHARED_WEB_PREFERENCES = {
   preload: path.join(__dirname, 'preload.js'),
   contextIsolation: true,
@@ -138,11 +151,7 @@ function hideRecorderBarWindow(): void {
 }
 
 function hideCameraWindow(): void {
-  activeCameraDeviceId = null
-  stopNativeCameraPreview()
-  if (cameraWin && !cameraWin.isDestroyed()) {
-    cameraWin.hide()
-  }
+  closeCameraWindow()
 }
 
 function closeCameraWindow(): void {
@@ -181,8 +190,7 @@ function showCameraWindow(deviceId: string): void {
 
 function createCameraWindow(deviceId: string): void {
   if (cameraWin && !cameraWin.isDestroyed()) {
-    cameraWin.setAlwaysOnTop(true, 'screen-saver', 2)
-    keepWindowOnEveryWorkspace(cameraWin)
+    keepWindowOnEveryWorkspace(cameraWin, { level: 'screen-saver', relativeLevel: 2 })
     if (!cameraWin.isVisible()) cameraWin.show()
     startCameraPreviewForCurrentWindow(deviceId)
     return
@@ -201,8 +209,7 @@ function createCameraWindow(deviceId: string): void {
     webPreferences: SHARED_WEB_PREFERENCES,
   })
 
-  cameraWin.setAlwaysOnTop(true, 'screen-saver', 2)
-  keepWindowOnEveryWorkspace(cameraWin)
+  keepWindowOnEveryWorkspace(cameraWin, { level: 'screen-saver', relativeLevel: 2 })
   cameraWin.setAspectRatio(1)
   if (process.platform === 'darwin') {
     cameraWin.setWindowButtonVisibility(false)
@@ -258,13 +265,106 @@ function focusWindow(win: BrowserWindow): void {
   win.moveTop()
 }
 
-function keepWindowOnEveryWorkspace(win: BrowserWindow): void {
-  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+function applyWindowWorkspacePin(
+  win: BrowserWindow,
+  options: WorkspacePinOptions,
+): void {
+  if (win.isDestroyed()) return
+
+  if (options.level) {
+    win.setAlwaysOnTop(true, options.level, options.relativeLevel ?? 0)
+  }
+  win.setVisibleOnAllWorkspaces(true, {
+    visibleOnFullScreen: true,
+    skipTransformProcessType: true,
+  })
+  if (process.platform === 'darwin' && typeof addon.pinWindowAcrossSpaces === 'function') {
+    try {
+      addon.pinWindowAcrossSpaces(win.getNativeWindowHandle())
+    } catch {
+      // Native handles can disappear while Electron is tearing a window down.
+    }
+  }
+  if (win.isVisible()) {
+    win.moveTop()
+  }
+}
+
+function scheduleWindowWorkspacePin(win: BrowserWindow): void {
+  const options = workspacePinnedWindows.get(win)
+  if (!options || win.isDestroyed()) return
+
+  const existingTimer = workspacePinTimers.get(win)
+  if (existingTimer) clearTimeout(existingTimer)
+
+  const timer = setTimeout(() => {
+    workspacePinTimers.delete(win)
+    const latestOptions = workspacePinnedWindows.get(win)
+    if (latestOptions) applyWindowWorkspacePin(win, latestOptions)
+  }, 0)
+  workspacePinTimers.set(win, timer)
+}
+
+function ensureLiveWindowSpaceTracking(): void {
+  if (unsubscribeLiveWindowSpaceChange || process.platform !== 'darwin') return
+  unsubscribeLiveWindowSpaceChange = subscribeActiveSpaceChange(() => {
+    for (const win of workspacePinnedWindows.keys()) {
+      if (win.isDestroyed()) {
+        workspacePinnedWindows.delete(win)
+        continue
+      }
+      scheduleWindowWorkspacePin(win)
+    }
+    releaseLiveWindowSpaceTrackingIfIdle()
+  })
+}
+
+function releaseLiveWindowSpaceTrackingIfIdle(): void {
+  if (workspacePinnedWindows.size > 0) return
+  unsubscribeLiveWindowSpaceChange?.()
+  unsubscribeLiveWindowSpaceChange = null
+}
+
+function watchWorkspacePinnedWindow(win: BrowserWindow): void {
+  if (workspacePinCleanups.has(win)) return
+
+  const contents = win.webContents
+  const reapply = () => scheduleWindowWorkspacePin(win)
+  const cleanup = () => {
+    win.off('show', reapply)
+    win.off('move', reapply)
+    win.off('resize', reapply)
+    if (!contents.isDestroyed()) {
+      contents.off('did-finish-load', reapply)
+    }
+    workspacePinnedWindows.delete(win)
+    const timer = workspacePinTimers.get(win)
+    if (timer) clearTimeout(timer)
+    workspacePinTimers.delete(win)
+    workspacePinCleanups.delete(win)
+    releaseLiveWindowSpaceTrackingIfIdle()
+  }
+
+  workspacePinCleanups.set(win, cleanup)
+  win.on('show', reapply)
+  win.on('move', reapply)
+  win.on('resize', reapply)
+  contents.on('did-finish-load', reapply)
+  win.once('closed', cleanup)
+}
+
+function keepWindowOnEveryWorkspace(
+  win: BrowserWindow,
+  options: WorkspacePinOptions = {},
+): void {
+  workspacePinnedWindows.set(win, options)
+  watchWorkspacePinnedWindow(win)
+  ensureLiveWindowSpaceTracking()
+  applyWindowWorkspacePin(win, options)
 }
 
 function keepRecorderBarOnTop(win: BrowserWindow): void {
-  win.setAlwaysOnTop(true, 'screen-saver', 3)
-  keepWindowOnEveryWorkspace(win)
+  keepWindowOnEveryWorkspace(win, { level: 'screen-saver', relativeLevel: 3 })
 }
 
 function enforceFixedWindowSize(win: BrowserWindow, width: number, height: number): void {
@@ -328,8 +428,7 @@ function createPermissionWindow(): void {
     webPreferences: SHARED_WEB_PREFERENCES,
   })
 
-  permissionWin.setAlwaysOnTop(true, 'modal-panel')
-  keepWindowOnEveryWorkspace(permissionWin)
+  keepWindowOnEveryWorkspace(permissionWin, { level: 'modal-panel' })
   if (process.platform === 'darwin') {
     permissionWin.setWindowButtonVisibility(false)
   }
@@ -522,7 +621,7 @@ app.whenReady().then(() => {
   registerRecorderHandlers({
     getRecorderWindow: () => recorderBarWin,
     getControlsWindow: () => recordingControlsWin,
-    onCameraSelectionChanged: (deviceId) => {
+    onCameraPreviewChanged: (deviceId) => {
       if (deviceId) {
         showCameraWindow(deviceId)
       } else {

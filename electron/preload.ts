@@ -20,6 +20,8 @@ const api = {
     getState: (): Promise<RecorderState> => ipcRenderer.invoke('recorder:getState'),
     showInputMenu: (kind: RecorderInputKind, anchor: RecorderMenuAnchor) =>
       ipcRenderer.invoke('recorder:showInputMenu', kind, anchor),
+    showSettingsMenu: (anchor: RecorderMenuAnchor): Promise<RecorderState> =>
+      ipcRenderer.invoke('recorder:showSettingsMenu', anchor),
     startPicker: (mode: RecorderPickerMode): Promise<RecorderState> =>
       ipcRenderer.invoke('recorder:startPicker', mode),
     cancelPicker: (): Promise<RecorderState> => ipcRenderer.invoke('recorder:cancelPicker'),
@@ -27,6 +29,8 @@ const api = {
     stop: (): Promise<RecorderState> => ipcRenderer.invoke('recorder:stop'),
     pause: (): Promise<RecorderState> => ipcRenderer.invoke('recorder:pause'),
     resume: (): Promise<RecorderState> => ipcRenderer.invoke('recorder:resume'),
+    restart: (): Promise<RecorderState> => ipcRenderer.invoke('recorder:restart'),
+    delete: (): Promise<RecorderState> => ipcRenderer.invoke('recorder:delete'),
     close: (): Promise<void> => ipcRenderer.invoke('recorder:close'),
     onChanged: (callback: (state: RecorderState) => void) =>
       subscribe<RecorderState>('recorder:changed', callback),

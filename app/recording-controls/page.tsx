@@ -2,9 +2,14 @@
 
 import { useEffect, useState } from "react"
 import { HugeiconsIcon } from "@hugeicons/react"
-import { PauseIcon, PlayIcon, StopIcon } from "@hugeicons/core-free-icons"
+import {
+  Delete02Icon,
+  PauseIcon,
+  PlayIcon,
+  RedoIcon,
+  StopIcon,
+} from "@hugeicons/core-free-icons"
 import { Button } from "@/components/ui/button"
-import { Spinner } from "@/components/ui/spinner"
 import { DRAG, NO_DRAG } from "@/lib/window-drag"
 import type { RecorderState } from "@/types/api"
 
@@ -16,6 +21,7 @@ const EMPTY_STATE: RecorderState = {
     microphoneLabel: "No microphone",
     cameraDeviceId: null,
     cameraLabel: "No camera",
+    hideCameraPreview: false,
   },
   sessionId: null,
   outputDir: null,
@@ -47,6 +53,10 @@ function computeElapsed(state: RecorderState, now: number): number {
   return Math.max(0, elapsedWall - state.pausedMs)
 }
 
+function Separator() {
+  return <div className="mx-2 h-5 w-px shrink-0 bg-border" aria-hidden="true" />
+}
+
 export default function RecordingControlsPage() {
   const [state, setState] = useState<RecorderState>(EMPTY_STATE)
   const [now, setNow] = useState(() => Date.now())
@@ -58,16 +68,14 @@ export default function RecordingControlsPage() {
   }, [])
 
   // Tick the displayed timer 4x/s while actively recording. When paused, the
-  // tick still runs but computeElapsed ignores the wall-clock advance because
-  // pausedMs grows in lockstep on the main process side, so the displayed
-  // value freezes.
+  // interval stops and the last tick value freezes the displayed duration.
   useEffect(() => {
     if (state.status !== "recording") return undefined
     const id = setInterval(() => setNow(Date.now()), 250)
     return () => clearInterval(id)
   }, [state.status])
 
-  const elapsed = computeElapsed(state, state.status === "paused" ? Date.now() : now)
+  const elapsed = computeElapsed(state, now)
   const isPaused = state.status === "paused"
   const isBusy = state.status === "starting" || state.status === "stopping"
 
@@ -85,30 +93,47 @@ export default function RecordingControlsPage() {
     }
   }
 
+  async function handleRestart() {
+    if (!window.api?.recorder || isBusy) return
+    setState(await window.api.recorder.restart())
+  }
+
+  async function handleDelete() {
+    if (!window.api?.recorder || isBusy) return
+    setState(await window.api.recorder.delete())
+  }
+
   return (
     <div
       data-window="recording-controls"
       className="flex h-13 w-full items-center justify-center overflow-hidden"
       style={DRAG}
     >
-      <div className="flex h-full w-full items-center gap-2 px-3 select-none">
-        <div
-          className="flex items-center gap-2 font-mono text-sm tabular-nums text-foreground"
-          aria-live="polite"
-          aria-label={`Recording duration ${formatElapsed(elapsed)}`}
-        >
-          <span
-            className={
-              isPaused
-                ? "size-2 rounded-full bg-amber-400"
-                : "size-2 rounded-full bg-red-500 animate-pulse"
-            }
-            aria-hidden="true"
-          />
-          <span>{formatElapsed(elapsed)}</span>
+      <div className="flex h-full w-full items-center px-2 select-none">
+        <div className="flex items-center" style={NO_DRAG}>
+          <Button
+            variant="destructive-ghost"
+            size="sm"
+            className="min-w-20 gap-2 px-2 text-sm tabular-nums"
+            onClick={handleStop}
+            disabled={isBusy}
+            aria-live="polite"
+            aria-label={`Recording duration ${formatElapsed(elapsed)}`}
+            title={state.lastError ?? "Stop and save recording"}
+          >
+            <HugeiconsIcon
+              icon={StopIcon}
+              size={16}
+              color="currentColor"
+              fill="currentColor"
+            />
+            <span>{formatElapsed(elapsed)}</span>
+          </Button>
         </div>
 
-        <div className="ml-auto flex items-center gap-1" style={NO_DRAG}>
+        <Separator />
+
+        <div className="flex items-center gap-1" style={NO_DRAG}>
           <Button
             variant="ghost"
             size="icon"
@@ -122,23 +147,29 @@ export default function RecordingControlsPage() {
               icon={isPaused ? PlayIcon : PauseIcon}
               size={16}
               color="currentColor"
+              fill="currentColor"
             />
           </Button>
           <Button
-            variant="destructive"
-            size="xs"
-            className="gap-1.5 text-xs"
-            onClick={handleStop}
+            variant="ghost"
+            size="icon"
+            className="hover:bg-white/20 dark:hover:bg-white/5"
+            onClick={handleRestart}
             disabled={isBusy}
-            aria-label="Stop recording"
-            title={state.lastError ?? "Stop recording"}
+            aria-label="Restart recording"
+            title="Restart recording"
           >
-            {isBusy ? (
-              <Spinner size={14} className="text-current" />
-            ) : (
-              <HugeiconsIcon icon={StopIcon} size={14} color="currentColor" />
-            )}
-            <span>Stop</span>
+            <HugeiconsIcon icon={RedoIcon} size={16} color="currentColor" />
+          </Button>
+          <Button
+            variant="destructive-ghost"
+            size="icon"
+            onClick={handleDelete}
+            disabled={isBusy}
+            aria-label="Delete recording"
+            title="Delete recording"
+          >
+            <HugeiconsIcon icon={Delete02Icon} size={16} color="currentColor" />
           </Button>
         </div>
       </div>

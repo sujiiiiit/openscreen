@@ -13,6 +13,7 @@ import addon, {
   type CaptureTarget,
   type WindowSource,
 } from '@openscreen/mac-addon'
+import { subscribeActiveSpaceChange } from '../mac-spaces'
 import { windowConfigs } from '../windowConfigs'
 import type { RecorderPickerMode } from './recorder'
 
@@ -42,7 +43,8 @@ const CONTROL_ZONE_WIDTH = 420
 const CONTROL_ZONE_TOP_OFFSET = 18
 const CONTROL_ZONE_HEIGHT = 205
 const PICKER_POLL_INTERVAL_MS = 32
-const STATIONARY_REVALIDATE_MS = 300
+const STATIONARY_REVALIDATE_MS = 450
+const WINDOW_SNAPSHOT_REFRESH_MS = 250
 
 let options: RegisterWindowPickerOptions | null = null
 let overlayWin: BrowserWindow | null = null
@@ -52,14 +54,18 @@ let activeTarget: ActivePickerTarget | null = null
 let lastTargetKey = ''
 let lastCursorKey = ''
 let lastResolvedAt = 0
+let windowSnapshot: WindowSource[] = []
+let windowSnapshotUpdatedAt = 0
 let cachedVirtualBounds: Rectangle | null = null
 let overlayBoundsDirty = true
 let overlayIgnoresMouse: boolean | null = null
 let confirming = false
 let displayListenersRegistered = false
 let spaceChangeRegistered = false
+let unsubscribeSpaceChange: (() => void) | null = null
 
 const windowIconCache = new Map<number, string | null>()
+const pendingWindowIconFetches = new Set<number>()
 
 function roundedBounds(bounds: Rectangle): Rectangle {
   return {
@@ -79,6 +85,13 @@ function pointForBounds(bounds: Rectangle): Point {
     x: Math.round(bounds.x + bounds.width / 2),
     y: Math.round(bounds.y + bounds.height / 2),
   }
+}
+
+function pointInBounds(point: Point, bounds: Rectangle): boolean {
+  return point.x >= bounds.x &&
+    point.x <= bounds.x + bounds.width &&
+    point.y >= bounds.y &&
+    point.y <= bounds.y + bounds.height
 }
 
 function displayForBounds(bounds: Rectangle): Display {
@@ -155,8 +168,7 @@ function windowPickerTarget(source: WindowSource): ActivePickerTarget {
   }
 }
 
-function displayPickerTarget(): ActivePickerTarget {
-  const cursor = screen.getCursorScreenPoint()
+function displayPickerTarget(cursor = screen.getCursorScreenPoint()): ActivePickerTarget {
   const electronDisplay = screen.getDisplayNearestPoint(cursor)
   const bounds = displayBounds(electronDisplay)
   const width = Math.round(bounds.width * electronDisplay.scaleFactor)
@@ -186,6 +198,20 @@ function targetKey(target: ActivePickerTarget): string {
     ? target.target.windowId
     : target.target.displayId
   return `${target.mode}:${id}:${boundsKey(target.bounds)}:${target.sizeLabel}`
+}
+
+function sameWindowTarget(
+  target: ActivePickerTarget | null,
+  source: WindowSource,
+): boolean {
+  return target?.target.type === 'window' &&
+    target.target.windowId === source.windowId &&
+    target.target.processId === source.processId
+}
+
+function sameWindowSource(source: WindowSource, candidate: WindowSource): boolean {
+  return source.windowId === candidate.windowId &&
+    source.processId === candidate.processId
 }
 
 function targetPayload(target: ActivePickerTarget): PickerOverlayTarget {
@@ -245,6 +271,7 @@ function syncOverlayBounds(overlay: BrowserWindow): void {
 
 function markOverlayBoundsDirty(): void {
   cachedVirtualBounds = null
+  invalidateWindowSnapshot()
   overlayBoundsDirty = true
   const overlay = overlayWin
   if (!overlay || overlay.isDestroyed()) return
@@ -332,12 +359,6 @@ function pickerOverlay(): BrowserWindow {
   return createOverlay()
 }
 
-function hideOverlay(overlay: BrowserWindow): void {
-  if (overlay.isDestroyed()) return
-  setOverlayIgnoresMouse(overlay, true)
-  if (overlay.isVisible()) overlay.hide()
-}
-
 function clearOverlayTarget(): void {
   activeTarget = null
   lastTargetKey = ''
@@ -347,14 +368,26 @@ function clearOverlayTarget(): void {
   overlay.webContents.send('windowPicker:targetChanged', null)
 }
 
-function hideAllOverlays({ resetTracking = true } = {}): void {
+function resetPickerTracking({ resetCursor = true } = {}): void {
   activeTarget = null
   lastTargetKey = ''
-  if (resetTracking) {
+  invalidateWindowSnapshot()
+  if (resetCursor) {
     lastCursorKey = ''
     lastResolvedAt = 0
   }
-  if (overlayWin) hideOverlay(overlayWin)
+}
+
+function destroyOverlay(): void {
+  const overlay = overlayWin
+  overlayWin = null
+  overlayIgnoresMouse = null
+  resetPickerTracking()
+  if (!overlay || overlay.isDestroyed()) return
+
+  setOverlayIgnoresMouse(overlay, true)
+  overlay.destroy()
+  overlayIgnoresMouse = null
 }
 
 function showTarget(target: ActivePickerTarget): void {
@@ -372,8 +405,9 @@ function showTarget(target: ActivePickerTarget): void {
   }
 
   const nextKey = targetKey(target)
+  const iconChanged = activeTarget?.iconDataUrl !== target.iconDataUrl
   activeTarget = target
-  if (nextKey !== lastTargetKey) {
+  if (nextKey !== lastTargetKey || iconChanged) {
     lastTargetKey = nextKey
     overlay.webContents.send('windowPicker:targetChanged', targetPayload(target))
   }
@@ -383,9 +417,11 @@ function handleActiveSpaceChanged(): void {
   if (!pickerMode) return
   const overlay = overlayWin
   if (!overlay || overlay.isDestroyed()) return
+  clearOverlayTarget()
+  invalidateWindowSnapshot()
   // AppKit may have cleared the collection behavior during the Space
   // transition; re-pin before forcing a re-resolve so the overlay shows up on
-  // the new Space immediately rather than waiting for the next 300ms tick.
+  // the new Space immediately rather than waiting for the next revalidate tick.
   pinOverlayAcrossSpaces(overlay)
   if (overlay.isVisible()) overlay.moveTop()
   // Bypass the stationary-cursor cache — same screen coordinates on a new
@@ -398,13 +434,100 @@ function handleActiveSpaceChanged(): void {
 function registerSpaceChangeListener(): void {
   if (spaceChangeRegistered) return
   if (process.platform !== 'darwin') return
-  if (typeof addon.onActiveSpaceChange !== 'function') return
   spaceChangeRegistered = true
-  addon.onActiveSpaceChange(handleActiveSpaceChanged)
+  unsubscribeSpaceChange = subscribeActiveSpaceChange(handleActiveSpaceChanged)
 }
 
-function windowSourceUnderCursor(): WindowSource | null {
-  const source = addon.getWindowUnderCursor(false)
+function unregisterSpaceChangeListener(): void {
+  if (!spaceChangeRegistered) return
+  spaceChangeRegistered = false
+  unsubscribeSpaceChange?.()
+  unsubscribeSpaceChange = null
+}
+
+function sourceWithCachedIcon(source: WindowSource): WindowSource {
+  if (!source.processId) return source
+  const iconDataUrl = windowIconCache.get(source.processId)
+  return iconDataUrl ? { ...source, iconDataUrl } : source
+}
+
+function refreshWindowSnapshot({ force = false } = {}): void {
+  if (pickerMode !== 'window') return
+
+  const now = Date.now()
+  if (!force && now - windowSnapshotUpdatedAt < WINDOW_SNAPSHOT_REFRESH_MS) return
+
+  try {
+    windowSnapshot = addon.listVisibleWindows(false).map(sourceWithCachedIcon)
+  } catch {
+    windowSnapshot = []
+  }
+  windowSnapshotUpdatedAt = now
+}
+
+function invalidateWindowSnapshot(): void {
+  windowSnapshot = []
+  windowSnapshotUpdatedAt = 0
+}
+
+function hitTestWindowSnapshot(cursor: Point): WindowSource | null {
+  for (const source of windowSnapshot) {
+    if (pointInBounds(cursor, windowBounds(source))) return source
+  }
+  return null
+}
+
+function scheduleWindowIconFetch(source: WindowSource): void {
+  const processId = source.processId
+  if (!processId) return
+  if (windowIconCache.has(processId)) return
+  if (pendingWindowIconFetches.has(processId)) return
+
+  pendingWindowIconFetches.add(processId)
+  setTimeout(() => {
+    pendingWindowIconFetches.delete(processId)
+
+    const currentTarget = activeTarget
+    if (!pickerMode || confirming || !sameWindowTarget(currentTarget, source)) {
+      return
+    }
+
+    let sourceWithIcon: WindowSource | undefined
+    try {
+      sourceWithIcon = addon
+        .listVisibleWindows(true)
+        .find((candidate) => sameWindowSource(source, candidate))
+    } catch {
+      sourceWithIcon = undefined
+    }
+    const iconDataUrl = sourceWithIcon && sameWindowTarget(currentTarget, sourceWithIcon)
+      ? sourceWithIcon.iconDataUrl
+      : undefined
+    windowIconCache.set(processId, iconDataUrl ?? null)
+
+    const latestTarget = activeTarget
+    if (!iconDataUrl || !latestTarget || !sameWindowTarget(latestTarget, source)) return
+    const nextTarget: ActivePickerTarget = {
+      ...latestTarget,
+      iconDataUrl,
+    }
+    activeTarget = nextTarget
+
+    const overlay = overlayWin
+    if (!overlay || overlay.isDestroyed()) return
+    overlay.webContents.send('windowPicker:targetChanged', targetPayload(nextTarget))
+  }, 0)
+}
+
+function windowSourceUnderCursor(cursor = screen.getCursorScreenPoint()): WindowSource | null {
+  refreshWindowSnapshot()
+
+  let source = hitTestWindowSnapshot(cursor)
+  if (!source && Date.now() - windowSnapshotUpdatedAt >= WINDOW_SNAPSHOT_REFRESH_MS) {
+    refreshWindowSnapshot({ force: true })
+    source = hitTestWindowSnapshot(cursor)
+  }
+
   if (!source) return null
   if (!source.processId) return source
 
@@ -413,23 +536,24 @@ function windowSourceUnderCursor(): WindowSource | null {
     return iconDataUrl ? { ...source, iconDataUrl } : source
   }
 
-  const sourceWithIcon = addon.getWindowUnderCursor(true)
-  const iconDataUrl = sourceWithIcon?.windowId === source.windowId
-    ? sourceWithIcon.iconDataUrl
-    : undefined
-  windowIconCache.set(source.processId, iconDataUrl ?? null)
-  return iconDataUrl ? { ...source, iconDataUrl } : source
+  scheduleWindowIconFetch(source)
+  return source
 }
 
-function resolvePickerTarget(): ActivePickerTarget | null {
+function resolvePickerTarget(cursor = screen.getCursorScreenPoint()): ActivePickerTarget | null {
   if (pickerMode === 'window') {
-    const source = windowSourceUnderCursor()
+    const source = windowSourceUnderCursor(cursor)
     return source ? windowPickerTarget(source) : null
   }
   if (pickerMode === 'display') {
-    return displayPickerTarget()
+    return displayPickerTarget(cursor)
   }
   return null
+}
+
+function updateActiveTargetInteractivity(): void {
+  if (!activeTarget || !overlayWin || overlayWin.isDestroyed()) return
+  updateOverlayInteractivity(overlayWin, activeTarget)
 }
 
 function pollPickerTarget(): void {
@@ -439,16 +563,15 @@ function pollPickerTarget(): void {
   const cursorKey = `${pickerMode}:${cursor.x}:${cursor.y}`
   const now = Date.now()
   const cursorMoved = cursorKey !== lastCursorKey
+
   if (!cursorMoved && now - lastResolvedAt < STATIONARY_REVALIDATE_MS) {
-    if (activeTarget && overlayWin && !overlayWin.isDestroyed()) {
-      updateOverlayInteractivity(overlayWin, activeTarget)
-    }
+    updateActiveTargetInteractivity()
     return
   }
   lastCursorKey = cursorKey
   lastResolvedAt = now
 
-  const target = resolvePickerTarget()
+  const target = resolvePickerTarget(cursor)
   if (!target) {
     // Don't hide the overlay here — on macOS, hide+show can re-anchor the
     // window to the Space where it was first shown, which makes the window
@@ -471,13 +594,21 @@ function unregisterEscape(): void {
   }
 }
 
-function finishPicker({ restoreRecorder }: { restoreRecorder: boolean }): void {
+function finishPicker({
+  restoreRecorder,
+  notifyFinished = true,
+}: {
+  restoreRecorder: boolean
+  notifyFinished?: boolean
+}): void {
   stopPolling()
   unregisterEscape()
   pickerMode = null
   confirming = false
-  hideAllOverlays()
-  options?.onPickerFinished()
+  destroyOverlay()
+  if (notifyFinished) {
+    options?.onPickerFinished()
+  }
   if (restoreRecorder) {
     options?.showRecorderWindow()
   }
@@ -489,13 +620,14 @@ export function startWindowPicker(mode: RecorderPickerMode): void {
   }
 
   if (pickerMode) {
-    finishPicker({ restoreRecorder: false })
+    finishPicker({ restoreRecorder: false, notifyFinished: false })
   }
 
   pickerMode = mode
   confirming = false
   lastCursorKey = ''
   lastResolvedAt = 0
+  invalidateWindowSnapshot()
   overlayBoundsDirty = true
   const overlay = pickerOverlay()
   // Re-pin every session in case the overlay was first created on a different
@@ -558,9 +690,8 @@ export function registerWindowPickerHandlers(
 
 export function disposeWindowPicker(): void {
   finishPicker({ restoreRecorder: false })
-  if (overlayWin && !overlayWin.isDestroyed()) overlayWin.close()
-  overlayWin = null
-  overlayIgnoresMouse = null
+  destroyOverlay()
+  unregisterSpaceChangeListener()
   unregisterDisplayListeners()
   options = null
 }

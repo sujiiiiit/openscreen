@@ -56,6 +56,7 @@ export interface RecorderSettings {
   microphoneLabel: string
   cameraDeviceId: string | null
   cameraLabel: string
+  hideCameraPreview: boolean
 }
 
 export type RecorderStatus =
@@ -95,12 +96,15 @@ export interface Api {
       kind: RecorderInputKind,
       anchor: RecorderMenuAnchor,
     ) => Promise<RecorderState>
+    showSettingsMenu: (anchor: RecorderMenuAnchor) => Promise<RecorderState>
     startPicker: (mode: RecorderPickerMode) => Promise<RecorderState>
     cancelPicker: () => Promise<RecorderState>
     start: () => Promise<RecorderState>
     stop: () => Promise<RecorderState>
     pause: () => Promise<RecorderState>
     resume: () => Promise<RecorderState>
+    restart: () => Promise<RecorderState>
+    delete: () => Promise<RecorderState>
     close: () => Promise<void>
     onChanged: (callback: (state: RecorderState) => void) => Unsubscribe
   }

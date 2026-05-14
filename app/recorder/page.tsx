@@ -36,6 +36,7 @@ const EMPTY_STATE: RecorderState = {
     microphoneLabel: "No microphone",
     cameraDeviceId: null,
     cameraLabel: "No camera",
+    hideCameraPreview: false,
   },
   sessionId: null,
   outputDir: null,
@@ -59,6 +60,7 @@ export default function RecorderPage() {
   const [state, setState] = useState<RecorderState>(EMPTY_STATE)
 
   const canChangeInputs = state.status === "idle" && state.pickerMode === null
+  const canPickTarget = state.status === "idle"
   const canClose = state.status === "idle"
   const systemAudioLabel = state.settings.systemAudio
     ? "System audio"
@@ -87,8 +89,17 @@ export default function RecorderPage() {
     setState(next)
   }
 
-  async function startPicker(mode: RecorderPickerMode) {
+  async function showSettingsMenu(event: MouseEvent<HTMLButtonElement>) {
     if (!window.api?.recorder || !canChangeInputs) return
+    const next = await window.api.recorder.showSettingsMenu(
+      menuAnchor(event.currentTarget)
+    )
+    setState(next)
+  }
+
+  async function startPicker(mode: RecorderPickerMode) {
+    if (!window.api?.recorder || !canPickTarget) return
+    if (state.pickerMode === mode) return
     const next = await window.api.recorder.startPicker(mode)
     setState(next)
   }
@@ -119,7 +130,8 @@ export default function RecorderPage() {
           className="hover:bg-white/20 dark:hover:bg-white/5"
           style={NO_DRAG}
           onClick={() => startPicker("display")}
-          disabled={!canChangeInputs}
+          disabled={!canPickTarget}
+          aria-pressed={state.pickerMode === "display"}
           title="Display"
           aria-label="Select display to record"
         >
@@ -131,7 +143,8 @@ export default function RecorderPage() {
           className="hover:bg-white/20 dark:hover:bg-white/5"
           style={NO_DRAG}
           onClick={() => startPicker("window")}
-          disabled={!canChangeInputs}
+          disabled={!canPickTarget}
+          aria-pressed={state.pickerMode === "window"}
           title="Window"
           aria-label="Select window to record"
         >
@@ -222,6 +235,9 @@ export default function RecorderPage() {
           size="sm"
           className="gap-1 hover:bg-white/20 dark:hover:bg-white/5"
           style={NO_DRAG}
+          onClick={showSettingsMenu}
+          disabled={!canChangeInputs}
+          title="Recorder settings"
           aria-label="Recorder settings"
         >
           <HugeiconsIcon icon={Settings01Icon} size={15} color="currentColor" />

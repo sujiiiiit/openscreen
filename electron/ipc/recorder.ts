@@ -2,12 +2,13 @@ import {
   BrowserWindow,
   Menu,
   app,
+  dialog,
   ipcMain,
   screen,
   type IpcMainInvokeEvent,
   type MenuItemConstructorOptions,
 } from 'electron'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, rmSync } from 'node:fs'
 import * as path from 'node:path'
 import addon, {
   type AudioDevice,
@@ -36,6 +37,7 @@ export interface RecorderSettings {
   microphoneLabel: string
   cameraDeviceId: string | null
   cameraLabel: string
+  hideCameraPreview: boolean
 }
 
 export type RecorderStatus =
@@ -65,7 +67,7 @@ export interface RecorderState {
 interface RegisterRecorderHandlersOptions {
   getRecorderWindow: () => BrowserWindow | null
   getControlsWindow?: () => BrowserWindow | null
-  onCameraSelectionChanged?: (deviceId: string | null) => void
+  onCameraPreviewChanged?: (deviceId: string | null) => void
   startPicker?: (mode: RecorderPickerMode) => void
   cancelPicker?: () => void
   // Called whenever state.status changes. Lets main.ts swap between the
@@ -74,13 +76,15 @@ interface RegisterRecorderHandlersOptions {
   onStatusChanged?: (status: RecorderStatus, snapshot: RecorderState) => void
 }
 
-let cameraSelectionListener: ((deviceId: string | null) => void) | null = null
+let cameraPreviewListener: ((deviceId: string | null) => void) | null = null
 let getRecorderWindowRef: (() => BrowserWindow | null) | null = null
 let getControlsWindowRef: (() => BrowserWindow | null) | null = null
 let statusChangedListener:
   | ((status: RecorderStatus, snapshot: RecorderState) => void)
   | null = null
 let lastEmittedStatus: RecorderStatus = 'idle'
+let activeCaptureTarget: CaptureTarget | null = null
+let pendingDiscardConfirmation = false
 
 const NO_MICROPHONE_LABEL = 'No microphone'
 const NO_CAMERA_LABEL = 'No camera'
@@ -95,6 +99,7 @@ const state: RecorderState = {
     microphoneLabel: NO_MICROPHONE_LABEL,
     cameraDeviceId: null,
     cameraLabel: NO_CAMERA_LABEL,
+    hideCameraPreview: false,
   },
   sessionId: null,
   outputDir: null,
@@ -105,8 +110,6 @@ const state: RecorderState = {
   recordingStartedAt: null,
   pausedMs: 0,
 }
-
-let pauseStartedAt: number | null = null
 
 function refreshPausedMs(): void {
   if (state.sessionId && process.platform === 'darwin') {
@@ -150,10 +153,33 @@ function timestampFolderName(): string {
   return new Date().toISOString().replace(/[:.]/g, '-')
 }
 
+function recordingsRoot(): string {
+  return path.join(app.getPath('documents'), 'openscreen')
+}
+
 function outputDirectory(): string {
-  const root = path.join(app.getPath('documents'), 'openscreen')
+  const root = recordingsRoot()
   mkdirSync(root, { recursive: true })
   return path.join(root, timestampFolderName())
+}
+
+function defaultCaptureTarget(): CaptureTarget {
+  return {
+    type: 'display',
+    displayId: screen.getPrimaryDisplay().id,
+  }
+}
+
+function cloneCaptureTarget(target: CaptureTarget): CaptureTarget {
+  return JSON.parse(JSON.stringify(target)) as CaptureTarget
+}
+
+function removeRecordingDirectory(directory: string | null): void {
+  if (!directory) return
+  const root = path.resolve(recordingsRoot())
+  const resolved = path.resolve(directory)
+  if (resolved === root || !resolved.startsWith(root + path.sep)) return
+  rmSync(resolved, { recursive: true, force: true })
 }
 
 function canChangeSettings(): boolean {
@@ -228,9 +254,14 @@ function refreshSelectedDevices(): {
   }
 }
 
-function notifyCameraSelectionChanged(cameraChanged: boolean): void {
-  if (cameraChanged && cameraSelectionListener) {
-    cameraSelectionListener(state.settings.cameraDeviceId)
+function cameraPreviewDeviceId(): string | null {
+  return state.settings.hideCameraPreview ? null : state.settings.cameraDeviceId
+}
+
+function notifyCameraPreviewChanged(previousPreviewDeviceId: string | null): void {
+  const nextPreviewDeviceId = cameraPreviewDeviceId()
+  if (previousPreviewDeviceId !== nextPreviewDeviceId && cameraPreviewListener) {
+    cameraPreviewListener(nextPreviewDeviceId)
   }
 }
 
@@ -244,15 +275,13 @@ function selectMicrophone(device: AudioDevice | null): void {
 
 function selectCamera(device: CameraDevice | null): void {
   if (!canChangeSettings()) return
-  const previousDeviceId = state.settings.cameraDeviceId
+  const previousPreviewDeviceId = cameraPreviewDeviceId()
   const nextDeviceId = device?.deviceId ?? null
   state.settings.cameraDeviceId = nextDeviceId
   state.settings.cameraLabel = device ? deviceLabel(device) : NO_CAMERA_LABEL
   state.lastError = null
   emitState()
-  if (cameraSelectionListener && previousDeviceId !== nextDeviceId) {
-    cameraSelectionListener(nextDeviceId)
-  }
+  notifyCameraPreviewChanged(previousPreviewDeviceId)
 }
 
 function selectSystemAudio(enabled: boolean): void {
@@ -260,6 +289,17 @@ function selectSystemAudio(enabled: boolean): void {
   state.settings.systemAudio = enabled
   state.lastError = null
   emitState()
+}
+
+function setHideCameraPreview(hidden: boolean): void {
+  if (!canChangeSettings()) return
+  if (state.settings.hideCameraPreview === hidden) return
+
+  const previousPreviewDeviceId = cameraPreviewDeviceId()
+  state.settings.hideCameraPreview = hidden
+  state.lastError = null
+  emitState()
+  notifyCameraPreviewChanged(previousPreviewDeviceId)
 }
 
 function microphoneMenuTemplate(devices: AudioDevice[]): MenuItemConstructorOptions[] {
@@ -339,6 +379,18 @@ function systemAudioMenuTemplate(): MenuItemConstructorOptions[] {
   ]
 }
 
+function recorderSettingsMenuTemplate(): MenuItemConstructorOptions[] {
+  return [
+    {
+      label: 'Hide camera preview',
+      type: 'checkbox',
+      checked: state.settings.hideCameraPreview,
+      enabled: canChangeSettings(),
+      click: () => setHideCameraPreview(!state.settings.hideCameraPreview),
+    },
+  ]
+}
+
 function popupPosition(anchor: unknown): RecorderMenuAnchor | undefined {
   if (!anchor || typeof anchor !== 'object') return undefined
   const candidate = anchor as Partial<RecorderMenuAnchor>
@@ -373,9 +425,10 @@ function showInputMenu(
   }
 
   try {
+    const previousPreviewDeviceId = cameraPreviewDeviceId()
     const { microphones, cameras, changed, cameraChanged } = refreshSelectedDevices()
     if (changed) emitState()
-    notifyCameraSelectionChanged(cameraChanged)
+    if (cameraChanged) notifyCameraPreviewChanged(previousPreviewDeviceId)
     popupMenu(
       event,
       kind === 'microphone'
@@ -388,6 +441,14 @@ function showInputMenu(
     emitState()
   }
 
+  return publicState()
+}
+
+function showSettingsMenu(
+  event: IpcMainInvokeEvent,
+  anchor: unknown,
+): RecorderState {
+  popupMenu(event, recorderSettingsMenuTemplate(), anchor)
   return publicState()
 }
 
@@ -405,17 +466,16 @@ export async function startRecording(targetOverride?: CaptureTarget): Promise<Re
   emitState()
 
   try {
+    const previousPreviewDeviceId = cameraPreviewDeviceId()
     const { changed, cameraChanged } = refreshSelectedDevices()
     if (changed) emitState()
-    notifyCameraSelectionChanged(cameraChanged)
+    if (cameraChanged) notifyCameraPreviewChanged(previousPreviewDeviceId)
 
     const outputDir = outputDirectory()
+    const target = cloneCaptureTarget(targetOverride ?? defaultCaptureTarget())
     const options: StartRecordingOptions = {
       outputDir,
-      target: targetOverride ?? {
-        type: 'display',
-        displayId: screen.getPrimaryDisplay().id,
-      },
+      target,
       fps: 60,
       includeCursor: true,
       excludeOwnApp: true,
@@ -431,22 +491,121 @@ export async function startRecording(targetOverride?: CaptureTarget): Promise<Re
     state.sessionId = session.sessionId
     state.outputDir = outputDir
     state.activeFiles = session.files
+    activeCaptureTarget = target
     state.recordingStartedAt = Date.now()
     state.pausedMs = 0
-    pauseStartedAt = null
     state.lastError = null
   } catch (error) {
     state.status = 'idle'
     state.sessionId = null
     state.outputDir = null
     state.activeFiles = null
+    activeCaptureTarget = null
     state.recordingStartedAt = null
     state.pausedMs = 0
-    pauseStartedAt = null
     state.lastError = errorMessage(error)
   }
 
   return emitState()
+}
+
+function resetDiscardedRecording(): void {
+  state.status = 'idle'
+  state.sessionId = null
+  state.outputDir = null
+  state.activeFiles = null
+  state.lastResult = null
+  activeCaptureTarget = null
+  state.recordingStartedAt = null
+  state.pausedMs = 0
+  state.lastError = null
+}
+
+async function confirmDiscardRecording(
+  _event: IpcMainInvokeEvent,
+  intent: 'restart' | 'delete',
+): Promise<boolean> {
+  const restart = intent === 'restart'
+  const primaryButton = restart ? 'Restart the entire recording' : 'Delete the recording'
+  const secondaryButton = 'Cancel'
+  const options: Electron.MessageBoxOptions = {
+    type: 'none',
+    buttons: [primaryButton, secondaryButton],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+    message: restart
+      ? 'Restart entire recording'
+      : 'Delete recording',
+    detail: restart
+      ? 'Are you sure you want to restart the entire recording?'
+      : 'Are you sure you want to delete this recording?',
+  }
+  const { response } = await dialog.showMessageBox(options)
+  return response === 0
+}
+
+async function discardActiveRecording(): Promise<void> {
+  const sessionId = state.sessionId
+  if (!sessionId) return
+  const outputDir = state.outputDir
+  await addon.cancelRecording(sessionId)
+  removeRecordingDirectory(outputDir)
+}
+
+async function restartRecording(event: IpcMainInvokeEvent): Promise<RecorderState> {
+  if (state.status !== 'recording' && state.status !== 'paused') return publicState()
+  if (!state.sessionId) return publicState()
+  if (pendingDiscardConfirmation) return publicState()
+
+  pendingDiscardConfirmation = true
+  const previousStatus = state.status
+  try {
+    const confirmed = await confirmDiscardRecording(event, 'restart')
+    if (!confirmed) return publicState()
+
+    const target = cloneCaptureTarget(activeCaptureTarget ?? defaultCaptureTarget())
+    state.status = 'stopping'
+    state.lastError = null
+    emitState()
+
+    await discardActiveRecording()
+    resetDiscardedRecording()
+    return startRecording(target)
+  } catch (error) {
+    state.status = state.sessionId ? previousStatus : 'idle'
+    state.lastError = errorMessage(error)
+    return emitState()
+  } finally {
+    pendingDiscardConfirmation = false
+  }
+}
+
+async function deleteRecording(event: IpcMainInvokeEvent): Promise<RecorderState> {
+  if (state.status !== 'recording' && state.status !== 'paused') return publicState()
+  if (!state.sessionId) return publicState()
+  if (pendingDiscardConfirmation) return publicState()
+
+  pendingDiscardConfirmation = true
+  const previousStatus = state.status
+  try {
+    const confirmed = await confirmDiscardRecording(event, 'delete')
+    if (!confirmed) return publicState()
+
+    state.status = 'stopping'
+    state.lastError = null
+    emitState()
+
+    await discardActiveRecording()
+    resetDiscardedRecording()
+    return emitState()
+  } catch (error) {
+    state.status = state.sessionId ? previousStatus : 'idle'
+    state.lastError = errorMessage(error)
+    return emitState()
+  } finally {
+    pendingDiscardConfirmation = false
+  }
 }
 
 export function pauseRecording(): RecorderState {
@@ -457,7 +616,6 @@ export function pauseRecording(): RecorderState {
     const result = addon.pauseRecording(state.sessionId)
     state.status = 'paused'
     state.pausedMs = result.pausedMs
-    pauseStartedAt = Date.now()
     state.lastError = null
   } catch (error) {
     state.lastError = errorMessage(error)
@@ -473,7 +631,6 @@ export function resumeRecording(): RecorderState {
     const result = addon.resumeRecording(state.sessionId)
     state.status = 'recording'
     state.pausedMs = result.pausedMs
-    pauseStartedAt = null
     state.lastError = null
   } catch (error) {
     state.lastError = errorMessage(error)
@@ -500,6 +657,7 @@ function startPicker(
     state.lastError = 'Recording picker is not available.'
     return emitState()
   }
+  if (state.pickerMode === mode) return publicState()
 
   try {
     state.pickerMode = mode
@@ -547,9 +705,9 @@ async function stopRecording(): Promise<RecorderState> {
       ? path.dirname(result.files.manifest)
       : state.outputDir
     state.lastResult = result
+    activeCaptureTarget = null
     state.recordingStartedAt = null
     state.pausedMs = 0
-    pauseStartedAt = null
     state.lastError = null
   } catch (error) {
     state.status = previousStatus
@@ -560,7 +718,7 @@ async function stopRecording(): Promise<RecorderState> {
 }
 
 export function registerRecorderHandlers(options: RegisterRecorderHandlersOptions): void {
-  cameraSelectionListener = options.onCameraSelectionChanged ?? null
+  cameraPreviewListener = options.onCameraPreviewChanged ?? null
   getRecorderWindowRef = options.getRecorderWindow
   getControlsWindowRef = options.getControlsWindow ?? null
   statusChangedListener = options.onStatusChanged ?? null
@@ -575,10 +733,15 @@ export function registerRecorderHandlers(options: RegisterRecorderHandlersOption
       return showInputMenu(event, kind, anchor)
     },
   )
+  ipcMain.handle('recorder:showSettingsMenu', (event, anchor: RecorderMenuAnchor) =>
+    showSettingsMenu(event, anchor),
+  )
   ipcMain.handle('recorder:start', () => startRecording())
   ipcMain.handle('recorder:stop', () => stopRecording())
   ipcMain.handle('recorder:pause', () => pauseRecording())
   ipcMain.handle('recorder:resume', () => resumeRecording())
+  ipcMain.handle('recorder:restart', (event) => restartRecording(event))
+  ipcMain.handle('recorder:delete', (event) => deleteRecording(event))
   ipcMain.handle('recorder:startPicker', (_event, mode: RecorderPickerMode) =>
     startPicker(mode, options),
   )
