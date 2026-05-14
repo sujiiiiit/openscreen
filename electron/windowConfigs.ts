@@ -6,7 +6,7 @@ export type WindowConfig = Omit<BrowserWindowConstructorOptions, 'x' | 'y' | 'we
 // Shared options for the recorder bar across platforms.
 const recorderBarBase: WindowConfig = {
   title: 'OpenScreen Recorder',
-  width: 760,
+  width: 665,
   height: 52,
   minHeight: 52,
   maxHeight: 52,

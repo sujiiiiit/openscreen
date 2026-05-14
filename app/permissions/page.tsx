@@ -152,7 +152,7 @@ export default function PermissionsPage() {
         })}
       </ul>
 
-      <footer className="flex justify-end px-5 pt-3 pb-5" style={NO_DRAG}>
+      <footer className="flex justify-end px-5 pt-3 pb-5">
         <Button type="button" size="sm" onClick={closeWindow}>
           Close
         </Button>
