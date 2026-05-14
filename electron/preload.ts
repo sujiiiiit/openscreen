@@ -49,8 +49,8 @@ const api = {
     cancel: (): Promise<void> => ipcRenderer.invoke('windowPicker:cancel'),
     setInteractive: (interactive: boolean): Promise<void> =>
       ipcRenderer.invoke('windowPicker:setInteractive', interactive),
-    onTargetChanged: (callback: (target: PickerOverlayTarget) => void) =>
-      subscribe<PickerOverlayTarget>('windowPicker:targetChanged', callback),
+    onTargetChanged: (callback: (target: PickerOverlayTarget | null) => void) =>
+      subscribe<PickerOverlayTarget | null>('windowPicker:targetChanged', callback),
   },
 }
 

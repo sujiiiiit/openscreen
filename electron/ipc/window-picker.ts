@@ -314,6 +314,15 @@ function hideOverlay(overlay: BrowserWindow): void {
   if (overlay.isVisible()) overlay.hide()
 }
 
+function clearOverlayTarget(): void {
+  activeTarget = null
+  lastTargetKey = ''
+  const overlay = overlayWin
+  if (!overlay || overlay.isDestroyed()) return
+  setOverlayIgnoresMouse(overlay, true)
+  overlay.webContents.send('windowPicker:targetChanged', null)
+}
+
 function hideAllOverlays({ resetTracking = true } = {}): void {
   activeTarget = null
   lastTargetKey = ''
@@ -385,7 +394,10 @@ function pollPickerTarget(): void {
 
   const target = resolvePickerTarget()
   if (!target) {
-    hideAllOverlays({ resetTracking: false })
+    // Don't hide the overlay here — on macOS, hide+show can re-anchor the
+    // window to the Space where it was first shown, which makes the window
+    // picker stop following the user across Spaces. Just clear the highlight.
+    clearOverlayTarget()
     return
   }
   showTarget(target)

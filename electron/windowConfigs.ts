@@ -85,6 +85,17 @@ const windowPickerBase: WindowConfig = {
 }
 
 if (process.platform === 'darwin') {
+  // NSPanel doesn't become the main window and reliably honors
+  // NSWindowCollectionBehaviorCanJoinAllSpaces, so the overlay follows the
+  // user across Spaces and fullscreen apps instead of staying behind on the
+  // Space where it was first shown. window-picker.ts also re-asserts
+  // setVisibleOnAllWorkspaces after setAlwaysOnTop, because raising the
+  // NSWindowLevel resets NSWindowCollectionBehavior.
+  windowPickerBase.type = 'panel'
+  windowPickerBase.focusable = false
+}
+
+if (process.platform === 'darwin') {
   // titleBarStyle 'hidden' keeps a real titled NSWindow under the hood, so
   // AppKit draws the native rounded corners (system ~10pt), the hairline edge
   // border, and the native drop shadow. Traffic lights are hidden post-creation
