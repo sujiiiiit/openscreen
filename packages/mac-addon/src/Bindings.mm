@@ -81,15 +81,27 @@ static bool CGRectFromWindowDictionary(NSDictionary *dictionary, CGRect *rect) {
   return CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)boundsValue, rect);
 }
 
+// Bounded LRU cache for app-icon data URLs keyed by pid. PIDs are recycled by
+// the OS, so an unbounded cache would slowly grow over a long-running session
+// and occasionally surface a stale icon when a pid is reused. The LRU bound
+// caps both. Insertion order is tracked in gIconOrder; on eviction we drop
+// the oldest entry.
+//
+// Thread: all entry points (ListVisibleWindows / GetWindowUnderCursor) are
+// invoked from the NAPI/JS thread, so this state is single-threaded.
+static const NSUInteger kIconCacheCap = 256;
+static NSMutableDictionary<NSNumber *, NSString *> *gIconCache = nil;
+static NSMutableArray<NSNumber *> *gIconOrder = nil;
+
 static NSString *IconDataURLForProcess(pid_t pid) {
-  static NSMutableDictionary<NSNumber *, NSString *> *cache = nil;
   static dispatch_once_t onceToken;
   dispatch_once(&onceToken, ^{
-    cache = [NSMutableDictionary dictionary];
+    gIconCache = [NSMutableDictionary dictionaryWithCapacity:kIconCacheCap];
+    gIconOrder = [NSMutableArray arrayWithCapacity:kIconCacheCap];
   });
 
   NSNumber *key = @(pid);
-  NSString *cached = cache[key];
+  NSString *cached = gIconCache[key];
   if (cached) return cached;
 
   NSRunningApplication *app =
@@ -105,7 +117,14 @@ static NSString *IconDataURLForProcess(pid_t pid) {
   if (!png) return nil;
   NSString *dataURL = [NSString stringWithFormat:@"data:image/png;base64,%@",
                                                  [png base64EncodedStringWithOptions:0]];
-  cache[key] = dataURL;
+
+  if (gIconCache.count >= kIconCacheCap && gIconOrder.count > 0) {
+    NSNumber *oldest = gIconOrder.firstObject;
+    [gIconOrder removeObjectAtIndex:0];
+    [gIconCache removeObjectForKey:oldest];
+  }
+  gIconCache[key] = dataURL;
+  [gIconOrder addObject:key];
   return dataURL;
 }
 
@@ -172,6 +191,17 @@ static bool IsIgnoredBundleIdentifier(NSString *bundleIdentifier) {
   return [ignoredBundles containsObject:bundleIdentifier];
 }
 
+// Minimum on-screen size for a window to be considered pickable. Anything
+// smaller is almost certainly chrome (status bar tile, tooltip, picker
+// indicator) rather than a window a user wants to record. The bound is
+// intentionally small enough to admit Music's mini player and palette
+// windows while still rejecting OS-level decorations.
+static const CGFloat kPickableMinWidth  = 120;
+static const CGFloat kPickableMinHeight = 80;
+// Treat anything with alpha <= 5% as effectively invisible; macOS uses
+// 0-alpha placeholder windows for things like menu-extras and overlays.
+static const CGFloat kPickableMinAlpha  = 0.05;
+
 static bool PickableWindowInfo(NSDictionary *windowInfo,
                                pid_t ownPid,
                                NSString *ownBundleId,
@@ -184,11 +214,12 @@ static bool PickableWindowInfo(NSDictionary *windowInfo,
 
   pid_t pid = ownerPid ? ownerPid.intValue : 0;
   if (pid == ownPid) return false;
-  if (alpha && alpha.doubleValue <= 0.05) return false;
+  if (alpha && alpha.doubleValue <= kPickableMinAlpha) return false;
 
   CGRect bounds = CGRectZero;
   if (!CGRectFromWindowDictionary(windowInfo, &bounds)) return false;
-  if (bounds.size.width < 320 || bounds.size.height < 220) return false;
+  if (bounds.size.width < kPickableMinWidth ||
+      bounds.size.height < kPickableMinHeight) return false;
 
   NSRunningApplication *app =
       pid > 0 ? [NSRunningApplication runningApplicationWithProcessIdentifier:pid] : nil;

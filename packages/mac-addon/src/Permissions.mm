@@ -3,11 +3,27 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreGraphics/CoreGraphics.h>
 
+#include <atomic>
+
+// macOS does not expose denied/restricted distinctly for screen capture —
+// CGPreflightScreenCaptureAccess returns a plain bool. Track whether we've
+// already prompted via CGRequestScreenCaptureAccess: a `false` preflight
+// before any prompt is "notDetermined", a `false` preflight after a prompt
+// is "denied". The flag is process-scoped, which matches the TCC model.
+static std::atomic<bool> gScreenCaptureRequested(false);
+
+static std::string ScreenCapturePermissionString() {
+  if (CGPreflightScreenCaptureAccess()) return "granted";
+  return gScreenCaptureRequested.load(std::memory_order_acquire)
+      ? "denied"
+      : "notDetermined";
+}
+
 Napi::Object GetPermissionsObject(Napi::Env env) {
   Napi::Object permissions = Napi::Object::New(env);
-  bool screenGranted = CGPreflightScreenCaptureAccess();
-  permissions.Set("screen", screenGranted ? "granted" : "notDetermined");
-  permissions.Set("systemAudio", screenGranted ? "granted" : "notDetermined");
+  std::string screenState = ScreenCapturePermissionString();
+  permissions.Set("screen", screenState);
+  permissions.Set("systemAudio", screenState);
   permissions.Set("camera",
                   PermissionStateString(
                       [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo]));
@@ -42,6 +58,7 @@ void RequestPermissionsWorker::Execute() {
     for (const std::string &kind : kinds_) {
       if (kind == "screen" || kind == "systemAudio") {
         CGRequestScreenCaptureAccess();
+        gScreenCaptureRequested.store(true, std::memory_order_release);
       } else if (kind == "camera") {
         RequestAVAccess(AVMediaTypeVideo);
       } else if (kind == "microphone") {

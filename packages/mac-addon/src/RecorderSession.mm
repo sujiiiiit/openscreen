@@ -207,12 +207,22 @@
 
     __block NSError *streamStopError = nil;
     if (_stream) {
+      // Bound the wait: SCKit's stopCapture completion has been observed to
+      // hang indefinitely when the system audio stack is wedged. Time out
+      // after 10s so the JS state machine can transition out of "stopping"
+      // and surface an error to the user instead of leaving the UI frozen.
       dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
       [_stream stopCaptureWithCompletionHandler:^(NSError *stopError) {
         streamStopError = stopError;
         dispatch_semaphore_signal(semaphore);
       }];
-      dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+      dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
+      if (dispatch_semaphore_wait(semaphore, deadline) != 0) {
+        streamStopError =
+            MakeError(2403, @"ScreenCaptureKit stopCapture did not complete within 10s");
+        EmitEvent({"error", _options.sessionId, "screen",
+                   ToStdString([streamStopError localizedDescription]), 0});
+      }
     }
 
     if ([_camera hasCaptureSession]) [_camera stopCapture];

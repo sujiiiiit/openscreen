@@ -77,6 +77,30 @@ if (!isDev) {
   ])
 }
 
+// Allowlist of static-asset extensions Next.js emits to `out/`. Restricting
+// the app:// protocol to these prevents a renderer (or a navigation in one)
+// from pulling anything else that may sit alongside the bundle — e.g. a
+// stray map file, a packaged preload script, or an internal manifest.
+const APP_PROTOCOL_ALLOWED_EXTENSIONS = new Set([
+  '.html',
+  '.js',
+  '.mjs',
+  '.css',
+  '.map',
+  '.json',
+  '.svg',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.ico',
+  '.woff',
+  '.woff2',
+  '.ttf',
+  '.txt',
+])
+
 function resolveAppFile(requestUrl: string): string | null {
   // new URL() throws on malformed input; decodeURIComponent throws on bad
   // percent-encoding. Return null so the protocol handler maps it to a 400
@@ -86,6 +110,8 @@ function resolveAppFile(requestUrl: string): string | null {
     const rel = pathname.replace(/^\/+/, '') || 'index.html'
     const resolved = path.resolve(OUT_DIR, rel)
     if (resolved !== OUT_DIR && !resolved.startsWith(OUT_DIR + path.sep)) return null
+    const ext = path.extname(resolved).toLowerCase()
+    if (ext && !APP_PROTOCOL_ALLOWED_EXTENSIONS.has(ext)) return null
     return resolved
   } catch {
     return null

@@ -842,9 +842,17 @@ export function startWindowPicker(mode: RecorderPickerMode): void {
     pollPickerTarget()
     pollTimer = setInterval(pollPickerTarget, PICKER_POLL_INTERVAL_MS)
   }
-  globalShortcut.register('Escape', () => {
+  // globalShortcut.register returns false if Escape is already held by
+  // another app or the OS — without this guard the picker would offer no
+  // way to cancel except clicking through. The renderer also wires a
+  // window-level Escape keydown handler as a secondary escape hatch, but
+  // it only fires when the overlay has keyboard focus.
+  const escapeRegistered = globalShortcut.register('Escape', () => {
     cancelWindowPicker()
   })
+  if (!escapeRegistered) {
+    console.warn('[picker] could not register global Escape shortcut; rely on overlay keydown fallback')
+  }
 }
 
 export function cancelWindowPicker(): void {
