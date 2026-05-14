@@ -120,6 +120,7 @@ export interface Api {
     confirm: () => Promise<void>
     cancel: () => Promise<void>
     setInteractive: (interactive: boolean) => Promise<void>
+    getCurrentTarget: () => Promise<PickerOverlayTarget | null>
     onTargetChanged: (callback: (target: PickerOverlayTarget | null) => void) => Unsubscribe
   }
 }

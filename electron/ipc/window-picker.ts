@@ -546,6 +546,14 @@ export function registerWindowPickerHandlers(
   ipcMain.handle('windowPicker:setInteractive', (event, interactive: boolean) => {
     setInteractive(event.sender, Boolean(interactive))
   })
+  // Pull-based handshake. The push channel (windowPicker:targetChanged) only
+  // fires when the target key changes — display mode resolves the same target
+  // every poll, so its single initial push races the renderer's useEffect
+  // and gets dropped before any listener exists. Renderer calls this on mount
+  // to grab the current target regardless of whether a push has been emitted.
+  ipcMain.handle('windowPicker:getCurrentTarget', () =>
+    activeTarget ? targetPayload(activeTarget) : null,
+  )
 }
 
 export function disposeWindowPicker(): void {

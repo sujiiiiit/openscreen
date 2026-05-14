@@ -20,6 +20,15 @@ export default function WindowPickerPage() {
     if (!window.api?.windowPicker) return undefined
 
     const unsubscribe = window.api.windowPicker.onTargetChanged(setTarget)
+    // Pull the current target on mount. The push channel only fires when the
+    // resolved target's key changes, and display mode resolves the same
+    // target every poll — so without this we'd never receive the initial
+    // target on the first display-picker open.
+    let stale = false
+    window.api.windowPicker.getCurrentTarget().then((current) => {
+      if (!stale && current) setTarget(current)
+    })
+
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         void window.api.windowPicker.cancel()
@@ -28,6 +37,7 @@ export default function WindowPickerPage() {
     window.addEventListener("keydown", onKeyDown)
 
     return () => {
+      stale = true
       unsubscribe()
       window.removeEventListener("keydown", onKeyDown)
       void window.api.windowPicker.setInteractive(false)
