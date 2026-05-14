@@ -16,4 +16,11 @@
 - (NSString *)source;
 - (NSString *)path;
 - (BOOL)hasStarted;
+
+// Pause / resume. While paused, all samples are dropped; on resume the
+// accumulated pause duration is subtracted from every subsequent sample PTS
+// so the file timeline has no gap.
+- (void)setPaused:(BOOL)paused;
+- (BOOL)isPaused;
+- (CMTime)pauseAccumulated;
 @end

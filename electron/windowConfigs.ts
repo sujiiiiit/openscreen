@@ -24,6 +24,29 @@ const recorderBarBase: WindowConfig = {
   acceptFirstMouse: true,
 }
 
+// Compact floating panel shown while a recording is in progress. Replaces
+// the full recorder bar; has Stop, Pause/Resume, and a live timer.
+const recordingControlsBase: WindowConfig = {
+  title: 'OpenScreen Recording',
+  width: 240,
+  height: 52,
+  minHeight: 52,
+  maxHeight: 52,
+  show: false,
+  backgroundColor: '#00000000',
+  alwaysOnTop: true,
+  roundedCorners: true,
+  hasShadow: true,
+  fullscreen: false,
+  fullscreenable: false,
+  resizable: false,
+  maximizable: false,
+  minimizable: false,
+  movable: true,
+  acceptFirstMouse: true,
+  skipTaskbar: true,
+}
+
 const cameraBase: WindowConfig = {
   title: 'OpenScreen Camera',
   width: 240,
@@ -88,11 +111,13 @@ if (process.platform === 'darwin') {
   // NSPanel doesn't become the main window and reliably honors
   // NSWindowCollectionBehaviorCanJoinAllSpaces, so the overlay follows the
   // user across Spaces and fullscreen apps instead of staying behind on the
-  // Space where it was first shown. window-picker.ts also re-asserts
-  // setVisibleOnAllWorkspaces after setAlwaysOnTop, because raising the
-  // NSWindowLevel resets NSWindowCollectionBehavior.
+  // Space where it was first shown. window-picker.ts also drives the full
+  // collectionBehavior mask via addon.pinWindowAcrossSpaces() after
+  // setAlwaysOnTop, since AppKit clears that mask on level changes,
+  // setBounds, and some show/hide transitions. Leaving the panel focusable
+  // matters: a non-focusable NSPanel doesn't always get full Space-routing
+  // treatment from AppKit; clicks are gated via setIgnoreMouseEvents instead.
   windowPickerBase.type = 'panel'
-  windowPickerBase.focusable = false
 }
 
 if (process.platform === 'darwin') {
@@ -104,6 +129,9 @@ if (process.platform === 'darwin') {
   recorderBarBase.titleBarStyle = 'hidden'
   recorderBarBase.vibrancy = 'under-window'
   recorderBarBase.visualEffectState = 'active'
+  recordingControlsBase.titleBarStyle = 'hidden'
+  recordingControlsBase.vibrancy = 'under-window'
+  recordingControlsBase.visualEffectState = 'active'
   permissionBase.titleBarStyle = 'hidden'
   permissionBase.vibrancy = 'under-window'
   permissionBase.visualEffectState = 'active'
@@ -116,12 +144,15 @@ if (process.platform === 'darwin') {
   // Windows 11 22H2+.
   recorderBarBase.frame = false
   recorderBarBase.transparent = true
+  recordingControlsBase.frame = false
+  recordingControlsBase.transparent = true
   permissionBase.frame = false
   permissionBase.transparent = true
   cameraBase.frame = false
   cameraBase.transparent = true
   if (process.platform === 'win32') {
     recorderBarBase.backgroundMaterial = 'acrylic'
+    recordingControlsBase.backgroundMaterial = 'acrylic'
     permissionBase.backgroundMaterial = 'acrylic'
     cameraBase.backgroundMaterial = 'acrylic'
   }
@@ -129,6 +160,7 @@ if (process.platform === 'darwin') {
 
 export const windowConfigs = {
   recorderBarWin: recorderBarBase,
+  recordingControlsWin: recordingControlsBase,
   permissionWin: permissionBase,
   cameraWin: cameraBase,
   windowPickerWin: windowPickerBase,

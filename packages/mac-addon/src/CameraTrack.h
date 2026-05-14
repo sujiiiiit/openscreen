@@ -37,4 +37,9 @@
 - (NSDictionary *)writerMetadata;
 - (NSURL *)url;
 - (BOOL)hasWriter;
+
+// Pause / resume the camera writer. AVCaptureSession keeps running; the
+// writer simply drops samples while paused and shifts subsequent PTS so the
+// camera.mov timeline stays continuous and stays in sync with screen.mov.
+- (void)setPaused:(BOOL)paused;
 @end

@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <vector>
 
 #include "Common.h"
 #include "Events.h"
@@ -38,6 +39,14 @@
   std::atomic<int64_t> _droppedCount;
   int _inflightCap;
   BOOL _backpressureEventSent;
+  // Pause / resume. _paused is atomic so the producer (appendSampleBuffer:)
+  // can short-circuit before retaining the sample buffer. _pauseAccumulated
+  // and _pauseStartHost are only read/written on _queue (serial) so they
+  // don't need synchronization.
+  std::atomic<bool> _paused;
+  CMTime _pauseStartHost;
+  CMTime _pauseAccumulated;
+  NSInteger _pauseCycleCount;
 }
 
 - (instancetype)initWithURL:(NSURL *)url
@@ -64,6 +73,9 @@
     // are tiny (a few KB) and can buffer more comfortably.
     _inflightCap = [mediaType isEqualToString:AVMediaTypeVideo] ? 8 : 64;
     _backpressureEventSent = NO;
+    _paused.store(false, std::memory_order_relaxed);
+    _pauseStartHost = kCMTimeInvalid;
+    _pauseAccumulated = kCMTimeZero;
   }
   return self;
 }
@@ -127,6 +139,20 @@
     int64_t dropped = _droppedCount.load(std::memory_order_relaxed);
     if (dropped > 0) {
       metadata[@"droppedSamples"] = @(dropped);
+    }
+    if (_pauseCycleCount > 0) {
+      metadata[@"pauseCycles"] = @(_pauseCycleCount);
+    }
+    CMTime totalPaused = _pauseAccumulated;
+    if (_paused.load(std::memory_order_relaxed) && CMTIME_IS_VALID(_pauseStartHost)) {
+      CMTime now = CMClockGetTime(CMClockGetHostTimeClock());
+      CMTime delta = CMTimeSubtract(now, _pauseStartHost);
+      if (CMTimeCompare(delta, kCMTimeZero) > 0) {
+        totalPaused = CMTimeAdd(totalPaused, delta);
+      }
+    }
+    if (CMTimeCompare(totalPaused, kCMTimeZero) > 0) {
+      metadata[@"pausedMs"] = @(TimeToMilliseconds(totalPaused));
     }
     result = metadata;
   });
@@ -195,8 +221,53 @@
   return YES;
 }
 
+// Returns a new CMSampleBuffer with PTS/DTS shifted backwards by `shift`.
+// Caller owns the returned ref. Returns NULL if shift is zero (use the
+// original) or if rewriting failed.
+static CMSampleBufferRef MediaFileWriterShifted(CMSampleBufferRef original,
+                                                 CMTime shift) {
+  if (CMTimeCompare(shift, kCMTimeZero) == 0) return NULL;
+  CMItemCount entries = 0;
+  if (CMSampleBufferGetSampleTimingInfoArray(original, 0, NULL, &entries) != noErr ||
+      entries == 0) {
+    return NULL;
+  }
+  CMSampleTimingInfo stackTiming[16];
+  CMSampleTimingInfo *timing = stackTiming;
+  std::vector<CMSampleTimingInfo> heap;
+  if (entries > 16) {
+    heap.resize(entries);
+    timing = heap.data();
+  }
+  if (CMSampleBufferGetSampleTimingInfoArray(original, entries, timing, &entries) != noErr) {
+    return NULL;
+  }
+  for (CMItemCount i = 0; i < entries; ++i) {
+    if (CMTIME_IS_VALID(timing[i].presentationTimeStamp)) {
+      timing[i].presentationTimeStamp =
+          CMTimeSubtract(timing[i].presentationTimeStamp, shift);
+    }
+    if (CMTIME_IS_VALID(timing[i].decodeTimeStamp)) {
+      timing[i].decodeTimeStamp = CMTimeSubtract(timing[i].decodeTimeStamp, shift);
+    }
+  }
+  CMSampleBufferRef shifted = NULL;
+  OSStatus status = CMSampleBufferCreateCopyWithNewTiming(
+      kCFAllocatorDefault, original, entries, timing, &shifted);
+  if (status != noErr) {
+    if (shifted) CFRelease(shifted);
+    return NULL;
+  }
+  return shifted;
+}
+
 - (void)appendRetainedSampleBuffer:(CMSampleBufferRef)sampleBuffer {
   if (_finishing || _finished || !CMSampleBufferIsValid(sampleBuffer)) {
+    return;
+  }
+  // While paused, swallow the sample without touching the writer. The host
+  // clock keeps ticking; resume time absorbs the gap.
+  if (_paused.load(std::memory_order_acquire)) {
     return;
   }
 
@@ -210,26 +281,77 @@
     pts = CMClockGetTime(CMClockGetHostTimeClock());
   }
 
+  CMSampleBufferRef shifted =
+      MediaFileWriterShifted(sampleBuffer, _pauseAccumulated);
+  CMSampleBufferRef target = shifted ?: sampleBuffer;
+  CMTime appendPts = shifted ? CMTimeSubtract(pts, _pauseAccumulated) : pts;
+
   if (!_started) {
     if (![_writer startWriting]) {
       _error = [_writer error] ?: MakeError(1003, @"Could not start media writer");
+      if (shifted) CFRelease(shifted);
       return;
     }
-    [_writer startSessionAtSourceTime:pts];
-    _firstPTS = pts;
+    [_writer startSessionAtSourceTime:appendPts];
+    _firstPTS = appendPts;
     _started = YES;
     EmitEvent({"fileStarted", "", ToStdString(_source), ToStdString([_url path]), 0});
   }
 
   if (_input.readyForMoreMediaData) {
-    if (![_input appendSampleBuffer:sampleBuffer]) {
+    if (![_input appendSampleBuffer:target]) {
       _error = [_writer error] ?: MakeError(1004, @"Could not append sample buffer");
       EmitEvent({"error", "", ToStdString(_source), ToStdString([_error localizedDescription]), 0});
+      if (shifted) CFRelease(shifted);
       return;
     }
-    _lastPTS = pts;
+    _lastPTS = appendPts;
     _sampleCount += 1;
   }
+  if (shifted) CFRelease(shifted);
+}
+
+- (void)setPaused:(BOOL)paused {
+  // Hop onto _queue so the state mutation is serialized with sample appends,
+  // _pauseAccumulated is only ever written here, and clock-reads happen at a
+  // well-defined point relative to the last appended sample.
+  dispatch_async(_queue, ^{
+    if (_paused.load(std::memory_order_relaxed) == (paused ? true : false)) return;
+    if (paused) {
+      _pauseStartHost = CMClockGetTime(CMClockGetHostTimeClock());
+      _paused.store(true, std::memory_order_release);
+    } else {
+      if (CMTIME_IS_VALID(_pauseStartHost)) {
+        CMTime now = CMClockGetTime(CMClockGetHostTimeClock());
+        CMTime delta = CMTimeSubtract(now, _pauseStartHost);
+        if (CMTimeCompare(delta, kCMTimeZero) > 0) {
+          _pauseAccumulated = CMTimeAdd(_pauseAccumulated, delta);
+        }
+      }
+      _pauseStartHost = kCMTimeInvalid;
+      _paused.store(false, std::memory_order_release);
+      _pauseCycleCount += 1;
+    }
+  });
+}
+
+- (BOOL)isPaused {
+  return _paused.load(std::memory_order_acquire);
+}
+
+- (CMTime)pauseAccumulated {
+  __block CMTime value = kCMTimeZero;
+  dispatch_sync(_queue, ^{
+    value = _pauseAccumulated;
+    if (_paused.load(std::memory_order_acquire) && CMTIME_IS_VALID(_pauseStartHost)) {
+      CMTime now = CMClockGetTime(CMClockGetHostTimeClock());
+      CMTime delta = CMTimeSubtract(now, _pauseStartHost);
+      if (CMTimeCompare(delta, kCMTimeZero) > 0) {
+        value = CMTimeAdd(value, delta);
+      }
+    }
+  });
+  return value;
 }
 
 - (void)appendSampleBuffer:(CMSampleBufferRef)sampleBuffer {
@@ -239,6 +361,11 @@
   // A late append racing with -cancel/-finishSync would do real work for
   // nothing and could touch a writer that's already torn down; bail early.
   if (_finishing || _finished) {
+    return;
+  }
+  // Drop ahead of the CFRetain/enqueue while paused so a long pause doesn't
+  // pin IOSurfaces (video) on the inflight queue.
+  if (_paused.load(std::memory_order_acquire)) {
     return;
   }
 

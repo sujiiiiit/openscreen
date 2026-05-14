@@ -25,6 +25,8 @@ const api = {
     cancelPicker: (): Promise<RecorderState> => ipcRenderer.invoke('recorder:cancelPicker'),
     start: (): Promise<RecorderState> => ipcRenderer.invoke('recorder:start'),
     stop: (): Promise<RecorderState> => ipcRenderer.invoke('recorder:stop'),
+    pause: (): Promise<RecorderState> => ipcRenderer.invoke('recorder:pause'),
+    resume: (): Promise<RecorderState> => ipcRenderer.invoke('recorder:resume'),
     close: (): Promise<void> => ipcRenderer.invoke('recorder:close'),
     onChanged: (callback: (state: RecorderState) => void) =>
       subscribe<RecorderState>('recorder:changed', callback),

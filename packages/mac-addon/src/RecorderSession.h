@@ -14,6 +14,12 @@
 - (BOOL)startSync:(NSError **)error;
 - (BOOL)stopSync:(NSError **)error;
 - (void)cancelSync;
+- (BOOL)pauseSync:(NSError **)error;
+- (BOOL)resumeSync:(NSError **)error;
+- (BOOL)isPaused;
+// Total paused duration in milliseconds since the session started. Reflects
+// in-flight pauses, so the UI timer can keep ticking off this value.
+- (double)pausedMs;
 - (NSDictionary *)startResult;
 - (NSDictionary *)stopResult;
 - (NSString *)sessionId;

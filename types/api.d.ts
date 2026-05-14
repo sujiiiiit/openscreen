@@ -58,7 +58,12 @@ export interface RecorderSettings {
   cameraLabel: string
 }
 
-export type RecorderStatus = 'idle' | 'starting' | 'recording' | 'stopping'
+export type RecorderStatus =
+  | 'idle'
+  | 'starting'
+  | 'recording'
+  | 'paused'
+  | 'stopping'
 
 export interface RecorderState {
   status: RecorderStatus
@@ -69,6 +74,8 @@ export interface RecorderState {
   lastResult: RecordingResult | null
   lastError: string | null
   pickerMode: RecorderPickerMode | null
+  recordingStartedAt: number | null
+  pausedMs: number
 }
 
 export interface PickerOverlayTarget {
@@ -92,6 +99,8 @@ export interface Api {
     cancelPicker: () => Promise<RecorderState>
     start: () => Promise<RecorderState>
     stop: () => Promise<RecorderState>
+    pause: () => Promise<RecorderState>
+    resume: () => Promise<RecorderState>
     close: () => Promise<void>
     onChanged: (callback: (state: RecorderState) => void) => Unsubscribe
   }

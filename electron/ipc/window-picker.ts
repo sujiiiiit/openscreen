@@ -57,6 +57,7 @@ let overlayBoundsDirty = true
 let overlayIgnoresMouse: boolean | null = null
 let confirming = false
 let displayListenersRegistered = false
+let spaceChangeRegistered = false
 
 const windowIconCache = new Map<number, string | null>()
 
@@ -270,6 +271,30 @@ function unregisterDisplayListeners(): void {
   screen.off('display-metrics-changed', markOverlayBoundsDirty)
 }
 
+function pinOverlayAcrossSpaces(overlay: BrowserWindow): void {
+  if (overlay.isDestroyed()) return
+  // Order matters on macOS: raising the level resets NSWindowCollectionBehavior,
+  // so apply the level first, then re-apply the collection-behavior mask.
+  overlay.setAlwaysOnTop(true, 'screen-saver', 1)
+  // skipTransformProcessType: true is critical — without it, every call to
+  // setVisibleOnAllWorkspaces flips the macOS process type between
+  // UIElementApplication and ForegroundApplication, briefly hiding the window
+  // and the dock. We call this on show + Space change + session start, so the
+  // flapping was visible as "picker sometimes appears, sometimes doesn't."
+  // See https://github.com/electron/electron/issues/26350
+  overlay.setVisibleOnAllWorkspaces(true, {
+    visibleOnFullScreen: true,
+    skipTransformProcessType: true,
+  })
+  if (process.platform === 'darwin') {
+    try {
+      addon.pinWindowAcrossSpaces(overlay.getNativeWindowHandle())
+    } catch {
+      // Native handle may be unavailable mid-teardown — fall back to Electron's API.
+    }
+  }
+}
+
 function createOverlay(): BrowserWindow {
   const bounds = virtualDesktopBounds()
   const overlay = new BrowserWindow({
@@ -281,8 +306,7 @@ function createOverlay(): BrowserWindow {
     webPreferences: options?.webPreferences,
   })
 
-  overlay.setAlwaysOnTop(true, 'screen-saver', 1)
-  overlay.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  pinOverlayAcrossSpaces(overlay)
   overlayIgnoresMouse = null
   setOverlayIgnoresMouse(overlay, true)
   overlay.on('closed', () => {
@@ -337,7 +361,15 @@ function showTarget(target: ActivePickerTarget): void {
   const overlay = pickerOverlay()
   syncOverlayBounds(overlay)
   updateOverlayInteractivity(overlay, target)
-  if (!overlay.isVisible()) overlay.showInactive()
+  if (!overlay.isVisible()) {
+    overlay.showInactive()
+    // Showing an NSPanel can drop the CanJoinAllSpaces bit; reassert it.
+    pinOverlayAcrossSpaces(overlay)
+    // electron#36364: setAlwaysOnTop + visibleOnAllWorkspaces doesn't always
+    // surface the panel on the current Space until something forces it.
+    // moveTop nudges AppKit into placing the panel on the active Space.
+    overlay.moveTop()
+  }
 
   const nextKey = targetKey(target)
   activeTarget = target
@@ -345,6 +377,30 @@ function showTarget(target: ActivePickerTarget): void {
     lastTargetKey = nextKey
     overlay.webContents.send('windowPicker:targetChanged', targetPayload(target))
   }
+}
+
+function handleActiveSpaceChanged(): void {
+  if (!pickerMode) return
+  const overlay = overlayWin
+  if (!overlay || overlay.isDestroyed()) return
+  // AppKit may have cleared the collection behavior during the Space
+  // transition; re-pin before forcing a re-resolve so the overlay shows up on
+  // the new Space immediately rather than waiting for the next 300ms tick.
+  pinOverlayAcrossSpaces(overlay)
+  if (overlay.isVisible()) overlay.moveTop()
+  // Bypass the stationary-cursor cache — same screen coordinates on a new
+  // Space resolve to entirely different windows.
+  lastCursorKey = ''
+  lastResolvedAt = 0
+  pollPickerTarget()
+}
+
+function registerSpaceChangeListener(): void {
+  if (spaceChangeRegistered) return
+  if (process.platform !== 'darwin') return
+  if (typeof addon.onActiveSpaceChange !== 'function') return
+  spaceChangeRegistered = true
+  addon.onActiveSpaceChange(handleActiveSpaceChanged)
 }
 
 function windowSourceUnderCursor(): WindowSource | null {
@@ -441,7 +497,11 @@ export function startWindowPicker(mode: RecorderPickerMode): void {
   lastCursorKey = ''
   lastResolvedAt = 0
   overlayBoundsDirty = true
-  syncOverlayBounds(pickerOverlay())
+  const overlay = pickerOverlay()
+  // Re-pin every session in case the overlay was first created on a different
+  // Space and AppKit dropped CanJoinAllSpaces in the meantime.
+  pinOverlayAcrossSpaces(overlay)
+  syncOverlayBounds(overlay)
   pollPickerTarget()
   pollTimer = setInterval(pollPickerTarget, PICKER_POLL_INTERVAL_MS)
   globalShortcut.register('Escape', () => {
@@ -460,11 +520,11 @@ async function confirmWindowPicker(): Promise<void> {
   const target = activeTarget.target
   confirming = true
   finishPicker({ restoreRecorder: false })
-  try {
-    await options?.startRecordingForTarget(target)
-  } finally {
-    options?.showRecorderWindow()
-  }
+  // Don't unconditionally show the recorder bar here — main.ts subscribes to
+  // recorder status changes and decides which window to show: the recording
+  // controls window if startRecordingForTarget succeeded, the recorder bar
+  // again if it bounced back to idle on error.
+  await options?.startRecordingForTarget(target)
 }
 
 function setInteractive(sender: WebContents, interactive: boolean): void {
@@ -478,6 +538,7 @@ export function registerWindowPickerHandlers(
 ): void {
   options = nextOptions
   registerDisplayListeners()
+  registerSpaceChangeListener()
   ipcMain.handle('windowPicker:confirm', () => confirmWindowPicker())
   ipcMain.handle('windowPicker:cancel', () => {
     cancelWindowPicker()

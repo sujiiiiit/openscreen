@@ -29,6 +29,7 @@ import { windowConfigs } from './windowConfigs'
 const isDev = !app.isPackaged
 let mainWin: BrowserWindow | null = null
 let recorderBarWin: BrowserWindow | null = null
+let recordingControlsWin: BrowserWindow | null = null
 let cameraWin: BrowserWindow | null = null
 let permissionWin: BrowserWindow | null = null
 let activeCameraDeviceId: string | null = null
@@ -374,6 +375,47 @@ function showRecorderWindowOnly(): void {
   createRecorderBarWindow()
 }
 
+function showRecordingControlsWindow(): void {
+  if (recordingControlsWin && !recordingControlsWin.isDestroyed()) {
+    if (!recordingControlsWin.isVisible()) recordingControlsWin.show()
+    keepRecorderBarOnTop(recordingControlsWin)
+    return
+  }
+
+  const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize
+  const winW = windowConfigs.recordingControlsWin.width ?? 240
+  const winH = windowConfigs.recordingControlsWin.height ?? 52
+  const x = Math.round((screenW - winW) / 2)
+  const y = screenH - winH - 80
+
+  recordingControlsWin = new BrowserWindow({
+    x,
+    y,
+    ...windowConfigs.recordingControlsWin,
+    webPreferences: SHARED_WEB_PREFERENCES,
+  })
+
+  keepRecorderBarOnTop(recordingControlsWin)
+  if (process.platform === 'darwin') {
+    recordingControlsWin.setWindowButtonVisibility(false)
+  }
+  hardenWebContents(recordingControlsWin)
+  recordingControlsWin.once('ready-to-show', () => {
+    if (recordingControlsWin) recordingControlsWin.showInactive()
+  })
+  recordingControlsWin.on('closed', () => {
+    recordingControlsWin = null
+  })
+
+  loadAppRoute(recordingControlsWin, '/recording-controls/')
+}
+
+function hideRecordingControlsWindow(): void {
+  if (!recordingControlsWin || recordingControlsWin.isDestroyed()) return
+  recordingControlsWin.close()
+  recordingControlsWin = null
+}
+
 function createRecorderBarWindow(): void {
   if (!hasRequiredPermissions()) {
     createPermissionWindow()
@@ -441,6 +483,7 @@ app.whenReady().then(() => {
   })
   registerRecorderHandlers({
     getRecorderWindow: () => recorderBarWin,
+    getControlsWindow: () => recordingControlsWin,
     onCameraSelectionChanged: (deviceId) => {
       if (deviceId) {
         showCameraWindow(deviceId)
@@ -450,6 +493,17 @@ app.whenReady().then(() => {
     },
     startPicker: startWindowPicker,
     cancelPicker: cancelWindowPicker,
+    onStatusChanged: (status) => {
+      if (status === 'recording' || status === 'paused') {
+        hideRecorderBarWindow()
+        showRecordingControlsWindow()
+      } else if (status === 'idle') {
+        hideRecordingControlsWindow()
+        showRecorderWindowOnly()
+      }
+      // 'starting' and 'stopping' are transitional — leave window state as-is
+      // so we don't blink the bar in and out of existence.
+    },
   })
   registerWindowPickerHandlers({
     webPreferences: SHARED_WEB_PREFERENCES,

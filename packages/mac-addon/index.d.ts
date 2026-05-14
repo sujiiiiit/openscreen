@@ -192,6 +192,8 @@ export interface RecordingEvent {
     | 'started'
     | 'stopped'
     | 'cancelled'
+    | 'paused'
+    | 'resumed'
     | 'fileStarted'
     | 'error'
     // Emitted once per writer the first time it has to drop samples to keep
@@ -232,12 +234,23 @@ export declare function startRecording(
 ): Promise<RecordingSession>
 export declare function stopRecording(sessionId: string): Promise<RecordingResult>
 export declare function cancelRecording(sessionId: string): Promise<void>
+export declare function pauseRecording(sessionId: string): RecordingPauseState
+export declare function resumeRecording(sessionId: string): RecordingPauseState
+export declare function getRecordingStatus(sessionId: string): RecordingPauseState | null
+
+export interface RecordingPauseState {
+  sessionId: string
+  paused: boolean
+  pausedMs: number
+}
 export declare function onRecordingEvent(callback: (event: RecordingEvent) => void): Unsubscribe
 export declare function startCameraPreview(
   options: StartCameraPreviewOptions,
   callback: (frame: CameraPreviewFrame) => void,
 ): Promise<void>
 export declare function stopCameraPreview(): Promise<void>
+export declare function pinWindowAcrossSpaces(nativeHandle: Buffer): boolean
+export declare function onActiveSpaceChange(callback: () => void): void
 
 declare const _default: {
   hello: typeof hello
@@ -252,9 +265,14 @@ declare const _default: {
   startRecording: typeof startRecording
   stopRecording: typeof stopRecording
   cancelRecording: typeof cancelRecording
+  pauseRecording: typeof pauseRecording
+  resumeRecording: typeof resumeRecording
+  getRecordingStatus: typeof getRecordingStatus
   onRecordingEvent: typeof onRecordingEvent
   startCameraPreview: typeof startCameraPreview
   stopCameraPreview: typeof stopCameraPreview
+  pinWindowAcrossSpaces: typeof pinWindowAcrossSpaces
+  onActiveSpaceChange: typeof onActiveSpaceChange
 }
 
 export default _default

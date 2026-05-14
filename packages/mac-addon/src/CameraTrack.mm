@@ -186,6 +186,10 @@
   return _writer ? [_writer metadata] : nil;
 }
 
+- (void)setPaused:(BOOL)paused {
+  [_writer setPaused:paused];
+}
+
 - (NSURL *)url {
   return _url;
 }

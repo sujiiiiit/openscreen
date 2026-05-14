@@ -23,6 +23,7 @@
   CMTime _hostStartTime;
   BOOL _running;
   BOOL _stopping;
+  BOOL _paused;
 }
 
 - (instancetype)initWithOptions:(const RecordingOptions &)options {
@@ -235,6 +236,49 @@
     EmitEvent({"stopped", _options.sessionId, "", "", 0});
     return YES;
   }
+}
+
+- (BOOL)pauseSync:(NSError **)error {
+  if (!_running) {
+    if (error) *error = MakeError(2401, @"Cannot pause: no recording in progress");
+    return NO;
+  }
+  if (_stopping) {
+    if (error) *error = MakeError(2402, @"Cannot pause: recording is stopping");
+    return NO;
+  }
+  if (_paused) return YES;
+  _paused = YES;
+  [_screen setPaused:YES];
+  [_camera setPaused:YES];
+  EmitEvent({"paused", _options.sessionId, "", "", 0});
+  return YES;
+}
+
+- (BOOL)resumeSync:(NSError **)error {
+  if (!_running) {
+    if (error) *error = MakeError(2403, @"Cannot resume: no recording in progress");
+    return NO;
+  }
+  if (_stopping) {
+    if (error) *error = MakeError(2404, @"Cannot resume: recording is stopping");
+    return NO;
+  }
+  if (!_paused) return YES;
+  [_screen setPaused:NO];
+  [_camera setPaused:NO];
+  _paused = NO;
+  EmitEvent({"resumed", _options.sessionId, "", "", 0});
+  return YES;
+}
+
+- (BOOL)isPaused {
+  return _paused;
+}
+
+- (double)pausedMs {
+  CMTime paused = [_screen pauseAccumulated];
+  return TimeToMilliseconds(paused);
 }
 
 - (void)cancelSync {

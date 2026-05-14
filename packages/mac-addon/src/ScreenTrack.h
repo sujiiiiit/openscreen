@@ -65,6 +65,13 @@
 - (BOOL)finishWriterSync:(NSError **)error;
 - (void)cancelWriter;
 
+// Pause / resume. Samples are dropped while paused; on resume, the host-clock
+// pause duration is accumulated and subtracted from every subsequent sample
+// PTS so the writer sees a continuous timeline with no gap.
+- (void)setPaused:(BOOL)paused;
+- (BOOL)isPaused;
+- (CMTime)pauseAccumulated;
+
 // Manifest.
 - (NSDictionary *)metadata;
 - (NSURL *)url;

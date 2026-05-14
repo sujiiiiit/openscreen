@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useEffect, useMemo, useState, type MouseEvent } from "react"
+import React, { useEffect, useState, type MouseEvent } from "react"
 import { HugeiconsIcon } from "@hugeicons/react"
 import {
   ArrowDown01Icon,
@@ -9,16 +9,13 @@ import {
   CameraOff01Icon,
   Mic01Icon,
   MicOff01Icon,
-  RecordIcon,
   Settings01Icon,
-  StopIcon,
   VolumeHighIcon,
   ModernTvIcon,
   VolumeOffIcon,
   BrowserIcon,
 } from "@hugeicons/core-free-icons"
 import { Button } from "@/components/ui/button"
-import { Spinner } from "@/components/ui/spinner"
 import { DRAG, NO_DRAG } from "@/lib/window-drag"
 import type {
   RecorderInputKind,
@@ -46,6 +43,8 @@ const EMPTY_STATE: RecorderState = {
   lastResult: null,
   lastError: null,
   pickerMode: null,
+  recordingStartedAt: null,
+  pausedMs: 0,
 }
 
 function menuAnchor(element: HTMLElement): RecorderMenuAnchor {
@@ -59,20 +58,11 @@ function menuAnchor(element: HTMLElement): RecorderMenuAnchor {
 export default function RecorderPage() {
   const [state, setState] = useState<RecorderState>(EMPTY_STATE)
 
-  const isRecording =
-    state.status === "recording" || state.status === "stopping"
-  const isBusy = state.status === "starting" || state.status === "stopping"
   const canChangeInputs = state.status === "idle" && state.pickerMode === null
   const canClose = state.status === "idle"
   const systemAudioLabel = state.settings.systemAudio
     ? "System audio"
     : "No system audio"
-
-  const recordLabel = useMemo(() => {
-    if (state.status === "starting") return "Starting"
-    if (state.status === "stopping") return "Stopping"
-    return isRecording ? "Stop" : "Record"
-  }, [isRecording, state.status])
 
   useEffect(() => {
     if (!window.api?.recorder) return undefined
@@ -100,14 +90,6 @@ export default function RecorderPage() {
   async function startPicker(mode: RecorderPickerMode) {
     if (!window.api?.recorder || !canChangeInputs) return
     const next = await window.api.recorder.startPicker(mode)
-    setState(next)
-  }
-
-  async function toggleRecording() {
-    if (!window.api?.recorder || isBusy) return
-    const next = isRecording
-      ? await window.api.recorder.stop()
-      : await window.api.recorder.start()
     setState(next)
   }
 
@@ -234,28 +216,6 @@ export default function RecorderPage() {
         </Button>
 
         <Separator />
-
-        <Button
-          variant={isRecording ? "destructive" : "default"}
-          size="xs"
-          className="min-w-20 gap-1 text-xs"
-          style={NO_DRAG}
-          onClick={toggleRecording}
-          disabled={isBusy}
-          title={state.lastError ?? undefined}
-          aria-label={isRecording ? "Stop recording" : "Start recording"}
-        >
-          {isBusy ? (
-            <Spinner size={15} className="text-current" />
-          ) : (
-            <HugeiconsIcon
-              icon={isRecording ? StopIcon : RecordIcon}
-              size={15}
-              color="currentColor"
-            />
-          )}
-          {recordLabel}
-        </Button>
 
         <Button
           variant="ghost"

@@ -375,6 +375,75 @@ static Napi::Value CancelRecording(const Napi::CallbackInfo &info) {
   return promise;
 }
 
+// Pause / resume run synchronously — they only toggle flags on each track and
+// emit an event, so there's no benefit to going through AsyncWorker. The
+// returned object reports the current paused state and total paused
+// milliseconds so the JS side can drive a timer off it.
+static Napi::Object PauseStateResult(Napi::Env env, RecorderSession *session) {
+  Napi::Object result = Napi::Object::New(env);
+  result.Set("sessionId", ToStdString([session sessionId]));
+  result.Set("paused", [session isPaused]);
+  result.Set("pausedMs", [session pausedMs]);
+  return result;
+}
+
+static Napi::Value PauseRecording(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "pauseRecording requires a sessionId")
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  std::string sessionId = info[0].As<Napi::String>().Utf8Value();
+  RecorderSession *session = GetSession(sessionId);
+  if (!session) {
+    Napi::Error::New(env, "Unknown recording session").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  NSError *pauseError = nil;
+  if (![session pauseSync:&pauseError]) {
+    NSString *message = pauseError.localizedDescription ?: @"Could not pause recording";
+    Napi::Error::New(env, ToStdString(message)).ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  return PauseStateResult(env, session);
+}
+
+static Napi::Value ResumeRecording(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "resumeRecording requires a sessionId")
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  std::string sessionId = info[0].As<Napi::String>().Utf8Value();
+  RecorderSession *session = GetSession(sessionId);
+  if (!session) {
+    Napi::Error::New(env, "Unknown recording session").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  NSError *resumeError = nil;
+  if (![session resumeSync:&resumeError]) {
+    NSString *message = resumeError.localizedDescription ?: @"Could not resume recording";
+    Napi::Error::New(env, ToStdString(message)).ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  return PauseStateResult(env, session);
+}
+
+static Napi::Value RecordingStatus(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "getRecordingStatus requires a sessionId")
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  std::string sessionId = info[0].As<Napi::String>().Utf8Value();
+  RecorderSession *session = GetSession(sessionId);
+  if (!session) return env.Null();
+  return PauseStateResult(env, session);
+}
+
 static Napi::Value OnRecordingEvent(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
   if (info.Length() < 1 || !info[0].IsFunction()) {
@@ -418,6 +487,90 @@ static Napi::Value StopCameraPreview(const Napi::CallbackInfo &info) {
   return promise;
 }
 
+// Drive NSWindow.collectionBehavior directly. Electron's
+// setVisibleOnAllWorkspaces sets only CanJoinAllSpaces, and that flag is
+// silently cleared by AppKit on level changes, setBounds, and some show/hide
+// transitions. Re-asserting the full mask here — including
+// FullScreenAuxiliary (visible over fullscreen Spaces) and Stationary (don't
+// follow the active Space, just be on every one) — keeps the overlay pinned
+// reliably. Pass the Buffer returned by BrowserWindow.getNativeWindowHandle().
+static Napi::Value PinWindowAcrossSpaces(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsBuffer()) {
+    Napi::TypeError::New(env, "pinWindowAcrossSpaces(handle) requires a Buffer")
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  Napi::Buffer<uint8_t> handleBuffer = info[0].As<Napi::Buffer<uint8_t>>();
+  if (handleBuffer.Length() < sizeof(void *)) {
+    Napi::TypeError::New(env, "Native window handle is too small")
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  void *raw = *reinterpret_cast<void **>(handleBuffer.Data());
+  NSView *view = (__bridge NSView *)raw;
+  NSWindow *window = view.window;
+  if (!window) return Napi::Boolean::New(env, false);
+
+  dispatch_block_t apply = ^{
+    // CanJoinAllSpaces and Stationary belong to mutually-exclusive groups in
+    // AppKit's collectionBehavior model: CanJoinAllSpaces puts the window on
+    // every Space, Stationary makes the window participate in no Space
+    // management at all (like the desktop picture). Combining them produced
+    // the intermittent "sometimes visible, sometimes not" behavior the user
+    // reported — leave Stationary out and stick to the canonical follow-me
+    // mask. FullScreenAuxiliary lets the panel float over fullscreen Spaces;
+    // IgnoresCycle keeps it out of cmd-` window cycling.
+    NSWindowCollectionBehavior behavior =
+        NSWindowCollectionBehaviorCanJoinAllSpaces |
+        NSWindowCollectionBehaviorFullScreenAuxiliary |
+        NSWindowCollectionBehaviorIgnoresCycle;
+    window.collectionBehavior = behavior;
+  };
+  if ([NSThread isMainThread]) {
+    apply();
+  } else {
+    dispatch_sync(dispatch_get_main_queue(), apply);
+  }
+  return Napi::Boolean::New(env, true);
+}
+
+static Napi::ThreadSafeFunction gSpaceChangeTsfn;
+static id gSpaceChangeObserver = nil;
+
+static Napi::Value OnActiveSpaceChange(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsFunction()) {
+    Napi::TypeError::New(env, "onActiveSpaceChange(callback) requires a function")
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  if (gSpaceChangeObserver) {
+    [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:gSpaceChangeObserver];
+    gSpaceChangeObserver = nil;
+  }
+  if (gSpaceChangeTsfn) {
+    gSpaceChangeTsfn.Release();
+  }
+
+  gSpaceChangeTsfn = Napi::ThreadSafeFunction::New(
+      env, info[0].As<Napi::Function>(), "OpenScreenSpaceChange", 0, 1);
+
+  gSpaceChangeObserver = [[[NSWorkspace sharedWorkspace] notificationCenter]
+      addObserverForName:NSWorkspaceActiveSpaceDidChangeNotification
+                  object:nil
+                   queue:[NSOperationQueue mainQueue]
+              usingBlock:^(NSNotification *_Nonnull notification) {
+                gSpaceChangeTsfn.NonBlockingCall([](Napi::Env env, Napi::Function jsCallback) {
+                  jsCallback.Call({});
+                });
+              }];
+  return env.Undefined();
+}
+
 static Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("hello", Napi::Function::New(env, Hello));
   exports.Set("getCapabilities", Napi::Function::New(env, GetCapabilities));
@@ -431,9 +584,14 @@ static Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("startRecording", Napi::Function::New(env, StartRecording));
   exports.Set("stopRecording", Napi::Function::New(env, StopRecording));
   exports.Set("cancelRecording", Napi::Function::New(env, CancelRecording));
+  exports.Set("pauseRecording", Napi::Function::New(env, PauseRecording));
+  exports.Set("resumeRecording", Napi::Function::New(env, ResumeRecording));
+  exports.Set("getRecordingStatus", Napi::Function::New(env, RecordingStatus));
   exports.Set("onRecordingEvent", Napi::Function::New(env, OnRecordingEvent));
   exports.Set("startCameraPreview", Napi::Function::New(env, StartCameraPreview));
   exports.Set("stopCameraPreview", Napi::Function::New(env, StopCameraPreview));
+  exports.Set("pinWindowAcrossSpaces", Napi::Function::New(env, PinWindowAcrossSpaces));
+  exports.Set("onActiveSpaceChange", Napi::Function::New(env, OnActiveSpaceChange));
   return exports;
 }
 

@@ -38,7 +38,12 @@ export interface RecorderSettings {
   cameraLabel: string
 }
 
-export type RecorderStatus = 'idle' | 'starting' | 'recording' | 'stopping'
+export type RecorderStatus =
+  | 'idle'
+  | 'starting'
+  | 'recording'
+  | 'paused'
+  | 'stopping'
 
 export interface RecorderState {
   status: RecorderStatus
@@ -49,17 +54,33 @@ export interface RecorderState {
   lastResult: RecordingResult | null
   lastError: string | null
   pickerMode: RecorderPickerMode | null
+  // Unix-epoch milliseconds when the current session entered the recording
+  // state. Null when not recording. The renderer subtracts pausedMs from
+  // (Date.now() - recordingStartedAt) to drive the live timer.
+  recordingStartedAt: number | null
+  // Total time the current session has spent paused, in milliseconds.
+  pausedMs: number
 }
 
 interface RegisterRecorderHandlersOptions {
   getRecorderWindow: () => BrowserWindow | null
+  getControlsWindow?: () => BrowserWindow | null
   onCameraSelectionChanged?: (deviceId: string | null) => void
   startPicker?: (mode: RecorderPickerMode) => void
   cancelPicker?: () => void
+  // Called whenever state.status changes. Lets main.ts swap between the
+  // recorder bar (idle) and the compact recording controls window
+  // (recording / paused).
+  onStatusChanged?: (status: RecorderStatus, snapshot: RecorderState) => void
 }
 
 let cameraSelectionListener: ((deviceId: string | null) => void) | null = null
 let getRecorderWindowRef: (() => BrowserWindow | null) | null = null
+let getControlsWindowRef: (() => BrowserWindow | null) | null = null
+let statusChangedListener:
+  | ((status: RecorderStatus, snapshot: RecorderState) => void)
+  | null = null
+let lastEmittedStatus: RecorderStatus = 'idle'
 
 const NO_MICROPHONE_LABEL = 'No microphone'
 const NO_CAMERA_LABEL = 'No camera'
@@ -81,6 +102,23 @@ const state: RecorderState = {
   lastResult: null,
   lastError: null,
   pickerMode: null,
+  recordingStartedAt: null,
+  pausedMs: 0,
+}
+
+let pauseStartedAt: number | null = null
+
+function refreshPausedMs(): void {
+  if (state.sessionId && process.platform === 'darwin') {
+    try {
+      const status = addon.getRecordingStatus(state.sessionId)
+      if (status) {
+        state.pausedMs = status.pausedMs
+      }
+    } catch {
+      // Session was torn down between renders — ignore.
+    }
+  }
 }
 
 function publicState(): RecorderState {
@@ -89,9 +127,17 @@ function publicState(): RecorderState {
 
 function emitState(): RecorderState {
   const snapshot = publicState()
-  const target = getRecorderWindowRef?.()
-  if (target && !target.isDestroyed()) {
-    target.webContents.send('recorder:changed', snapshot)
+  const recorder = getRecorderWindowRef?.()
+  if (recorder && !recorder.isDestroyed()) {
+    recorder.webContents.send('recorder:changed', snapshot)
+  }
+  const controls = getControlsWindowRef?.()
+  if (controls && !controls.isDestroyed()) {
+    controls.webContents.send('recorder:changed', snapshot)
+  }
+  if (snapshot.status !== lastEmittedStatus) {
+    lastEmittedStatus = snapshot.status
+    statusChangedListener?.(snapshot.status, snapshot)
   }
   return snapshot
 }
@@ -385,15 +431,53 @@ export async function startRecording(targetOverride?: CaptureTarget): Promise<Re
     state.sessionId = session.sessionId
     state.outputDir = outputDir
     state.activeFiles = session.files
+    state.recordingStartedAt = Date.now()
+    state.pausedMs = 0
+    pauseStartedAt = null
     state.lastError = null
   } catch (error) {
     state.status = 'idle'
     state.sessionId = null
     state.outputDir = null
     state.activeFiles = null
+    state.recordingStartedAt = null
+    state.pausedMs = 0
+    pauseStartedAt = null
     state.lastError = errorMessage(error)
   }
 
+  return emitState()
+}
+
+export function pauseRecording(): RecorderState {
+  if (state.status !== 'recording' || !state.sessionId) return publicState()
+  if (process.platform !== 'darwin') return publicState()
+
+  try {
+    const result = addon.pauseRecording(state.sessionId)
+    state.status = 'paused'
+    state.pausedMs = result.pausedMs
+    pauseStartedAt = Date.now()
+    state.lastError = null
+  } catch (error) {
+    state.lastError = errorMessage(error)
+  }
+  return emitState()
+}
+
+export function resumeRecording(): RecorderState {
+  if (state.status !== 'paused' || !state.sessionId) return publicState()
+  if (process.platform !== 'darwin') return publicState()
+
+  try {
+    const result = addon.resumeRecording(state.sessionId)
+    state.status = 'recording'
+    state.pausedMs = result.pausedMs
+    pauseStartedAt = null
+    state.lastError = null
+  } catch (error) {
+    state.lastError = errorMessage(error)
+  }
   return emitState()
 }
 
@@ -435,15 +519,27 @@ function cancelPicker(options: RegisterRecorderHandlersOptions): RecorderState {
 }
 
 async function stopRecording(): Promise<RecorderState> {
-  if (state.status !== 'recording' || !state.sessionId) return publicState()
+  if (state.status !== 'recording' && state.status !== 'paused') return publicState()
+  if (!state.sessionId) return publicState()
 
   const sessionId = state.sessionId
+  const previousStatus = state.status
+  // If we're stopping while paused, resume first so the writers can flush
+  // any in-flight pause bookkeeping cleanly before finishWriterSync.
+  if (previousStatus === 'paused') {
+    try {
+      addon.resumeRecording(sessionId)
+    } catch {
+      // Native side may have already torn down — proceed with stop anyway.
+    }
+  }
   state.status = 'stopping'
   state.lastError = null
   emitState()
 
   try {
     const result = await addon.stopRecording(sessionId)
+    refreshPausedMs()
     state.status = 'idle'
     state.sessionId = null
     state.activeFiles = null
@@ -451,9 +547,12 @@ async function stopRecording(): Promise<RecorderState> {
       ? path.dirname(result.files.manifest)
       : state.outputDir
     state.lastResult = result
+    state.recordingStartedAt = null
+    state.pausedMs = 0
+    pauseStartedAt = null
     state.lastError = null
   } catch (error) {
-    state.status = 'recording'
+    state.status = previousStatus
     state.lastError = errorMessage(error)
   }
 
@@ -463,6 +562,8 @@ async function stopRecording(): Promise<RecorderState> {
 export function registerRecorderHandlers(options: RegisterRecorderHandlersOptions): void {
   cameraSelectionListener = options.onCameraSelectionChanged ?? null
   getRecorderWindowRef = options.getRecorderWindow
+  getControlsWindowRef = options.getControlsWindow ?? null
+  statusChangedListener = options.onStatusChanged ?? null
   ipcMain.handle('recorder:getState', () => publicState())
   ipcMain.handle(
     'recorder:showInputMenu',
@@ -476,6 +577,8 @@ export function registerRecorderHandlers(options: RegisterRecorderHandlersOption
   )
   ipcMain.handle('recorder:start', () => startRecording())
   ipcMain.handle('recorder:stop', () => stopRecording())
+  ipcMain.handle('recorder:pause', () => pauseRecording())
+  ipcMain.handle('recorder:resume', () => resumeRecording())
   ipcMain.handle('recorder:startPicker', (_event, mode: RecorderPickerMode) =>
     startPicker(mode, options),
   )

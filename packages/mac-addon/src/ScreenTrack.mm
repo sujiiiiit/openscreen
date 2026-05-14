@@ -9,6 +9,8 @@
 
 #include <sys/sysctl.h>
 
+#include <vector>
+
 #include "Events.h"
 
 // Match OBS: 10-bit packed RGB (`l10r` = kCVPixelFormatType_ARGB2101010LEPacked).
@@ -118,6 +120,15 @@ static NSDictionary *DictionaryFromCGRect(CGRect rect) {
   NSString *_configuredGamut;              // "P3" | "Rec.709"
   NSInteger _configuredBitRate;
   NSInteger _configuredKeyframeInterval;
+
+  // Pause / resume state. Guarded by _writerLock — read on every sample
+  // append, mutated only by -setPaused: from the recorder session's main
+  // dispatch. The append paths drop samples while _paused and shift PTS by
+  // _pauseAccumulated when running, so the .mov has no gap on resume.
+  BOOL _paused;
+  CMTime _pauseStartHost;
+  CMTime _pauseAccumulated;
+  NSInteger _pauseCycleCount;
 }
 
 - (instancetype)initWithOptions:(const RecordingOptions &)options
@@ -129,6 +140,8 @@ static NSDictionary *DictionaryFromCGRect(CGRect rect) {
     _videoQueue = dispatch_queue_create("openscreen.sck.screen", DISPATCH_QUEUE_SERIAL);
     _writerLock = [[NSLock alloc] init];
     _sessionStartTime = kCMTimeInvalid;
+    _pauseStartHost = kCMTimeInvalid;
+    _pauseAccumulated = kCMTimeZero;
   }
   return self;
 }
@@ -699,13 +712,79 @@ static NSDictionary *DictionaryFromCGRect(CGRect rect) {
   return YES;
 }
 
+// Returns NO + drop if currently paused. Otherwise writes the active pause
+// shift to *outShift so callers can adjust PTS / build a shifted sample
+// buffer. _writerLock guards both flags.
+- (BOOL)gateSampleAppend:(CMTime *)outShift {
+  [_writerLock lock];
+  if (_writerFailed) { [_writerLock unlock]; return NO; }
+  if (_paused)       { [_writerLock unlock]; return NO; }
+  if (outShift) *outShift = _pauseAccumulated;
+  [_writerLock unlock];
+  return YES;
+}
+
+// Build a copy of `original` with PTS/DTS shifted backwards by `shift`. The
+// returned buffer must be CFReleased by the caller. Returns NULL on failure
+// or when `shift` is zero (the caller should reuse `original` in that case).
+static CMSampleBufferRef ScreenTrackShiftedSampleBuffer(
+    CMSampleBufferRef original, CMTime shift) {
+  if (CMTimeCompare(shift, kCMTimeZero) == 0) return NULL;
+  CMItemCount entries = 0;
+  if (CMSampleBufferGetSampleTimingInfoArray(original, 0, NULL, &entries) != noErr ||
+      entries == 0) {
+    return NULL;
+  }
+  CMSampleTimingInfo stackTiming[16];
+  CMSampleTimingInfo *timing = stackTiming;
+  std::vector<CMSampleTimingInfo> heap;
+  if (entries > 16) {
+    heap.resize(entries);
+    timing = heap.data();
+  }
+  if (CMSampleBufferGetSampleTimingInfoArray(original, entries, timing, &entries) != noErr) {
+    return NULL;
+  }
+  for (CMItemCount i = 0; i < entries; ++i) {
+    if (CMTIME_IS_VALID(timing[i].presentationTimeStamp)) {
+      timing[i].presentationTimeStamp =
+          CMTimeSubtract(timing[i].presentationTimeStamp, shift);
+    }
+    if (CMTIME_IS_VALID(timing[i].decodeTimeStamp)) {
+      timing[i].decodeTimeStamp = CMTimeSubtract(timing[i].decodeTimeStamp, shift);
+    }
+  }
+  CMSampleBufferRef shifted = NULL;
+  OSStatus status = CMSampleBufferCreateCopyWithNewTiming(
+      kCFAllocatorDefault, original, entries, timing, &shifted);
+  if (status != noErr) {
+    if (shifted) CFRelease(shifted);
+    return NULL;
+  }
+  return shifted;
+}
+
 - (void)appendVideoSampleBuffer:(CMSampleBufferRef)sampleBuffer {
   if (!_videoInput) return;
   CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
   if (CMTIME_IS_INVALID(pts)) return;
-  if (![self ensureSessionStartedWithPTS:pts]) return;
+
+  CMTime shift = kCMTimeZero;
+  if (![self gateSampleAppend:&shift]) {
+    _videoSamplesDropped++;
+    return;
+  }
+
+  CMSampleBufferRef shifted = ScreenTrackShiftedSampleBuffer(sampleBuffer, shift);
+  CMSampleBufferRef target = shifted ?: sampleBuffer;
+  CMTime adjustedPts = (shifted != NULL) ? CMTimeSubtract(pts, shift) : pts;
+
+  if (![self ensureSessionStartedWithPTS:adjustedPts]) {
+    if (shifted) CFRelease(shifted);
+    return;
+  }
   if (_videoInput.readyForMoreMediaData) {
-    if ([_videoInput appendSampleBuffer:sampleBuffer]) {
+    if ([_videoInput appendSampleBuffer:target]) {
       _videoSamplesAppended++;
     } else {
       _videoSamplesDropped++;
@@ -718,6 +797,7 @@ static NSDictionary *DictionaryFromCGRect(CGRect rect) {
                  "Video writer is not ready for more frame data", 0});
     }
   }
+  if (shifted) CFRelease(shifted);
 }
 
 - (void)appendAudioSampleBuffer:(CMSampleBufferRef)sampleBuffer
@@ -726,6 +806,10 @@ static NSDictionary *DictionaryFromCGRect(CGRect rect) {
   if (!input) return;
   CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
   if (CMTIME_IS_INVALID(pts)) return;
+
+  CMTime shift = kCMTimeZero;
+  if (![self gateSampleAppend:&shift]) return;
+
   // Audio samples that arrive before the first video frame are dropped — the
   // session must start at a video PTS to keep the .mov starting with a
   // displayable frame.
@@ -733,9 +817,14 @@ static NSDictionary *DictionaryFromCGRect(CGRect rect) {
     if (droppedBeforeStart) (*droppedBeforeStart)++;
     return;
   }
+
+  CMSampleBufferRef shifted = ScreenTrackShiftedSampleBuffer(sampleBuffer, shift);
+  CMSampleBufferRef target = shifted ?: sampleBuffer;
+
   if (input.readyForMoreMediaData) {
-    [input appendSampleBuffer:sampleBuffer];
+    [input appendSampleBuffer:target];
   }
+  if (shifted) CFRelease(shifted);
 }
 
 - (void)appendSystemAudioSampleBuffer:(CMSampleBufferRef)sampleBuffer {
@@ -756,6 +845,53 @@ static NSDictionary *DictionaryFromCGRect(CGRect rect) {
 
 - (void)markStopping {
   _stopping = YES;
+}
+
+- (void)setPaused:(BOOL)paused {
+  [_writerLock lock];
+  if (_paused == paused) {
+    [_writerLock unlock];
+    return;
+  }
+  if (paused) {
+    _pauseStartHost = CMClockGetTime(CMClockGetHostTimeClock());
+    _paused = YES;
+  } else {
+    if (CMTIME_IS_VALID(_pauseStartHost)) {
+      CMTime now = CMClockGetTime(CMClockGetHostTimeClock());
+      CMTime delta = CMTimeSubtract(now, _pauseStartHost);
+      if (CMTimeCompare(delta, kCMTimeZero) > 0) {
+        _pauseAccumulated = CMTimeAdd(_pauseAccumulated, delta);
+      }
+    }
+    _pauseStartHost = kCMTimeInvalid;
+    _paused = NO;
+    _pauseCycleCount += 1;
+  }
+  [_writerLock unlock];
+}
+
+- (BOOL)isPaused {
+  [_writerLock lock];
+  BOOL value = _paused;
+  [_writerLock unlock];
+  return value;
+}
+
+- (CMTime)pauseAccumulated {
+  [_writerLock lock];
+  CMTime value = _pauseAccumulated;
+  // If we're paused right now, fold the in-flight pause into the reported
+  // total so the manifest / UI sees a monotonically growing duration.
+  if (_paused && CMTIME_IS_VALID(_pauseStartHost)) {
+    CMTime now = CMClockGetTime(CMClockGetHostTimeClock());
+    CMTime delta = CMTimeSubtract(now, _pauseStartHost);
+    if (CMTimeCompare(delta, kCMTimeZero) > 0) {
+      value = CMTimeAdd(value, delta);
+    }
+  }
+  [_writerLock unlock];
+  return value;
 }
 
 - (BOOL)finishWriterSync:(NSError **)error {
@@ -834,6 +970,11 @@ static NSDictionary *DictionaryFromCGRect(CGRect rect) {
   }
   meta[@"allowFrameReordering"] = @NO;
   meta[@"queueDepth"] = @5;
+  if (_pauseCycleCount > 0) meta[@"pauseCycles"] = @(_pauseCycleCount);
+  CMTime totalPaused = [self pauseAccumulated];
+  if (CMTimeCompare(totalPaused, kCMTimeZero) > 0) {
+    meta[@"pausedMs"] = @(TimeToMilliseconds(totalPaused));
+  }
   if (_configuredWidth > 0) meta[@"width"] = @(_configuredWidth);
   if (_configuredHeight > 0) meta[@"height"] = @(_configuredHeight);
   if (_configuredScaleFactor > 0) meta[@"scaleFactor"] = @(_configuredScaleFactor);
