@@ -131,6 +131,8 @@
 /* Electron transparent windows: pages that mount [data-window] draw their own surface. */
 html:has([data-window="recorder"]),
 html:has([data-window="recorder"]) body,
+html:has([data-window="recording-controls"]),
+html:has([data-window="recording-controls"]) body,
 html:has([data-window="permission"]),
 html:has([data-window="permission"]) body,
 html:has([data-window="camera"]),
@@ -142,6 +144,8 @@ html:has([data-window="window-picker"]) body {
 
 html:has([data-window="recorder"]),
 html:has([data-window="recorder"]) body,
+html:has([data-window="recording-controls"]),
+html:has([data-window="recording-controls"]) body,
 html:has([data-window="camera"]),
 html:has([data-window="camera"]) body,
 html:has([data-window="window-picker"]),

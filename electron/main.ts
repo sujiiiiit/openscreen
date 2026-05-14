@@ -33,7 +33,8 @@ let recordingControlsWin: BrowserWindow | null = null
 let cameraWin: BrowserWindow | null = null
 let permissionWin: BrowserWindow | null = null
 let activeCameraDeviceId: string | null = null
-const DEV_URL = 'http://localhost:3000'
+const fixedWindowSizeEnforcers = new WeakMap<BrowserWindow, () => void>()
+const DEV_URL = 'http://localhost:3535'
 const OUT_DIR = path.resolve(__dirname, '..', 'out')
 const SHARED_WEB_PREFERENCES = {
   preload: path.join(__dirname, 'preload.js'),
@@ -266,6 +267,31 @@ function keepRecorderBarOnTop(win: BrowserWindow): void {
   keepWindowOnEveryWorkspace(win)
 }
 
+function enforceFixedWindowSize(win: BrowserWindow, width: number, height: number): void {
+  const existingEnforcer = fixedWindowSizeEnforcers.get(win)
+  if (existingEnforcer) {
+    existingEnforcer()
+    return
+  }
+
+  const enforce = () => {
+    if (win.isDestroyed()) return
+    const [currentWidth, currentHeight] = win.getSize()
+    if (currentWidth !== width || currentHeight !== height) {
+      win.setSize(width, height, false)
+    }
+  }
+
+  win.setMinimumSize(width, height)
+  win.setMaximumSize(width, height)
+  win.setResizable(false)
+  fixedWindowSizeEnforcers.set(win, enforce)
+  enforce()
+  win.on('resize', enforce)
+  win.on('show', enforce)
+  win.webContents.on('did-finish-load', enforce)
+}
+
 function loadAppRoute(win: BrowserWindow, route: string): void {
   if (isDev) {
     void win.loadURL(`${DEV_URL}${route}`)
@@ -376,15 +402,18 @@ function showRecorderWindowOnly(): void {
 }
 
 function showRecordingControlsWindow(): void {
+  const winW = windowConfigs.recordingControlsWin.width ?? 240
+  const winH = windowConfigs.recordingControlsWin.height ?? 52
+
   if (recordingControlsWin && !recordingControlsWin.isDestroyed()) {
+    enforceFixedWindowSize(recordingControlsWin, winW, winH)
     if (!recordingControlsWin.isVisible()) recordingControlsWin.show()
     keepRecorderBarOnTop(recordingControlsWin)
+    enforceFixedWindowSize(recordingControlsWin, winW, winH)
     return
   }
 
   const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize
-  const winW = windowConfigs.recordingControlsWin.width ?? 240
-  const winH = windowConfigs.recordingControlsWin.height ?? 52
   const x = Math.round((screenW - winW) / 2)
   const y = screenH - winH - 80
 
@@ -396,12 +425,16 @@ function showRecordingControlsWindow(): void {
   })
 
   keepRecorderBarOnTop(recordingControlsWin)
+  enforceFixedWindowSize(recordingControlsWin, winW, winH)
   if (process.platform === 'darwin') {
     recordingControlsWin.setWindowButtonVisibility(false)
   }
   hardenWebContents(recordingControlsWin)
   recordingControlsWin.once('ready-to-show', () => {
-    if (recordingControlsWin) recordingControlsWin.showInactive()
+    if (recordingControlsWin) {
+      enforceFixedWindowSize(recordingControlsWin, winW, winH)
+      recordingControlsWin.showInactive()
+    }
   })
   recordingControlsWin.on('closed', () => {
     recordingControlsWin = null
@@ -422,15 +455,19 @@ function createRecorderBarWindow(): void {
     return
   }
 
+  const winW = windowConfigs.recorderBarWin.width ?? 660
+  const winH = windowConfigs.recorderBarWin.height ?? 52
+
   if (recorderBarWin && !recorderBarWin.isDestroyed()) {
+    enforceFixedWindowSize(recorderBarWin, winW, winH)
     keepRecorderBarOnTop(recorderBarWin)
+    enforceFixedWindowSize(recorderBarWin, winW, winH)
     focusWindow(recorderBarWin)
+    enforceFixedWindowSize(recorderBarWin, winW, winH)
     return
   }
 
   const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize
-  const winW = windowConfigs.recorderBarWin.width ?? 660
-  const winH = windowConfigs.recorderBarWin.height ?? 52
   const x = Math.round((screenW - winW) / 2)
   const y = screenH - winH - 80
 
@@ -442,6 +479,7 @@ function createRecorderBarWindow(): void {
   })
 
   keepRecorderBarOnTop(recorderBarWin)
+  enforceFixedWindowSize(recorderBarWin, winW, winH)
   if (process.platform === 'darwin') {
     recorderBarWin.setWindowButtonVisibility(false)
   }
