@@ -20,6 +20,7 @@ import {
   startRecording,
 } from './ipc/recorder'
 import {
+  clearLockedRegionOverlay,
   disposeWindowPicker,
   registerWindowPickerHandlers,
   startWindowPicker,
@@ -635,6 +636,7 @@ app.whenReady().then(() => {
         hideRecorderBarWindow()
         showRecordingControlsWindow()
       } else if (status === 'idle') {
+        clearLockedRegionOverlay()
         hideRecordingControlsWindow()
         showRecorderWindowOnly()
       }

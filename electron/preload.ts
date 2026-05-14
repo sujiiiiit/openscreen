@@ -7,7 +7,12 @@ import type {
   RecorderPickerMode,
   RecorderState,
 } from './ipc/recorder'
-import type { PickerOverlayTarget } from './ipc/window-picker'
+import type {
+  PickerOverlayTarget,
+  RegionSelectionBounds,
+  RegionSelectionResult,
+  WindowPickerSession,
+} from './ipc/window-picker'
 
 function subscribe<T>(channel: string, callback: (payload: T) => void): () => void {
   const listener = (_event: Electron.IpcRendererEvent, payload: T) => callback(payload)
@@ -57,6 +62,12 @@ const api = {
       ipcRenderer.invoke('windowPicker:setInteractive', interactive),
     getCurrentTarget: (): Promise<PickerOverlayTarget | null> =>
       ipcRenderer.invoke('windowPicker:getCurrentTarget'),
+    getSession: (): Promise<WindowPickerSession> =>
+      ipcRenderer.invoke('windowPicker:getSession'),
+    setRegionSelection: (
+      bounds: RegionSelectionBounds | null,
+    ): Promise<RegionSelectionResult> =>
+      ipcRenderer.invoke('windowPicker:setRegionSelection', bounds),
     onTargetChanged: (callback: (target: PickerOverlayTarget | null) => void) =>
       subscribe<PickerOverlayTarget | null>('windowPicker:targetChanged', callback),
   },

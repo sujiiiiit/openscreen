@@ -24,7 +24,7 @@ import addon, {
 // `electron/` (which the Next.js tsconfig excludes). Edits here MUST be
 // reflected there.
 export type RecorderInputKind = 'microphone' | 'camera' | 'systemAudio'
-export type RecorderPickerMode = 'display' | 'window'
+export type RecorderPickerMode = 'display' | 'window' | 'region'
 
 export interface RecorderMenuAnchor {
   x: number
@@ -648,7 +648,7 @@ function startPicker(
   mode: RecorderPickerMode,
   options: RegisterRecorderHandlersOptions,
 ): RecorderState {
-  if (mode !== 'display' && mode !== 'window') {
+  if (mode !== 'display' && mode !== 'window' && mode !== 'region') {
     state.lastError = 'Unknown recording picker mode.'
     return emitState()
   }
@@ -657,12 +657,21 @@ function startPicker(
     state.lastError = 'Recording picker is not available.'
     return emitState()
   }
-  if (state.pickerMode === mode) return publicState()
+  if (state.pickerMode === mode) {
+    options.cancelPicker?.()
+    state.pickerMode = null
+    state.lastError = null
+    return emitState()
+  }
 
   try {
     state.pickerMode = mode
     state.lastError = null
     options.startPicker(mode)
+    if (mode === 'region') {
+      const recorder = options.getRecorderWindow()
+      if (recorder && !recorder.isDestroyed()) recorder.hide()
+    }
   } catch (error) {
     state.pickerMode = null
     state.lastError = errorMessage(error)

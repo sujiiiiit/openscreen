@@ -43,7 +43,7 @@ export interface PermissionChangeEvent {
 }
 
 export type RecorderInputKind = 'microphone' | 'camera' | 'systemAudio'
-export type RecorderPickerMode = 'display' | 'window'
+export type RecorderPickerMode = 'display' | 'window' | 'region'
 
 export interface RecorderMenuAnchor {
   x: number
@@ -86,7 +86,27 @@ export interface PickerOverlayTarget {
   modeLabel: string
   bounds: { x: number; y: number; width: number; height: number }
   iconDataUrl?: string
+  locked?: boolean
   target: CaptureTarget
+}
+
+export interface WindowPickerSession {
+  mode: RecorderPickerMode | null
+  minRegionWidth: number
+  minRegionHeight: number
+  locked: boolean
+}
+
+export interface RegionSelectionBounds {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface RegionSelectionResult {
+  target: PickerOverlayTarget | null
+  message: string | null
 }
 
 export interface Api {
@@ -125,6 +145,8 @@ export interface Api {
     cancel: () => Promise<void>
     setInteractive: (interactive: boolean) => Promise<void>
     getCurrentTarget: () => Promise<PickerOverlayTarget | null>
+    getSession: () => Promise<WindowPickerSession>
+    setRegionSelection: (bounds: RegionSelectionBounds | null) => Promise<RegionSelectionResult>
     onTargetChanged: (callback: (target: PickerOverlayTarget | null) => void) => Unsubscribe
   }
 }

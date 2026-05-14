@@ -58,6 +58,11 @@ static RecordingOptions ParseRecordingOptions(const Napi::CallbackInfo &info) {
     options.target.y = GetDoubleProp(target, "y", 0);
     options.target.width = GetDoubleProp(target, "width", 0);
     options.target.height = GetDoubleProp(target, "height", 0);
+    options.target.sourceX = GetDoubleProp(target, "sourceX", 0);
+    options.target.sourceY = GetDoubleProp(target, "sourceY", 0);
+    options.target.sourceWidth = GetDoubleProp(target, "sourceWidth", 0);
+    options.target.sourceHeight = GetDoubleProp(target, "sourceHeight", 0);
+    options.target.scaleFactor = GetDoubleProp(target, "scaleFactor", 0);
   }
 
   return options;
@@ -360,6 +365,13 @@ static Napi::Value StartRecording(const Napi::CallbackInfo &info) {
 
   if (options.outputDir.empty()) {
     return reject("startRecording requires outputDir");
+  }
+
+  if (options.target.type == "region" &&
+      (options.target.displayId == 0 ||
+       options.target.width <= 0 ||
+       options.target.height <= 0)) {
+    return reject("Region recording requires displayId, width, and height");
   }
 
   BOOL isDirectory = NO;

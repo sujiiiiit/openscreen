@@ -338,6 +338,15 @@
     target[@"width"] = @(_options.target.width);
     target[@"height"] = @(_options.target.height);
   }
+  if (_options.target.sourceWidth > 0 && _options.target.sourceHeight > 0) {
+    target[@"sourceX"] = @(_options.target.sourceX);
+    target[@"sourceY"] = @(_options.target.sourceY);
+    target[@"sourceWidth"] = @(_options.target.sourceWidth);
+    target[@"sourceHeight"] = @(_options.target.sourceHeight);
+  }
+  if (_options.target.scaleFactor > 0) {
+    target[@"scaleFactor"] = @(_options.target.scaleFactor);
+  }
   return target;
 }
 

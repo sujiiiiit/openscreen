@@ -11,6 +11,7 @@ export type PermissionState =
 export type CaptureTarget =
   | (CaptureTargetMetadata & { type: 'display'; displayId?: number })
   | (CaptureTargetMetadata & { type: 'window'; windowId: number })
+  | (CaptureTargetMetadata & { type: 'region'; displayId: number })
   | (CaptureTargetMetadata & { type: 'application'; bundleId: string; displayId?: number })
 
 export interface CaptureTargetMetadata {
@@ -22,6 +23,11 @@ export interface CaptureTargetMetadata {
   y?: number
   width?: number
   height?: number
+  sourceX?: number
+  sourceY?: number
+  sourceWidth?: number
+  sourceHeight?: number
+  scaleFactor?: number
 }
 
 export interface StartRecordingOptions {

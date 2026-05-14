@@ -21,6 +21,11 @@ struct CaptureTarget {
   double y = 0;
   double width = 0;
   double height = 0;
+  double sourceX = 0;
+  double sourceY = 0;
+  double sourceWidth = 0;
+  double sourceHeight = 0;
+  double scaleFactor = 0;
 };
 
 struct RecordingOptions {

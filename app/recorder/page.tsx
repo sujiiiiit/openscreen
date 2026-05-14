@@ -14,6 +14,7 @@ import {
   ModernTvIcon,
   VolumeOffIcon,
   BrowserIcon,
+  DashedLine02Icon,
 } from "@hugeicons/core-free-icons"
 import { Button } from "@/components/ui/button"
 import { DRAG, NO_DRAG } from "@/lib/window-drag"
@@ -25,7 +26,7 @@ import type {
 } from "@/types/api"
 
 function Separator() {
-  return <div className="mx-2 h-5 w-px shrink-0 bg-border" aria-hidden="true" />
+  return <div className="mx-1 h-5 w-px shrink-0 bg-border" aria-hidden="true" />
 }
 
 const EMPTY_STATE: RecorderState = {
@@ -99,7 +100,11 @@ export default function RecorderPage() {
 
   async function startPicker(mode: RecorderPickerMode) {
     if (!window.api?.recorder || !canPickTarget) return
-    if (state.pickerMode === mode) return
+    if (state.pickerMode === mode) {
+      const next = await window.api.recorder.cancelPicker()
+      setState(next)
+      return
+    }
     const next = await window.api.recorder.startPicker(mode)
     setState(next)
   }
@@ -107,10 +112,10 @@ export default function RecorderPage() {
   return (
     <div
       data-window="recorder"
-      className="flex h-13 w-full items-center justify-center overflow-hidden"
+      className="flex w-full h-13 items-center justify-center overflow-hidden"
       style={DRAG}
     >
-      <div className="flex h-full w-190 items-center overflow-hidden px-2 select-none">
+      <div className="flex h-full w-full items-center overflow-hidden px-1 select-none">
         <Button
           variant="ghost"
           size="icon"
@@ -150,12 +155,25 @@ export default function RecorderPage() {
         >
           <HugeiconsIcon icon={BrowserIcon} />
         </Button>
+        <Button
+          variant={state.pickerMode === "region" ? "secondary" : "ghost"}
+          size="icon-lg"
+          className="hover:bg-white/20 dark:hover:bg-white/5"
+          style={NO_DRAG}
+          onClick={() => startPicker("region")}
+          disabled={!canPickTarget}
+          aria-pressed={state.pickerMode === "region"}
+          title="Region"
+          aria-label="Select region to record"
+        >
+          <HugeiconsIcon icon={DashedLine02Icon} />
+        </Button>
         <Separator />
 
         <Button
           variant="ghost"
           size="sm"
-          className="max-w-34 min-w-0 justify-start text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
+          className="w-34 shrink-0 min-w-0 justify-center text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
           style={
             {
               "--label-color": state.settings.cameraDeviceId
@@ -182,7 +200,7 @@ export default function RecorderPage() {
         <Button
           variant="ghost"
           size="sm"
-          className="max-w-38 min-w-0 justify-start text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
+          className="w-34 shrink-0 min-w-0 justify-center text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
           style={
             {
               "--label-color": state.settings.microphoneDeviceId
@@ -207,7 +225,7 @@ export default function RecorderPage() {
         <Button
           variant="ghost"
           size="sm"
-          className="max-w-36 min-w-0 justify-start text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
+          className="w-34 shrink-0 min-w-0 justify-center text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
           style={
             {
               "--label-color": state.settings.systemAudio

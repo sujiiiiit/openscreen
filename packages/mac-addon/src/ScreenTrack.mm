@@ -61,6 +61,12 @@ static NSDictionary *DictionaryFromCGRect(CGRect rect) {
   };
 }
 
+static NSInteger EvenDimensionFromDouble(double value) {
+  NSInteger dimension = (NSInteger)llround(value);
+  if (dimension % 2 != 0) dimension -= 1;
+  return MAX(2, dimension);
+}
+
 @implementation ScreenTrack {
   RecordingOptions _options;
   NSString *_sessionId;
@@ -120,6 +126,8 @@ static NSDictionary *DictionaryFromCGRect(CGRect rect) {
   NSString *_configuredGamut;              // "P3" | "Rec.709"
   NSInteger _configuredBitRate;
   NSInteger _configuredKeyframeInterval;
+  CGRect _configuredSourceRect;
+  BOOL _hasConfiguredSourceRect;
 
   // Pause / resume state. Guarded by _writerLock — read on every sample
   // append, mutated only by -setPaused: from the recorder session's main
@@ -309,6 +317,45 @@ static NSDictionary *DictionaryFromCGRect(CGRect rect) {
   return YES;
 }
 
+- (CGRect)regionSourceRectForDisplay:(SCDisplay *)display scale:(CGFloat)scale {
+  double sourceWidth = _options.target.sourceWidth > 0
+      ? _options.target.sourceWidth
+      : _options.target.width;
+  double sourceHeight = _options.target.sourceHeight > 0
+      ? _options.target.sourceHeight
+      : _options.target.height;
+  double sourceX = _options.target.sourceX;
+  double sourceY = _options.target.sourceY;
+
+  if (_options.target.sourceWidth <= 0 || _options.target.sourceHeight <= 0) {
+    CGRect displayBounds = display ? CGDisplayBounds(display.displayID) : CGRectZero;
+    sourceX = _options.target.x - displayBounds.origin.x;
+    sourceY = _options.target.y - displayBounds.origin.y;
+  }
+
+  CGRect rect = CGRectMake(sourceX, sourceY, sourceWidth, sourceHeight);
+  if (rect.size.width <= 0 || rect.size.height <= 0) return CGRectZero;
+
+  NSScreen *screen = display ? [self screenForDisplayID:display.displayID] : nil;
+  CGFloat pointWidth = screen ? screen.frame.size.width : 0;
+  CGFloat pointHeight = screen ? screen.frame.size.height : 0;
+  if ((pointWidth <= 0 || pointHeight <= 0) && display) {
+    CGFloat safeScale = scale > 0 ? scale : 1.0;
+    pointWidth = display.width / safeScale;
+    pointHeight = display.height / safeScale;
+  }
+
+  if (pointWidth > 0 && pointHeight > 0) {
+    CGRect displayRect = CGRectMake(0, 0, pointWidth, pointHeight);
+    CGRect clipped = CGRectIntersection(rect, displayRect);
+    if (!CGRectIsNull(clipped) && clipped.size.width > 0 && clipped.size.height > 0) {
+      rect = clipped;
+    }
+  }
+
+  return rect;
+}
+
 - (SCStreamConfiguration *)streamConfigurationForContent:(SCShareableContent *)content {
   SCStreamConfiguration *configuration = [[SCStreamConfiguration alloc] init];
   int width = _options.width;
@@ -316,9 +363,30 @@ static NSDictionary *DictionaryFromCGRect(CGRect rect) {
   CGFloat scale = 1.0;
   NSString *source = @"options";
   NSScreen *targetScreen = nil;
+  BOOL isRegionCapture = _options.target.type == "region";
+  BOOL isWindowCapture = _options.target.type == "window";
+
+  if (isRegionCapture) {
+    SCDisplay *display = [self displayFromContent:content];
+    targetScreen = display ? [self screenForDisplayID:display.displayID] : nil;
+    scale = _options.target.scaleFactor > 0
+        ? _options.target.scaleFactor
+        : (targetScreen ? targetScreen.backingScaleFactor : 1.0);
+    CGRect sourceRect = [self regionSourceRectForDisplay:display scale:scale];
+    if (sourceRect.size.width > 0 && sourceRect.size.height > 0) {
+      configuration.sourceRect = sourceRect;
+      _configuredSourceRect = sourceRect;
+      _hasConfiguredSourceRect = YES;
+      if (width <= 0 || height <= 0) {
+        width = (int)EvenDimensionFromDouble(sourceRect.size.width * scale);
+        height = (int)EvenDimensionFromDouble(sourceRect.size.height * scale);
+        source = @"region.sourceRect * scaleFactor";
+      }
+    }
+  }
 
   if (width <= 0 || height <= 0) {
-    if (_options.target.type == "window") {
+    if (isWindowCapture) {
       SCWindow *window = [self windowFromContent:content];
       targetScreen = [NSScreen mainScreen];
       scale = targetScreen ? targetScreen.backingScaleFactor : 2.0;
@@ -355,7 +423,6 @@ static NSDictionary *DictionaryFromCGRect(CGRect rect) {
 
   configuration.width = width;
   configuration.height = height;
-  BOOL isWindowCapture = _options.target.type == "window";
   configuration.scalesToFit = isWindowCapture ? YES : NO;
   configuration.preservesAspectRatio = YES;
   if (isWindowCapture) {
@@ -978,6 +1045,9 @@ static CMSampleBufferRef ScreenTrackShiftedSampleBuffer(
   if (_configuredWidth > 0) meta[@"width"] = @(_configuredWidth);
   if (_configuredHeight > 0) meta[@"height"] = @(_configuredHeight);
   if (_configuredScaleFactor > 0) meta[@"scaleFactor"] = @(_configuredScaleFactor);
+  if (_hasConfiguredSourceRect) {
+    meta[@"sourceRect"] = DictionaryFromCGRect(_configuredSourceRect);
+  }
   if (_pixelSizeSource) meta[@"pixelSizeSource"] = _pixelSizeSource;
   if (_configuredColorSpace) meta[@"colorSpace"] = _configuredColorSpace;
   meta[@"videoSamples"] = @(_videoSamplesAppended);
