@@ -47,6 +47,12 @@ export function startCameraPreview(
 
         const win = options.getCameraWindow()
         if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return
+        // Drop the frame if there's no one to draw it. The native side caps
+        // its TSFN queue at 4, but webContents.send queues unboundedly into
+        // the IPC pipe. At 640x480 BGRA each frame is ~1.2 MB; a stalled or
+        // hidden renderer turns the IPC queue into a memory leak that grows
+        // until the renderer catches up or the process runs out of memory.
+        if (!win.isVisible() || win.isMinimized()) return
 
         if (!didLogFirstFrame) {
           didLogFirstFrame = true

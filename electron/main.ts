@@ -16,7 +16,10 @@ import {
 } from './ipc/permissions'
 import {
   finishPickerMode,
+  flushActiveRecording,
+  isRecordingActive,
   registerRecorderHandlers,
+  reservePickerStart,
   startRecording,
 } from './ipc/recorder'
 import {
@@ -184,10 +187,14 @@ function hideCameraWindow(): void {
 function closeCameraWindow(): void {
   activeCameraDeviceId = null
   stopNativeCameraPreview()
-  if (cameraWin && !cameraWin.isDestroyed()) {
-    cameraWin.close()
-  }
+  const win = cameraWin
+  // Drop the module reference synchronously so a follow-up showCameraWindow
+  // call doesn't try to reuse the closing window. The captured `win` is what
+  // we actually wait on closing.
   cameraWin = null
+  if (win && !win.isDestroyed()) {
+    win.close()
+  }
 }
 
 function startCameraPreviewForCurrentWindow(deviceId: string): void {
@@ -229,50 +236,61 @@ function createCameraWindow(deviceId: string): void {
   const x = workX + margin
   const y = workY + workH - winH - margin
 
-  cameraWin = new BrowserWindow({
+  const win = new BrowserWindow({
     x,
     y,
     ...windowConfigs.cameraWin,
     webPreferences: SHARED_WEB_PREFERENCES,
   })
+  cameraWin = win
 
-  keepWindowOnEveryWorkspace(cameraWin, { level: 'screen-saver', relativeLevel: 2 })
-  cameraWin.setAspectRatio(1)
+  keepWindowOnEveryWorkspace(win, { level: 'screen-saver', relativeLevel: 2 })
+  win.setAspectRatio(1)
   if (process.platform === 'darwin') {
-    cameraWin.setWindowButtonVisibility(false)
+    win.setWindowButtonVisibility(false)
   }
-  hardenWebContents(cameraWin)
-  cameraWin.once('ready-to-show', () => {
-    cameraWin?.show()
+  hardenWebContents(win)
+  win.once('ready-to-show', () => {
+    if (!win.isDestroyed()) win.show()
   })
-  cameraWin.webContents.once('did-finish-load', () => {
+  win.webContents.once('did-finish-load', () => {
     if (isDev) {
       console.log('[cameraPreview/main] camera window loaded, starting preview', {
         deviceId: activeCameraDeviceId,
       })
     }
-    if (activeCameraDeviceId) {
+    // Only start the preview if this is still the active window. A rapid
+    // camera off→on cycle creates a new window before the old one's load
+    // completes; the old finish-load callback must not start a preview tied
+    // to the new window's device id.
+    if (cameraWin === win && activeCameraDeviceId) {
       startCameraPreviewForCurrentWindow(activeCameraDeviceId)
     }
   })
-  cameraWin.webContents.on('did-fail-load', (_event, errorCode, errorDescription, url) => {
+  win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, url) => {
     console.error('[cameraPreview/main] camera window did-fail-load', {
       errorCode,
       errorDescription,
       url,
     })
   })
-  cameraWin.on('closed', () => {
-    cameraWin = null
-    activeCameraDeviceId = null
-    stopNativeCameraPreview()
+  win.on('closed', () => {
+    // Guard against clobbering a successor window. closeCameraWindow drops
+    // the module reference synchronously, then close() runs async — by the
+    // time this 'closed' fires, cameraWin may already point at a newer
+    // BrowserWindow with its own active preview that we must not touch.
+    if (cameraWin === win) {
+      cameraWin = null
+      activeCameraDeviceId = null
+      stopNativeCameraPreview()
+    }
   })
 
   if (isDev) {
-    cameraWin.webContents.openDevTools({ mode: 'detach' })
+    win.webContents.openDevTools({ mode: 'detach' })
   }
 
-  loadAppRoute(cameraWin, '/camera/')
+  loadAppRoute(win, '/camera/')
 }
 
 function hideNonPermissionWindows(): void {
@@ -675,6 +693,7 @@ app.whenReady().then(() => {
     loadAppRoute,
     showRecorderWindow: showRecorderWindowOnly,
     onPickerFinished: finishPickerMode,
+    reservePickerStart,
     startRecordingForTarget: async (target) => {
       await startRecording(target)
     },
@@ -691,10 +710,27 @@ app.whenReady().then(() => {
   })
 })
 
-app.on('before-quit', () => {
-  disposeWindowPicker()
-  stopNativeCameraPreview()
-  disposeMacAddon()
+// Two-phase quit: when a recording is active, prevent the immediate exit,
+// drive the recorder to a clean stop (so AVAssetWriter writes its moov atom
+// and the .mov / .m4a files are playable), then re-issue app.quit() which
+// fires before-quit again with quitInProgress=true to bypass this guard.
+let quitInProgress = false
+app.on('before-quit', (event) => {
+  if (quitInProgress || !isRecordingActive()) {
+    disposeWindowPicker()
+    stopNativeCameraPreview()
+    disposeMacAddon()
+    return
+  }
+  event.preventDefault()
+  quitInProgress = true
+  void flushActiveRecording()
+    .catch((error) => {
+      console.error('[main] failed to flush recording on quit', error)
+    })
+    .finally(() => {
+      app.quit()
+    })
 })
 
 app.on('window-all-closed', () => {

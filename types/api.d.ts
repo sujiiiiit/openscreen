@@ -57,6 +57,14 @@ export interface RecorderSettings {
   cameraDeviceId: string | null
   cameraLabel: string
   hideCameraPreview: boolean
+  // When systemAudio is true, this picks between capturing audio from every
+  // app ('all') or only the bundle IDs in systemAudioApplications
+  // ('selected'). Ignored when systemAudio is false.
+  systemAudioScope: 'all' | 'selected'
+  // Bundle IDs of apps to capture audio from when systemAudioScope === 'selected'.
+  // Sticky across recordings; the user manages the list manually via the
+  // system audio menu.
+  systemAudioApplications: string[]
 }
 
 export type RecorderStatus =

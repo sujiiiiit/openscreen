@@ -52,6 +52,10 @@ interface RegisterWindowPickerOptions {
   loadAppRoute: (window: BrowserWindow, route: string) => void
   showRecorderWindow: () => void
   startRecordingForTarget: (target: CaptureTarget) => Promise<void>
+  // Claim the recorder's start slot before the picker tears down its overlay
+  // so a concurrent generic recorder:start can't race past us and start a
+  // default-display recording behind the picker's back.
+  reservePickerStart: () => void
   onPickerFinished: () => void
 }
 
@@ -87,8 +91,42 @@ let displayListenersRegistered = false
 let spaceChangeRegistered = false
 let unsubscribeSpaceChange: (() => void) | null = null
 
-const windowIconCache = new Map<number, string | null>()
-const pendingWindowIconFetches = new Set<number>()
+// Bounded LRU. Keyed by `${processId}|${bundleId}` rather than processId
+// alone — macOS reuses PIDs, so a stale icon for a long-killed app would
+// otherwise be served (kilobytes of base64 PNG) for an unrelated new
+// process. Map preserves insertion order, so we evict the oldest on
+// overflow. The cache is also cleared on disposeWindowPicker.
+const WINDOW_ICON_CACHE_MAX = 64
+const windowIconCache = new Map<string, string | null>()
+const pendingWindowIconFetches = new Set<string>()
+
+function iconCacheKey(source: WindowSource): string | null {
+  if (!source.processId) return null
+  return `${source.processId}|${source.bundleId ?? ''}`
+}
+
+function readIconCache(source: WindowSource): string | null | undefined {
+  const key = iconCacheKey(source)
+  if (!key) return undefined
+  if (!windowIconCache.has(key)) return undefined
+  const value = windowIconCache.get(key) ?? null
+  // Bump to most-recently-used by re-inserting.
+  windowIconCache.delete(key)
+  windowIconCache.set(key, value)
+  return value
+}
+
+function writeIconCache(source: WindowSource, icon: string | null): void {
+  const key = iconCacheKey(source)
+  if (!key) return
+  if (windowIconCache.has(key)) windowIconCache.delete(key)
+  windowIconCache.set(key, icon)
+  while (windowIconCache.size > WINDOW_ICON_CACHE_MAX) {
+    const oldest = windowIconCache.keys().next().value
+    if (oldest === undefined) break
+    windowIconCache.delete(oldest)
+  }
+}
 
 function roundedBounds(bounds: Rectangle): Rectangle {
   return {
@@ -551,8 +589,7 @@ function unregisterSpaceChangeListener(): void {
 }
 
 function sourceWithCachedIcon(source: WindowSource): WindowSource {
-  if (!source.processId) return source
-  const iconDataUrl = windowIconCache.get(source.processId)
+  const iconDataUrl = readIconCache(source)
   return iconDataUrl ? { ...source, iconDataUrl } : source
 }
 
@@ -583,14 +620,14 @@ function hitTestWindowSnapshot(cursor: Point): WindowSource | null {
 }
 
 function scheduleWindowIconFetch(source: WindowSource): void {
-  const processId = source.processId
-  if (!processId) return
-  if (windowIconCache.has(processId)) return
-  if (pendingWindowIconFetches.has(processId)) return
+  const cacheKey = iconCacheKey(source)
+  if (!cacheKey) return
+  if (windowIconCache.has(cacheKey)) return
+  if (pendingWindowIconFetches.has(cacheKey)) return
 
-  pendingWindowIconFetches.add(processId)
+  pendingWindowIconFetches.add(cacheKey)
   setTimeout(() => {
-    pendingWindowIconFetches.delete(processId)
+    pendingWindowIconFetches.delete(cacheKey)
 
     const currentTarget = activeTarget
     if (!pickerMode || confirming || !sameWindowTarget(currentTarget, source)) {
@@ -608,7 +645,7 @@ function scheduleWindowIconFetch(source: WindowSource): void {
     const iconDataUrl = sourceWithIcon && sameWindowTarget(currentTarget, sourceWithIcon)
       ? sourceWithIcon.iconDataUrl
       : undefined
-    windowIconCache.set(processId, iconDataUrl ?? null)
+    writeIconCache(source, iconDataUrl ?? null)
 
     const latestTarget = activeTarget
     if (!iconDataUrl || !latestTarget || !sameWindowTarget(latestTarget, source)) return
@@ -636,9 +673,9 @@ function windowSourceUnderCursor(cursor = screen.getCursorScreenPoint()): Window
   if (!source) return null
   if (!source.processId) return source
 
-  if (windowIconCache.has(source.processId)) {
-    const iconDataUrl = windowIconCache.get(source.processId)
-    return iconDataUrl ? { ...source, iconDataUrl } : source
+  const cached = readIconCache(source)
+  if (cached !== undefined) {
+    return cached ? { ...source, iconDataUrl: cached } : source
   }
 
   scheduleWindowIconFetch(source)
@@ -866,6 +903,10 @@ async function confirmWindowPicker(): Promise<void> {
   const pickerTarget = activeTarget
   const target = activeTarget.target
   confirming = true
+  // Reserve before any teardown so a recorder:start fired between
+  // lockRegionOverlayForRecording / finishPicker (both of which clear
+  // state.pickerMode via onPickerFinished) and the await below cannot win.
+  options?.reservePickerStart()
   if (pickerTarget.mode === 'region') {
     lockRegionOverlayForRecording(pickerTarget)
     await options?.startRecordingForTarget(target)
@@ -922,5 +963,7 @@ export function disposeWindowPicker(): void {
   destroyOverlay()
   unregisterSpaceChangeListener()
   unregisterDisplayListeners()
+  windowIconCache.clear()
+  pendingWindowIconFetches.clear()
   options = null
 }

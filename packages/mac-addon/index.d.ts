@@ -44,6 +44,13 @@ export interface StartRecordingOptions {
   recordCamera?: boolean
   cameraDeviceId?: string
   excludeOwnApp?: boolean
+  // Bundle IDs of applications whose audio should be exclusively captured.
+  // Empty/undefined means no per-app filtering (default: all system audio
+  // minus the recorder's own process). The native side honors this via
+  // SCStreamConfiguration.applicationsToInclude on macOS 15+; on older OSes,
+  // a window-targeted capture's SCContentFilter already constrains audio to
+  // the picked window's owning app.
+  audioApplications?: string[]
 }
 
 export interface Capabilities {
@@ -170,6 +177,10 @@ export interface RecordingOutputMetadata {
   captureScope?: 'owningApplication' | 'filter' | string
   applicationName?: string
   bundleId?: string
+  // Bundle IDs the renderer requested the system audio be scoped to. Mirrors
+  // StartRecordingOptions.audioApplications. Present when the user opted into
+  // per-app audio capture.
+  audioApplicationBundleIds?: string[]
 }
 
 export interface RecordingManifest {

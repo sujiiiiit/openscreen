@@ -9,6 +9,7 @@
 
 #include <sys/sysctl.h>
 
+#include <atomic>
 #include <vector>
 
 #include "Events.h"
@@ -76,6 +77,9 @@ static NSInteger EvenDimensionFromDouble(double value) {
   AVAssetWriterInput *_videoInput;
   AVAssetWriterInput *_systemAudioInput;
   AVAssetWriterInput *_microphoneInput;
+  // Cached at finish time so -metadata can still report it after the writer
+  // ivar has been released (otherwise the manifest loses the error reason).
+  NSError *_savedWriterError;
   AVVideoCodecType _codec;
 
   dispatch_queue_t _videoQueue;
@@ -87,7 +91,13 @@ static NSInteger EvenDimensionFromDouble(double value) {
   CMTime _sessionStartTime;
   BOOL _writerFailed;
 
-  BOOL _stopping;
+  // Set from the recorder thread in -markStopping, read on every sample
+  // delivery from SCKit's sample-handler queue. A plain BOOL has no memory
+  // barrier, so SCKit can read stale `NO` after we've already called
+  // -markAsFinished on the inputs and -appendSampleBuffer: against a
+  // finished input throws inside AVFoundation. atomic with acquire/release
+  // gives the SCKit thread a happens-before edge to the markStopping write.
+  std::atomic<bool> _stopping;
   BOOL _started;
   BOOL _finished;
   NSInteger _droppedSystemAudioBeforeStart;
@@ -150,6 +160,9 @@ static NSInteger EvenDimensionFromDouble(double value) {
     _sessionStartTime = kCMTimeInvalid;
     _pauseStartHost = kCMTimeInvalid;
     _pauseAccumulated = kCMTimeZero;
+    // std::atomic default-ctor leaves the value indeterminate pre-C++20; init
+    // explicitly so the very first compare/load is well-defined.
+    _stopping.store(false, std::memory_order_relaxed);
   }
   return self;
 }
@@ -467,11 +480,42 @@ static NSInteger EvenDimensionFromDouble(double value) {
   // -prepareWriter: will read them later via -videoCompressionProperties.
   (void)[self videoCompressionProperties];
 
+  // Per-application audio scoping. The list lives on RecordingOptions and is
+  // populated by the renderer when the user opts into "Record sound from this
+  // application only". On macOS 13-14, the surrounding SCContentFilter
+  // (initWithDesktopIndependentWindow: in window mode) already constrains
+  // audio to the owning app — Apple's WWDC22 session 10155 documents that
+  // audio capture is app-granular regardless of window-level filtering. The
+  // explicit applicationsToInclude assignment below sharpens that scope on
+  // macOS 15+ and prepares the path for display/region modes where the
+  // window filter doesn't help. KVC + respondsToSelector keeps the call safe
+  // if the SDK predates the property — when missing, the window filter's
+  // implicit scoping remains the effective enforcement.
+  if (@available(macOS 15.0, *)) {
+    if (!_options.audioApplicationBundleIds.empty() &&
+        [configuration respondsToSelector:@selector(setApplicationsToInclude:)]) {
+      NSMutableArray<SCRunningApplication *> *apps = [NSMutableArray array];
+      for (const std::string &bid : _options.audioApplicationBundleIds) {
+        NSString *targetBundle = ToNSString(bid);
+        if (targetBundle.length == 0) continue;
+        for (SCRunningApplication *app in content.applications) {
+          if ([app.bundleIdentifier isEqualToString:targetBundle]) {
+            [apps addObject:app];
+            break;
+          }
+        }
+      }
+      if (apps.count > 0) {
+        [configuration setValue:apps forKey:@"applicationsToInclude"];
+      }
+    }
+  }
+
   NSLog(@"[openscreen.recorder] screen config: %ldx%ld @ %dfps  codec=%@  "
         @"pixelFormat=ARGB2101010LEPacked(l10r)  colorSpace=%@  "
         @"primaries=%@ (gamut=%@)  bitrate=%.1f Mbps  keyframeInterval=%ldf  "
         @"scale=%.2fx  pixelSizeSource=%@  scalesToFit=%@  queueDepth=5  "
-        @"allowFrameReordering=NO",
+        @"allowFrameReordering=NO  audioApps=%lu",
         (long)_configuredWidth, (long)_configuredHeight,
         (int)(_options.fps > 0 ? _options.fps : 60),
         [self codecString], _configuredColorSpace,
@@ -479,7 +523,8 @@ static NSInteger EvenDimensionFromDouble(double value) {
         _configuredBitRate / 1'000'000.0,
         (long)_configuredKeyframeInterval,
         _configuredScaleFactor, _pixelSizeSource,
-        configuration.scalesToFit ? @"YES" : @"NO");
+        configuration.scalesToFit ? @"YES" : @"NO",
+        (unsigned long)_options.audioApplicationBundleIds.size());
 
   return configuration;
 }
@@ -737,7 +782,7 @@ static NSInteger EvenDimensionFromDouble(double value) {
 - (void)stream:(SCStream *)stream
     didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                    ofType:(SCStreamOutputType)type {
-  if (_stopping || !CMSampleBufferIsValid(sampleBuffer)) return;
+  if (_stopping.load(std::memory_order_acquire) || !CMSampleBufferIsValid(sampleBuffer)) return;
   if (type != SCStreamOutputTypeScreen) return;
   NSDictionary *attachments = [self frameAttachments:sampleBuffer];
   [self recordFrameMetadata:attachments];
@@ -895,14 +940,14 @@ static CMSampleBufferRef ScreenTrackShiftedSampleBuffer(
 }
 
 - (void)appendSystemAudioSampleBuffer:(CMSampleBufferRef)sampleBuffer {
-  if (_stopping || !CMSampleBufferIsValid(sampleBuffer)) return;
+  if (_stopping.load(std::memory_order_acquire) || !CMSampleBufferIsValid(sampleBuffer)) return;
   [self appendAudioSampleBuffer:sampleBuffer
                         toInput:_systemAudioInput
                   droppedBefore:&_droppedSystemAudioBeforeStart];
 }
 
 - (void)appendMicrophoneSampleBuffer:(CMSampleBufferRef)sampleBuffer {
-  if (_stopping || !CMSampleBufferIsValid(sampleBuffer)) return;
+  if (_stopping.load(std::memory_order_acquire) || !CMSampleBufferIsValid(sampleBuffer)) return;
   [self appendAudioSampleBuffer:sampleBuffer
                         toInput:_microphoneInput
                   droppedBefore:&_droppedMicrophoneBeforeStart];
@@ -911,7 +956,11 @@ static CMSampleBufferRef ScreenTrackShiftedSampleBuffer(
 #pragma mark - Lifecycle
 
 - (void)markStopping {
-  _stopping = YES;
+  // Release-store pairs with the acquire-loads in the SCKit sample-handler
+  // path so once -markAsFinished runs in -finishWriterSync, no in-flight
+  // sample on _videoQueue / SCKit threads can read stale `false` and try to
+  // append to a finished input.
+  _stopping.store(true, std::memory_order_release);
 }
 
 - (void)setPaused:(BOOL)paused {
@@ -963,10 +1012,20 @@ static CMSampleBufferRef ScreenTrackShiftedSampleBuffer(
 
 - (BOOL)finishWriterSync:(NSError **)error {
   if (!_writer) return YES;
-  if (_writer.status == AVAssetWriterStatusCancelled) return YES;
+  if (_writer.status == AVAssetWriterStatusCancelled) {
+    _writer = nil;
+    _videoInput = nil;
+    _systemAudioInput = nil;
+    _microphoneInput = nil;
+    return YES;
+  }
   if (_writer.status == AVAssetWriterStatusUnknown) {
     // Never appended a sample.
     [_writer cancelWriting];
+    _writer = nil;
+    _videoInput = nil;
+    _systemAudioInput = nil;
+    _microphoneInput = nil;
     return YES;
   }
 
@@ -981,13 +1040,21 @@ static CMSampleBufferRef ScreenTrackShiftedSampleBuffer(
   dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
 
   _finished = YES;
+  BOOL ok = YES;
+  NSError *finishError = nil;
   if (_writer.status == AVAssetWriterStatusFailed) {
-    if (error) {
-      *error = _writer.error ?: MakeError(2310, @"AVAssetWriter finished with failure");
-    }
-    return NO;
+    finishError = _writer.error ?: MakeError(2310, @"AVAssetWriter finished with failure");
+    ok = NO;
   }
-  return YES;
+  // Cache the writer's error before releasing so -metadata still reports it
+  // in the manifest (writeManifest runs after finishWriterSync).
+  _savedWriterError = _writer.error;
+  _writer = nil;
+  _videoInput = nil;
+  _systemAudioInput = nil;
+  _microphoneInput = nil;
+  if (!ok && error) *error = finishError;
+  return ok;
 }
 
 - (void)cancelWriter {
@@ -1073,8 +1140,11 @@ static CMSampleBufferRef ScreenTrackShiftedSampleBuffer(
   if (_droppedMicrophoneBeforeStart > 0) {
     meta[@"droppedMicrophoneBeforeStart"] = @(_droppedMicrophoneBeforeStart);
   }
-  if (_writer.error) {
-    meta[@"error"] = _writer.error.localizedDescription ?: @"";
+  // Prefer the live writer's error; fall back to the cached value captured by
+  // -finishWriterSync when the writer ivar has already been released.
+  NSError *writerError = _writer.error ?: _savedWriterError;
+  if (writerError) {
+    meta[@"error"] = writerError.localizedDescription ?: @"";
   }
   return meta;
 }

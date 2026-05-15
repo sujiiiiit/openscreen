@@ -17,6 +17,7 @@ import addon, {
   type RecordingFiles,
   type RecordingResult,
   type StartRecordingOptions,
+  type WindowSource,
 } from '@openscreen/mac-addon'
 
 // IMPORTANT: the exported types below are mirrored in `types/api.d.ts` so
@@ -38,6 +39,14 @@ export interface RecorderSettings {
   cameraDeviceId: string | null
   cameraLabel: string
   hideCameraPreview: boolean
+  // When systemAudio is true, this picks between capturing audio from every
+  // app ('all') or only the bundle IDs in systemAudioApplications
+  // ('selected'). Ignored when systemAudio is false.
+  systemAudioScope: 'all' | 'selected'
+  // Bundle IDs of apps to capture audio from when systemAudioScope === 'selected'.
+  // Sticky across recordings; the user manages the list manually via the
+  // system audio menu.
+  systemAudioApplications: string[]
 }
 
 export type RecorderStatus =
@@ -85,11 +94,22 @@ let statusChangedListener:
 let lastEmittedStatus: RecorderStatus = 'idle'
 let activeCaptureTarget: CaptureTarget | null = null
 let pendingDiscardConfirmation = false
+// When a picker confirm is in progress, this slot holds the targeted start so
+// a concurrent generic recorder:start (no target) can defer to it instead of
+// silently kicking off a default-display recording behind the picker's back.
+// Reservation auto-expires so a thrown picker callback can't wedge the flag on.
+let pickerStartInFlight = false
+let pickerStartReservationTimer: ReturnType<typeof setTimeout> | null = null
+const PICKER_START_RESERVATION_MS = 5_000
 
 const NO_MICROPHONE_LABEL = 'No microphone'
 const NO_CAMERA_LABEL = 'No camera'
 const SYSTEM_AUDIO_LABEL = 'System audio'
 const NO_SYSTEM_AUDIO_LABEL = 'No system audio'
+
+const NO_MICROPHONE_MENU_LABEL = "Don't record microphone"
+const NO_CAMERA_MENU_LABEL = "Don't record camera"
+const NO_SYSTEM_AUDIO_MENU_LABEL = "Don't record system audio"
 
 const state: RecorderState = {
   status: 'idle',
@@ -100,6 +120,8 @@ const state: RecorderState = {
     cameraDeviceId: null,
     cameraLabel: NO_CAMERA_LABEL,
     hideCameraPreview: false,
+    systemAudioScope: 'all',
+    systemAudioApplications: [],
   },
   sessionId: null,
   outputDir: null,
@@ -175,6 +197,23 @@ function defaultCaptureTarget(): CaptureTarget {
 
 function cloneCaptureTarget(target: CaptureTarget): CaptureTarget {
   return JSON.parse(JSON.stringify(target)) as CaptureTarget
+}
+
+function clearPickerStartReservation(): void {
+  pickerStartInFlight = false
+  if (pickerStartReservationTimer) {
+    clearTimeout(pickerStartReservationTimer)
+    pickerStartReservationTimer = null
+  }
+}
+
+export function reservePickerStart(): void {
+  pickerStartInFlight = true
+  if (pickerStartReservationTimer) clearTimeout(pickerStartReservationTimer)
+  pickerStartReservationTimer = setTimeout(() => {
+    pickerStartReservationTimer = null
+    pickerStartInFlight = false
+  }, PICKER_START_RESERVATION_MS)
 }
 
 function removeRecordingDirectory(directory: string | null): void {
@@ -287,9 +326,41 @@ function selectCamera(device: CameraDevice | null): void {
   notifyCameraPreviewChanged(previousPreviewDeviceId)
 }
 
+// System audio is configured in three orthogonal pieces:
+//  - selectSystemAudio: master on/off
+//  - setSystemAudioScope: when on, capture from 'all' apps or 'selected' ones
+//  - toggleSystemAudioApplication: when scope is 'selected', the membership of
+//    the bundle-ID list
+// All three use a looser gate than canChangeSettings — they configure the
+// upcoming recording and should remain operable while the user is in a picker
+// (pickerMode !== null), at which point canChangeSettings would otherwise
+// refuse. 'idle' status is the right invariant.
 function selectSystemAudio(enabled: boolean): void {
-  if (!canChangeSettings()) return
+  if (state.status !== 'idle') return
   state.settings.systemAudio = enabled
+  state.lastError = null
+  emitState()
+}
+
+function setSystemAudioScope(scope: 'all' | 'selected'): void {
+  if (state.status !== 'idle') return
+  if (!state.settings.systemAudio) return
+  state.settings.systemAudioScope = scope
+  state.lastError = null
+  emitState()
+}
+
+function toggleSystemAudioApplication(bundleId: string): void {
+  if (state.status !== 'idle') return
+  if (!state.settings.systemAudio) return
+  if (state.settings.systemAudioScope !== 'selected') return
+  if (!bundleId) return
+  const current = state.settings.systemAudioApplications
+  const index = current.indexOf(bundleId)
+  state.settings.systemAudioApplications =
+    index >= 0
+      ? [...current.slice(0, index), ...current.slice(index + 1)]
+      : [...current, bundleId]
   state.lastError = null
   emitState()
 }
@@ -309,7 +380,7 @@ function microphoneMenuTemplate(devices: AudioDevice[]): MenuItemConstructorOpti
   const enabled = canChangeSettings()
   const template: MenuItemConstructorOptions[] = [
     {
-      label: NO_MICROPHONE_LABEL,
+      label: NO_MICROPHONE_MENU_LABEL,
       type: 'radio',
       checked: state.settings.microphoneDeviceId === null,
       enabled,
@@ -337,7 +408,7 @@ function cameraMenuTemplate(devices: CameraDevice[]): MenuItemConstructorOptions
   const enabled = canChangeSettings()
   const template: MenuItemConstructorOptions[] = [
     {
-      label: NO_CAMERA_LABEL,
+      label: NO_CAMERA_MENU_LABEL,
       type: 'radio',
       checked: state.settings.cameraDeviceId === null,
       enabled,
@@ -361,25 +432,82 @@ function cameraMenuTemplate(devices: CameraDevice[]): MenuItemConstructorOptions
   return template
 }
 
-function systemAudioMenuTemplate(): MenuItemConstructorOptions[] {
-  const enabled = canChangeSettings()
-  return [
+interface SystemAudioMenuApp {
+  bundleId: string
+  applicationName: string
+}
+
+function systemAudioMenuTemplate(
+  applications: SystemAudioMenuApp[],
+): MenuItemConstructorOptions[] {
+  // Looser enable gate than canChangeSettings: this menu is also opened while
+  // a picker is active (pickerMode !== null), and the user should still be
+  // able to configure audio for the upcoming recording in that state.
+  const enabled = state.status === 'idle'
+  const allChecked =
+    state.settings.systemAudio && state.settings.systemAudioScope === 'all'
+  const selectedChecked =
+    state.settings.systemAudio && state.settings.systemAudioScope === 'selected'
+
+  const template: MenuItemConstructorOptions[] = [
     {
-      label: 'Record system audio',
+      label: 'Record system audio from all apps',
       type: 'radio',
-      checked: state.settings.systemAudio,
+      checked: allChecked,
       enabled,
-      click: () => selectSystemAudio(true),
+      click: () => {
+        if (!state.settings.systemAudio) selectSystemAudio(true)
+        setSystemAudioScope('all')
+      },
+    },
+    {
+      label: 'Record system audio from selected apps',
+      type: 'radio',
+      checked: selectedChecked,
+      enabled,
+      click: () => {
+        if (!state.settings.systemAudio) selectSystemAudio(true)
+        setSystemAudioScope('selected')
+      },
     },
     { type: 'separator' },
     {
-      label: NO_SYSTEM_AUDIO_LABEL,
+      label: NO_SYSTEM_AUDIO_MENU_LABEL,
       type: 'radio',
       checked: !state.settings.systemAudio,
       enabled,
       click: () => selectSystemAudio(false),
     },
   ]
+
+  if (selectedChecked) {
+    template.push({ type: 'separator' })
+    if (applications.length === 0) {
+      template.push({
+        label: 'No running applications detected',
+        enabled: false,
+      })
+    } else {
+      // Sort by display name for a stable, scannable menu. The shareable-
+      // content API returns apps in process order, which jumps around as
+      // apps launch/quit.
+      const sorted = [...applications].sort((a, b) =>
+        a.applicationName.localeCompare(b.applicationName),
+      )
+      for (const app of sorted) {
+        if (!app.bundleId) continue
+        template.push({
+          label: app.applicationName || app.bundleId,
+          type: 'checkbox',
+          checked: state.settings.systemAudioApplications.includes(app.bundleId),
+          enabled,
+          click: () => toggleSystemAudioApplication(app.bundleId),
+        })
+      }
+    }
+  }
+
+  return template
 }
 
 function recorderSettingsMenuTemplate(): MenuItemConstructorOptions[] {
@@ -417,13 +545,44 @@ function popupMenu(
   })
 }
 
+function visibleAppsFromWindows(windows: WindowSource[]): SystemAudioMenuApp[] {
+  // Dedupe by bundleId — multiple windows from the same app collapse to one
+  // entry. The native `listVisibleWindows` already filters out system chrome
+  // (Dock, Finder desktop, Window Manager, etc.) and the recorder's own
+  // process, so we don't re-apply those exclusions here.
+  const byBundle = new Map<string, SystemAudioMenuApp>()
+  for (const window of windows) {
+    if (!window.bundleId) continue
+    if (byBundle.has(window.bundleId)) continue
+    byBundle.set(window.bundleId, {
+      bundleId: window.bundleId,
+      applicationName: window.applicationName || window.bundleId,
+    })
+  }
+  return Array.from(byBundle.values())
+}
+
 function showInputMenu(
   event: IpcMainInvokeEvent,
   kind: RecorderInputKind,
   anchor: unknown,
 ): RecorderState {
   if (kind === 'systemAudio') {
-    popupMenu(event, systemAudioMenuTemplate(), anchor)
+    // Build the per-app list from currently-visible windows rather than every
+    // running process — apps without an on-screen window (background helpers,
+    // menu-bar agents) aren't generally things a user thinks of as "the app
+    // playing audio" and clutter the menu. listVisibleWindows is sync, so we
+    // can keep the menu sync too.
+    let applications: SystemAudioMenuApp[] = []
+    if (process.platform === 'darwin') {
+      try {
+        applications = visibleAppsFromWindows(addon.listVisibleWindows(false))
+      } catch (error) {
+        state.lastError = errorMessage(error)
+        emitState()
+      }
+    }
+    popupMenu(event, systemAudioMenuTemplate(applications), anchor)
     return publicState()
   }
 
@@ -456,7 +615,18 @@ function showSettingsMenu(
 }
 
 export async function startRecording(targetOverride?: CaptureTarget): Promise<RecorderState> {
+  // A picker confirm has reserved the start slot — defer generic (no-target)
+  // starts so the picker's targeted start wins the race. The picker call
+  // passes a target, so it bypasses this gate and consumes the reservation.
+  if (!targetOverride && pickerStartInFlight) return publicState()
   if (state.status !== 'idle') return publicState()
+  if (targetOverride && pickerStartInFlight) {
+    clearPickerStartReservation()
+  }
+  // Picker mode is set by startPicker and cleared via finishPickerMode (called
+  // from main.ts onPickerFinished). A generic start while a picker is open
+  // would race the picker's confirm path; refuse it.
+  if (!targetOverride && state.pickerMode !== null) return publicState()
   if (process.platform !== 'darwin') {
     state.lastError = 'Screen recording is only available on macOS in this build.'
     return emitState()
@@ -487,6 +657,16 @@ export async function startRecording(targetOverride?: CaptureTarget): Promise<Re
       microphoneDeviceId: state.settings.microphoneDeviceId ?? undefined,
       recordCamera: state.settings.cameraDeviceId !== null,
       cameraDeviceId: state.settings.cameraDeviceId ?? undefined,
+    }
+    // System audio scoping: when the user picks the 'selected' mode, send
+    // exactly the bundle IDs they've checked — even if the list is empty
+    // (which maps to "capture nothing" at the native layer). 'all' mode and
+    // 'off' state both leave audioApplications undefined.
+    if (
+      state.settings.systemAudio &&
+      state.settings.systemAudioScope === 'selected'
+    ) {
+      options.audioApplications = [...state.settings.systemAudioApplications]
     }
 
     const session = await addon.startRecording(options)
@@ -552,8 +732,17 @@ async function discardActiveRecording(): Promise<void> {
   const sessionId = state.sessionId
   if (!sessionId) return
   const outputDir = state.outputDir
-  await addon.cancelRecording(sessionId)
-  removeRecordingDirectory(outputDir)
+  // Clear sessionId in finally regardless of cancel outcome: if the native
+  // call rejects, the session is in an unknown state and any further
+  // pause/resume/stop against the stale id will fail anyway. Forcing the
+  // local state to "no session" lets the catch in the caller fall through to
+  // 'idle' instead of leaving the UI claiming a session that no longer exists.
+  try {
+    await addon.cancelRecording(sessionId)
+  } finally {
+    state.sessionId = null
+    removeRecordingDirectory(outputDir)
+  }
 }
 
 async function restartRecording(event: IpcMainInvokeEvent): Promise<RecorderState> {
@@ -576,6 +765,11 @@ async function restartRecording(event: IpcMainInvokeEvent): Promise<RecorderStat
     resetDiscardedRecording()
     return startRecording(target)
   } catch (error) {
+    // discardActiveRecording's finally always clears state.sessionId, so a
+    // null sessionId here means the cancel attempted to run; fall through to
+    // idle. A non-null sessionId means we never reached the cancel call
+    // (e.g., dialog was dismissed via throw) and the previous session is
+    // still alive — preserve the previous status.
     state.status = state.sessionId ? previousStatus : 'idle'
     state.lastError = errorMessage(error)
     return emitState()
@@ -688,6 +882,28 @@ function cancelPicker(options: RegisterRecorderHandlersOptions): RecorderState {
   return finishPickerMode()
 }
 
+export function isRecordingActive(): boolean {
+  return state.status === 'recording' || state.status === 'paused' || state.status === 'stopping'
+}
+
+// Drives the active recording to completion so files are finalized before the
+// process exits. Used by main.ts on before-quit. Safe to call when no
+// recording is active. If the recording is already stopping (another caller
+// kicked off addon.stopRecording), waits up to 12 s for the state machine to
+// transition out of 'stopping' rather than re-issuing the stop.
+export async function flushActiveRecording(): Promise<void> {
+  if (state.status === 'recording' || state.status === 'paused') {
+    await stopRecording()
+  }
+  if (state.status !== 'stopping') return
+  // Native cancel/stop bounds itself at 10 s (see RecorderSession stopSync /
+  // cancelSync deadlines). Add a small margin on top.
+  const deadline = Date.now() + 12_000
+  while (state.status === 'stopping' && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 100))
+  }
+}
+
 async function stopRecording(): Promise<RecorderState> {
   if (state.status !== 'recording' && state.status !== 'paused') return publicState()
   if (!state.sessionId) return publicState()
@@ -758,7 +974,14 @@ export function registerRecorderHandlers(options: RegisterRecorderHandlersOption
     startPicker(mode, options),
   )
   ipcMain.handle('recorder:cancelPicker', () => cancelPicker(options))
-  ipcMain.handle('recorder:close', (event) => {
+  ipcMain.handle('recorder:close', async (event) => {
+    // Tearing the recorder bar down while a session is live orphans the native
+    // recorder: files keep growing with no UI to stop them, and the only
+    // remaining exit path (quit) used to lose the moov atom. Drive the
+    // recording to completion first so the .mov / .m4a are finalized.
+    if (isRecordingActive()) {
+      await flushActiveRecording()
+    }
     options.cancelPicker?.()
     finishPickerMode()
     const window = options.getRecorderWindow() ?? BrowserWindow.fromWebContents(event.sender)

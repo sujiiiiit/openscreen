@@ -71,6 +71,17 @@
   } else {
     meta[@"captureScope"] = @"filter";
   }
+  if (!_options.audioApplicationBundleIds.empty()) {
+    NSMutableArray<NSString *> *ids =
+        [NSMutableArray arrayWithCapacity:_options.audioApplicationBundleIds.size()];
+    for (const std::string &bid : _options.audioApplicationBundleIds) {
+      if (bid.empty()) continue;
+      [ids addObject:ToNSString(bid)];
+    }
+    if (ids.count > 0) {
+      meta[@"audioApplicationBundleIds"] = ids;
+    }
+  }
   return meta;
 }
 

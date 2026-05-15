@@ -30,9 +30,9 @@ static RecordingOptions ParseRecordingOptions(const Napi::CallbackInfo &info) {
   Napi::Object object = info[0].As<Napi::Object>();
   options.outputDir = GetStringProp(object, "outputDir");
   options.basename = GetStringProp(object, "basename");
-  options.fps = GetIntProp(object, "fps", 30);
-  if (options.fps != 60) {
-    options.fps = 30;
+  options.fps = GetIntProp(object, "fps", 60);
+  if (options.fps != 30 && options.fps != 60) {
+    options.fps = 60;
   }
   options.width = GetIntProp(object, "width", 0);
   options.height = GetIntProp(object, "height", 0);
@@ -43,6 +43,18 @@ static RecordingOptions ParseRecordingOptions(const Napi::CallbackInfo &info) {
   options.excludeOwnApp = GetBoolProp(object, "excludeOwnApp", true);
   options.microphoneDeviceId = GetStringProp(object, "microphoneDeviceId");
   options.cameraDeviceId = GetStringProp(object, "cameraDeviceId");
+
+  Napi::Value audioAppsValue = object.Get("audioApplications");
+  if (audioAppsValue.IsArray()) {
+    Napi::Array audioApps = audioAppsValue.As<Napi::Array>();
+    for (uint32_t i = 0; i < audioApps.Length(); ++i) {
+      Napi::Value entry = audioApps.Get(i);
+      if (!entry.IsString()) continue;
+      std::string bundleId = entry.As<Napi::String>().Utf8Value();
+      if (bundleId.empty()) continue;
+      options.audioApplicationBundleIds.push_back(std::move(bundleId));
+    }
+  }
 
   Napi::Value targetValue = object.Get("target");
   if (targetValue.IsObject()) {

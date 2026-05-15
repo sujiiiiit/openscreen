@@ -38,6 +38,8 @@ const EMPTY_STATE: RecorderState = {
     cameraDeviceId: null,
     cameraLabel: "No camera",
     hideCameraPreview: false,
+    systemAudioScope: "all",
+    systemAudioApplications: [],
   },
   sessionId: null,
   outputDir: null,
@@ -63,9 +65,13 @@ export default function RecorderPage() {
   const canChangeInputs = state.status === "idle" && state.pickerMode === null
   const canPickTarget = state.status === "idle"
   const canClose = state.status === "idle"
-  const systemAudioLabel = state.settings.systemAudio
-    ? "System audio"
-    : "No system audio"
+  const systemAudioLabel = (() => {
+    if (!state.settings.systemAudio) return "No system audio"
+    if (state.settings.systemAudioScope === "all") return "Record system audio"
+    const count = state.settings.systemAudioApplications.length
+    if (count === 0) return "No apps selected"
+    return `Sound from ${count} ${count === 1 ? "app" : "apps"}`
+  })()
 
   useEffect(() => {
     if (!window.api?.recorder) return undefined
@@ -119,7 +125,7 @@ export default function RecorderPage() {
         <Button
           variant="ghost"
           size="icon"
-          className="hover:bg-white/20 dark:hover:bg-white/5"
+          className="hover:bg-white/20 dark:hover:bg-white/5 focus-visible:bg-white/20 dark:focus-visible:bg-white/5"
           style={NO_DRAG}
           onClick={handleClose}
           disabled={!canClose}
@@ -130,9 +136,9 @@ export default function RecorderPage() {
 
         <Separator />
         <Button
-          variant={state.pickerMode === "display" ? "secondary" : "ghost"}
+          variant="ghost"
           size="icon-lg"
-          className="hover:bg-white/20 dark:hover:bg-white/5"
+          className={state.pickerMode === "display" ? "bg-white/20 dark:bg-white/5 hover:bg-white/20 dark:hover:bg-white/5 focus-visible:bg-white/20 dark:focus-visible:bg-white/5" : "hover:bg-white/20 dark:hover:bg-white/5 focus-visible:bg-white/20 dark:focus-visible:bg-white/5"}
           style={NO_DRAG}
           onClick={() => startPicker("display")}
           disabled={!canPickTarget}
@@ -143,9 +149,9 @@ export default function RecorderPage() {
           <HugeiconsIcon icon={ModernTvIcon} />
         </Button>
         <Button
-          variant={state.pickerMode === "window" ? "secondary" : "ghost"}
+          variant="ghost"
           size="icon-lg"
-          className="hover:bg-white/20 dark:hover:bg-white/5"
+          className={state.pickerMode === "window" ? "bg-white/20 dark:bg-white/5 hover:bg-white/20 dark:hover:bg-white/5 focus-visible:bg-white/20 dark:focus-visible:bg-white/5" : "hover:bg-white/20 dark:hover:bg-white/5 focus-visible:bg-white/20 dark:focus-visible:bg-white/5"}
           style={NO_DRAG}
           onClick={() => startPicker("window")}
           disabled={!canPickTarget}
@@ -156,9 +162,9 @@ export default function RecorderPage() {
           <HugeiconsIcon icon={BrowserIcon} />
         </Button>
         <Button
-          variant={state.pickerMode === "region" ? "secondary" : "ghost"}
+          variant="ghost"
           size="icon-lg"
-          className="hover:bg-white/20 dark:hover:bg-white/5"
+          className={state.pickerMode === "region" ? "bg-white/20 dark:bg-white/5 hover:bg-white/20 dark:hover:bg-white/5 focus-visible:bg-white/20 dark:focus-visible:bg-white/5" : "hover:bg-white/20 dark:hover:bg-white/5 focus-visible:bg-white/20 dark:focus-visible:bg-white/5"}
           style={NO_DRAG}
           onClick={() => startPicker("region")}
           disabled={!canPickTarget}
@@ -173,7 +179,7 @@ export default function RecorderPage() {
         <Button
           variant="ghost"
           size="sm"
-          className="w-34 shrink-0 min-w-0 justify-center text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
+          className="w-34 shrink-0 min-w-0 justify-center text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5 focus-visible:bg-white/20 dark:focus-visible:bg-white/5"
           style={
             {
               "--label-color": state.settings.cameraDeviceId
@@ -200,7 +206,7 @@ export default function RecorderPage() {
         <Button
           variant="ghost"
           size="sm"
-          className="w-34 shrink-0 min-w-0 justify-center text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
+          className="w-34 shrink-0 min-w-0 justify-center text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5 focus-visible:bg-white/20 dark:focus-visible:bg-white/5"
           style={
             {
               "--label-color": state.settings.microphoneDeviceId
@@ -225,7 +231,7 @@ export default function RecorderPage() {
         <Button
           variant="ghost"
           size="sm"
-          className="w-34 shrink-0 min-w-0 justify-center text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5"
+          className="w-34 shrink-0 min-w-0 justify-center text-xs text-(--label-color) hover:bg-white/20 dark:hover:bg-white/5 focus-visible:bg-white/20 dark:focus-visible:bg-white/5"
           style={
             {
               "--label-color": state.settings.systemAudio
@@ -251,7 +257,7 @@ export default function RecorderPage() {
         <Button
           variant="ghost"
           size="sm"
-          className="gap-1 hover:bg-white/20 dark:hover:bg-white/5"
+          className="gap-1 hover:bg-white/20 dark:hover:bg-white/5 focus-visible:bg-white/20 dark:focus-visible:bg-white/5"
           style={NO_DRAG}
           onClick={showSettingsMenu}
           disabled={!canChangeInputs}

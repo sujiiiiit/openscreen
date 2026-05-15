@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 struct CaptureTarget {
   std::string type = "display";
@@ -33,7 +34,7 @@ struct RecordingOptions {
   std::string outputDir;
   std::string basename;
   CaptureTarget target;
-  int fps = 30;
+  int fps = 60;
   int width = 0;
   int height = 0;
   bool includeCursor = true;
@@ -43,6 +44,12 @@ struct RecordingOptions {
   bool excludeOwnApp = true;
   std::string microphoneDeviceId;
   std::string cameraDeviceId;
+  // Bundle IDs of applications whose audio should be exclusively captured. Empty
+  // means "no per-app audio filtering" (default: all system audio minus the
+  // recorder app). Honored on macOS 15+ via SCStreamConfiguration.
+  // applicationsToInclude; on 13-14 the surrounding SCContentFilter already
+  // scopes audio to the owning app of a window target.
+  std::vector<std::string> audioApplicationBundleIds;
 };
 
 struct DisplayInfo {

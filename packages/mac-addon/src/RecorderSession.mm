@@ -299,18 +299,36 @@
   [_microphone markStopping];
   ClearActiveRecorder(self);
   if (_stream) {
+    // Mirror the 10s deadline used in -stopSync. SCKit's stopCapture has been
+    // observed to hang indefinitely on a wedged audio stack; without the
+    // bound, the JS state machine sits in 'stopping' forever and the user
+    // has to force-quit to recover.
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
     [_stream stopCaptureWithCompletionHandler:^(__unused NSError *error) {
       dispatch_semaphore_signal(semaphore);
     }];
-    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
+    if (dispatch_semaphore_wait(semaphore, deadline) != 0) {
+      EmitEvent({"error", _options.sessionId, "screen",
+                 "ScreenCaptureKit stopCapture did not complete within 10s during cancel",
+                 0});
+    }
   }
   [_camera stopCapture];
   ReleasePreviewForRecorderOnStop(self);
   [_screen cancelWriter];
   [_camera cancelWriter];
-  [[NSFileManager defaultManager] removeItemAtURL:[_screen url] error:nil];
-  [[NSFileManager defaultManager] removeItemAtURL:_manifestURL error:nil];
+  // Both URLs may be nil if cancelSync runs before -prepareOutputFiles
+  // populated them (e.g., a start that failed inside SCKit setup, then a
+  // cancel from the JS state machine). -removeItemAtURL:nil raises
+  // NSInvalidArgumentException, which would crash the addon thread.
+  NSURL *screenUrl = [_screen url];
+  if (screenUrl) {
+    [[NSFileManager defaultManager] removeItemAtURL:screenUrl error:nil];
+  }
+  if (_manifestURL) {
+    [[NSFileManager defaultManager] removeItemAtURL:_manifestURL error:nil];
+  }
   _running = NO;
   EmitEvent({"cancelled", _options.sessionId, "", "", 0});
 }

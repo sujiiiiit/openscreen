@@ -21,6 +21,12 @@
   BOOL _started;
   BOOL _finishing;
   BOOL _finished;
+  // Set once -createWriterForSampleBuffer: returns NO. Without this guard,
+  // every subsequent sample re-enters the failed init path: removeItemAtURL,
+  // alloc/init AVAssetWriter, failure, EmitEvent — flooding the JS event bus
+  // with hundreds of identical "error" events per second until the recorder
+  // is stopped.
+  BOOL _writerCreationFailed;
   CMTime _firstPTS;
   CMTime _lastPTS;
   CMTime _firstHostOffset;
@@ -188,7 +194,7 @@
       AVVideoHeightKey : @(_height),
       AVVideoCompressionPropertiesKey : @{
         AVVideoAverageBitRateKey : @(MAX(2'500'000, _width * _height * 4)),
-        AVVideoExpectedSourceFrameRateKey : @30,
+        AVVideoExpectedSourceFrameRateKey : @60,
         AVVideoProfileLevelKey : AVVideoProfileLevelH264HighAutoLevel,
       }
     };
@@ -262,7 +268,8 @@ static CMSampleBufferRef MediaFileWriterShifted(CMSampleBufferRef original,
 }
 
 - (void)appendRetainedSampleBuffer:(CMSampleBufferRef)sampleBuffer {
-  if (_finishing || _finished || !CMSampleBufferIsValid(sampleBuffer)) {
+  if (_finishing || _finished || _writerCreationFailed ||
+      !CMSampleBufferIsValid(sampleBuffer)) {
     return;
   }
   // While paused, swallow the sample without touching the writer. The host
@@ -272,6 +279,10 @@ static CMSampleBufferRef MediaFileWriterShifted(CMSampleBufferRef original,
   }
 
   if (![self createWriterForSampleBuffer:sampleBuffer]) {
+    // Latch the failure so subsequent samples don't retry the init path
+    // (which would re-emit the same error every frame). One event surfaces
+    // the problem to JS; the recorder should call stop/cancel from there.
+    _writerCreationFailed = YES;
     EmitEvent({"error", "", ToStdString(_source), ToStdString([_error localizedDescription]), 0});
     return;
   }
@@ -410,6 +421,8 @@ static CMSampleBufferRef MediaFileWriterShifted(CMSampleBufferRef original,
       _finishing = YES;
       if (!_started || !_writer) {
         _finished = YES;
+        _writer = nil;
+        _input = nil;
         dispatch_semaphore_signal(semaphore);
         return;
       }
@@ -423,6 +436,12 @@ static CMSampleBufferRef MediaFileWriterShifted(CMSampleBufferRef original,
           _error = finishError;
         }
         _finished = YES;
+        // Drop writer + input refs so the AVAssetWriter and its file
+        // handle are released as soon as finish completes, instead of
+        // lingering until the whole RecorderSession deallocs (which can
+        // be much later if the JS state machine holds the session).
+        _writer = nil;
+        _input = nil;
         dispatch_semaphore_signal(semaphore);
       }];
     }

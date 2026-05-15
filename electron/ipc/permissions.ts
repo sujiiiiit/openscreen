@@ -170,9 +170,18 @@ export function startPermissionPolling(): void {
 }
 
 export function stopPermissionPolling(): void {
-  if (!pollTimer) return
-  clearInterval(pollTimer)
-  pollTimer = null
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+  // The 1.2s "all granted, dismiss the window" timer must be cleared with the
+  // poll loop. Otherwise a user-initiated close mid-delay leaves it scheduled
+  // to call closePermissionWindow() against a destroyed window — currently
+  // null-safe but fragile, and any future caller it grows will hit that gap.
+  if (readyCloseTimer) {
+    clearTimeout(readyCloseTimer)
+    readyCloseTimer = null
+  }
 }
 
 async function requestPermission(kind: MacPermissionKind): Promise<PermissionSnapshot> {
