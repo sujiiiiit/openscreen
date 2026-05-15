@@ -646,26 +646,34 @@ export async function startRecording(targetOverride?: CaptureTarget): Promise<Re
 
     const outputDir = outputDirectory()
     const target = cloneCaptureTarget(targetOverride ?? defaultCaptureTarget())
+    // 'selected' scope with an empty list means "no apps" — capture no system
+    // audio. Translating that to recordSystemAudio:false avoids the native
+    // codepath silently falling back to "all apps" when audioApplications is
+    // empty (the native scoping block is gated on a non-empty bundle list).
+    const systemAudioEnabled =
+      state.settings.systemAudio &&
+      !(
+        state.settings.systemAudioScope === 'selected' &&
+        state.settings.systemAudioApplications.length === 0
+      )
+
     const options: StartRecordingOptions = {
       outputDir,
       target,
       fps: 60,
       includeCursor: true,
       excludeOwnApp: true,
-      recordSystemAudio: state.settings.systemAudio,
+      recordSystemAudio: systemAudioEnabled,
       recordMicrophone: state.settings.microphoneDeviceId !== null,
       microphoneDeviceId: state.settings.microphoneDeviceId ?? undefined,
       recordCamera: state.settings.cameraDeviceId !== null,
       cameraDeviceId: state.settings.cameraDeviceId ?? undefined,
     }
-    // System audio scoping: when the user picks the 'selected' mode, send
-    // exactly the bundle IDs they've checked — even if the list is empty
-    // (which maps to "capture nothing" at the native layer). 'all' mode and
-    // 'off' state both leave audioApplications undefined.
-    if (
-      state.settings.systemAudio &&
-      state.settings.systemAudioScope === 'selected'
-    ) {
+    // System audio scoping: when the user picks the 'selected' mode, send the
+    // bundle IDs they've checked. 'all' mode and 'off' state both leave
+    // audioApplications undefined. (Empty 'selected' is handled above by
+    // turning off system audio outright, so the array here is non-empty.)
+    if (systemAudioEnabled && state.settings.systemAudioScope === 'selected') {
       options.audioApplications = [...state.settings.systemAudioApplications]
     }
 
@@ -737,11 +745,14 @@ async function discardActiveRecording(): Promise<void> {
   // pause/resume/stop against the stale id will fail anyway. Forcing the
   // local state to "no session" lets the catch in the caller fall through to
   // 'idle' instead of leaving the UI claiming a session that no longer exists.
+  // The directory removal stays in the success path — if cancel rejected,
+  // the native writer may still be holding file handles inside outputDir and
+  // racing the rmdir would risk a partial-delete or crash.
   try {
     await addon.cancelRecording(sessionId)
+    removeRecordingDirectory(outputDir)
   } finally {
     state.sessionId = null
-    removeRecordingDirectory(outputDir)
   }
 }
 
@@ -901,6 +912,17 @@ export async function flushActiveRecording(): Promise<void> {
   const deadline = Date.now() + 12_000
   while (state.status === 'stopping' && Date.now() < deadline) {
     await new Promise<void>((resolve) => setTimeout(resolve, 100))
+  }
+  // Timed out waiting for the stop to finalize: the native side is wedged.
+  // Escalate to cancel so we don't proceed to window-destroy / app-quit with
+  // an orphan SCKit session still owning the camera / display capture.
+  if (state.status === 'stopping' && state.sessionId) {
+    try {
+      await discardActiveRecording()
+    } catch (error) {
+      console.error('[recorder] flush escalation cancel failed', error)
+    }
+    state.status = 'idle'
   }
 }
 

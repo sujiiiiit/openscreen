@@ -505,9 +505,14 @@ static NSInteger EvenDimensionFromDouble(double value) {
           }
         }
       }
-      if (apps.count > 0) {
-        [configuration setValue:apps forKey:@"applicationsToInclude"];
-      }
+      // Always assign when the user opted into per-app scoping, even if no
+      // running app matched the requested bundle IDs. An empty array means
+      // "capture from none of the listed apps" — without this, an empty
+      // match list would leave applicationsToInclude unset, silently
+      // falling back to the implicit filter scope (window's owning app, or
+      // all apps in display/region mode) — i.e. recording audio the user
+      // explicitly excluded.
+      [configuration setValue:apps forKey:@"applicationsToInclude"];
     }
   }
 
@@ -1046,9 +1051,11 @@ static CMSampleBufferRef ScreenTrackShiftedSampleBuffer(
     finishError = _writer.error ?: MakeError(2310, @"AVAssetWriter finished with failure");
     ok = NO;
   }
-  // Cache the writer's error before releasing so -metadata still reports it
-  // in the manifest (writeManifest runs after finishWriterSync).
-  _savedWriterError = _writer.error;
+  // Cache the failure reason before releasing the writer so -metadata still
+  // reports it in the manifest (writeManifest runs after finishWriterSync).
+  // Prefer finishError (which carries the MakeError fallback for the rare
+  // case of status==Failed with a nil _writer.error).
+  _savedWriterError = finishError ?: _writer.error;
   _writer = nil;
   _videoInput = nil;
   _systemAudioInput = nil;
