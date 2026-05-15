@@ -39,6 +39,11 @@ export interface RecorderSettings {
   cameraDeviceId: string | null
   cameraLabel: string
   hideCameraPreview: boolean
+  // When true, the recorder asks ScreenCaptureKit to omit the system cursor
+  // from captured frames. Inverted into the addon's `includeCursor` option at
+  // recording start; default false keeps cursor-visible as the out-of-box
+  // behavior.
+  hideCursor: boolean
   // When systemAudio is true, this picks between capturing audio from every
   // app ('all') or only the bundle IDs in systemAudioApplications
   // ('selected'). Ignored when systemAudio is false.
@@ -120,6 +125,7 @@ const state: RecorderState = {
     cameraDeviceId: null,
     cameraLabel: NO_CAMERA_LABEL,
     hideCameraPreview: false,
+    hideCursor: false,
     systemAudioScope: 'all',
     systemAudioApplications: [],
   },
@@ -376,6 +382,15 @@ function setHideCameraPreview(hidden: boolean): void {
   notifyCameraPreviewChanged(previousPreviewDeviceId)
 }
 
+function setHideCursor(hidden: boolean): void {
+  if (!canChangeSettings()) return
+  if (state.settings.hideCursor === hidden) return
+
+  state.settings.hideCursor = hidden
+  state.lastError = null
+  emitState()
+}
+
 function microphoneMenuTemplate(devices: AudioDevice[]): MenuItemConstructorOptions[] {
   const enabled = canChangeSettings()
   const template: MenuItemConstructorOptions[] = [
@@ -519,6 +534,13 @@ function recorderSettingsMenuTemplate(): MenuItemConstructorOptions[] {
       enabled: canChangeSettings(),
       click: () => setHideCameraPreview(!state.settings.hideCameraPreview),
     },
+    {
+      label: "Don't record cursor",
+      type: 'checkbox',
+      checked: state.settings.hideCursor,
+      enabled: canChangeSettings(),
+      click: () => setHideCursor(!state.settings.hideCursor),
+    },
   ]
 }
 
@@ -661,7 +683,7 @@ export async function startRecording(targetOverride?: CaptureTarget): Promise<Re
       outputDir,
       target,
       fps: 60,
-      includeCursor: true,
+      includeCursor: !state.settings.hideCursor,
       excludeOwnApp: true,
       recordSystemAudio: systemAudioEnabled,
       recordMicrophone: state.settings.microphoneDeviceId !== null,

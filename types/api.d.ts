@@ -57,6 +57,11 @@ export interface RecorderSettings {
   cameraDeviceId: string | null
   cameraLabel: string
   hideCameraPreview: boolean
+  // When true, the recorder asks ScreenCaptureKit to omit the system cursor
+  // from captured frames. Inverted into the addon's `includeCursor` option at
+  // recording start; default false keeps cursor-visible as the out-of-box
+  // behavior.
+  hideCursor: boolean
   // When systemAudio is true, this picks between capturing audio from every
   // app ('all') or only the bundle IDs in systemAudioApplications
   // ('selected'). Ignored when systemAudio is false.
