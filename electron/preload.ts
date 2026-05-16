@@ -13,6 +13,10 @@ import type {
   RegionSelectionResult,
   WindowPickerSession,
 } from './ipc/window-picker'
+import type {
+  WindowStateChange,
+  WindowStateSnapshot,
+} from './ipc/window-controls'
 
 function subscribe<T>(channel: string, callback: (payload: T) => void): () => void {
   const listener = (_event: Electron.IpcRendererEvent, payload: T) => callback(payload)
@@ -54,6 +58,15 @@ const api = {
       subscribe<CameraPreviewFrame>('cameraPreview:frame', callback),
     onError: (callback: (message: string) => void) =>
       subscribe<string>('cameraPreview:error', callback),
+  },
+  platform: process.platform as NodeJS.Platform,
+  window: {
+    minimize: (): void => ipcRenderer.send('window:minimize'),
+    maximize: (): void => ipcRenderer.send('window:maximize'),
+    close: (): void => ipcRenderer.send('window:close'),
+    getState: (): Promise<WindowStateSnapshot> => ipcRenderer.invoke('window:getState'),
+    onStateChanged: (callback: (state: WindowStateChange) => void) =>
+      subscribe<WindowStateChange>('window:stateChanged', callback),
   },
   windowPicker: {
     confirm: (): Promise<void> => ipcRenderer.invoke('windowPicker:confirm'),

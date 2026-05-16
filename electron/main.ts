@@ -29,6 +29,10 @@ import {
   startWindowPicker,
   cancelWindowPicker,
 } from './ipc/window-picker'
+import {
+  registerWindowControlHandlers,
+  watchMainWindowState,
+} from './ipc/window-controls'
 import { subscribeActiveSpaceChange } from './mac-spaces'
 import { windowConfigs } from './windowConfigs'
 
@@ -144,13 +148,21 @@ function createMainWindow(): void {
     return
   }
 
+  const isMac = process.platform === 'darwin'
   mainWin = new BrowserWindow({
     width: 1280,
     height: 800,
     show: false,
     backgroundColor: '#000000',
     webPreferences: SHARED_WEB_PREFERENCES,
+    // Custom titlebar: macOS keeps native traffic lights (hidden chrome,
+    // repositioned to align with the 40px React header), Windows/Linux drop
+    // the frame entirely and render min/maximize/close buttons in React.
+    ...(isMac
+      ? { titleBarStyle: 'hidden' as const, trafficLightPosition: { x: 14, y: 14 } }
+      : { frame: false }),
   })
+  watchMainWindowState(mainWin)
 
   mainWin.once('ready-to-show', () => {
     if (hasRequiredPermissions()) {
@@ -182,6 +194,17 @@ function hideRecorderBarWindow(): void {
 
 function hideCameraWindow(): void {
   closeCameraWindow()
+}
+
+function closeRecorderBarWindow(): void {
+  const win = recorderBarWin
+  // Drop the module ref synchronously — the 'closed' listener also nulls it
+  // and closes the camera window, but a follow-up showRecorderWindowOnly
+  // call must not see a stale, closing reference.
+  recorderBarWin = null
+  if (win && !win.isDestroyed()) {
+    win.close()
+  }
 }
 
 function closeCameraWindow(): void {
@@ -657,6 +680,7 @@ app.whenReady().then(() => {
   }
 
   registerMacAddonHandlers({ getRecorderWindow: () => recorderBarWin })
+  registerWindowControlHandlers(() => mainWin)
   registerPermissionHandlers({
     openPermissionWindow: createPermissionWindow,
     closePermissionWindow,
@@ -675,14 +699,23 @@ app.whenReady().then(() => {
     },
     startPicker: startWindowPicker,
     cancelPicker: cancelWindowPicker,
-    onStatusChanged: (status) => {
+    onStatusChanged: (status, snapshot) => {
       if (status === 'recording' || status === 'paused') {
         hideRecorderBarWindow()
         showRecordingControlsWindow()
       } else if (status === 'idle') {
         clearLockedRegionOverlay()
         hideRecordingControlsWindow()
-        showRecorderWindowOnly()
+        // A non-null lastResult marks a successful stop (discard / cancel paths
+        // null it out via resetDiscardedRecording). On success, tear the
+        // recorder + camera windows down and surface the main window so the
+        // user lands on their recordings instead of another empty bar.
+        if (snapshot.lastResult) {
+          closeRecorderBarWindow()
+          createMainWindow()
+        } else {
+          showRecorderWindowOnly()
+        }
       }
       // 'starting' and 'stopping' are transitional — leave window state as-is
       // so we don't blink the bar in and out of existence.
@@ -702,11 +735,24 @@ app.whenReady().then(() => {
 
   app.on('activate', () => {
     const snapshot = refreshPermissions('app:activate', true)
-    if (snapshot.allGranted) {
-      showRecorderWindowOnly()
-    } else {
+    if (!snapshot.allGranted) {
       createPermissionWindow()
+      return
     }
+    // Dock activation should re-surface whatever window the user was already
+    // looking at — it's a "bring app forward" gesture, not a "reset the UI"
+    // gesture. A live main window (post-recording) wins; otherwise the
+    // recorder bar if it's still alive; otherwise cold-start the recorder bar.
+    if (mainWin && !mainWin.isDestroyed()) {
+      if (!mainWin.isVisible()) mainWin.show()
+      mainWin.focus()
+      return
+    }
+    if (recorderBarWin && !recorderBarWin.isDestroyed()) {
+      focusWindow(recorderBarWin)
+      return
+    }
+    showRecorderWindowOnly()
   })
 })
 

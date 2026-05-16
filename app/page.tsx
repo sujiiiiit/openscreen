@@ -2,6 +2,8 @@
 
 import { useState } from 'react'
 
+import { Titlebar } from '@/components/ui/titlebar'
+
 export default function Page() {
   const [result, setResult] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -20,16 +22,19 @@ export default function Page() {
   }
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center gap-4 p-8">
-      <h1 className="text-2xl font-semibold">openscreen</h1>
-      <button
-        onClick={ping}
-        className="rounded border px-4 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-900"
-      >
-        Ping recorder bridge
-      </button>
-      {result && <pre className="text-sm">{result}</pre>}
-      {error && <pre className="text-sm text-red-500">{error}</pre>}
-    </main>
+    <div className="flex min-h-screen flex-col">
+      <Titlebar />
+      <main className="flex flex-1 flex-col items-center justify-center gap-4 p-8">
+        <h1 className="text-2xl font-semibold">openscreen</h1>
+        <button
+          onClick={ping}
+          className="rounded border px-4 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-900"
+        >
+          Ping recorder bridge
+        </button>
+        {result && <pre className="text-sm">{result}</pre>}
+        {error && <pre className="text-sm text-red-500">{error}</pre>}
+      </main>
+    </div>
   )
 }

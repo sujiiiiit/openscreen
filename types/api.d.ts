@@ -122,6 +122,17 @@ export interface RegionSelectionResult {
   message: string | null
 }
 
+export interface WindowStateSnapshot {
+  platform: NodeJS.Platform
+  isMaximized: boolean
+  isFullScreen: boolean
+}
+
+export interface WindowStateChange {
+  isMaximized: boolean
+  isFullScreen: boolean
+}
+
 export interface Api {
   recorder: {
     getState: () => Promise<RecorderState>
@@ -152,6 +163,14 @@ export interface Api {
   cameraPreview: {
     onFrame: (callback: (frame: CameraPreviewFrame) => void) => Unsubscribe
     onError: (callback: (message: string) => void) => Unsubscribe
+  }
+  platform: NodeJS.Platform
+  window: {
+    minimize: () => void
+    maximize: () => void
+    close: () => void
+    getState: () => Promise<WindowStateSnapshot>
+    onStateChanged: (callback: (state: WindowStateChange) => void) => Unsubscribe
   }
   windowPicker: {
     confirm: () => Promise<void>
