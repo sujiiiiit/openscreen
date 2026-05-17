@@ -1,9 +1,9 @@
-"use client";
+"use client"
 
-import { useMemo } from "react";
-import { motion } from "motion/react";
+import { useMemo } from "react"
+import { motion } from "motion/react"
 
-import { HugeiconsIcon } from "@hugeicons/react";
+import { HugeiconsIcon } from "@hugeicons/react"
 import {
   ArrowLeft01Icon,
   ArrowRight01Icon,
@@ -11,25 +11,26 @@ import {
   EaseInOutIcon,
   Video01Icon,
   VolumeHighIcon,
-} from "@hugeicons/core-free-icons";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { cn } from "@/lib/utils";
-import { CursorIcon, SubtitleIcon } from "@/components/ui/icons";
-import { useSidebarTabs } from "@/hooks/use-sidebar-tabs";
+} from "@hugeicons/core-free-icons"
+import { ScrollArea } from "@/components/ui/scroll-area"
+import { cn } from "@/lib/utils"
+import { CursorIcon, SubtitleIcon } from "@/components/ui/icons"
+import { BackgroundPanel } from "@/components/editor/background-panel"
+import { useSidebarTabs } from "@/hooks/use-sidebar-tabs"
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
+} from "@/components/ui/tooltip"
 
-import { type TabItem, type TabId } from "@/types/editor-tabs";
+import { type TabItem, type TabId } from "@/types/editor-tabs"
 
 function TabContentPlaceholder({ label }: { label: string }) {
   return (
     <div className="text-xs text-muted-foreground">
       {label} content placeholder
     </div>
-  );
+  )
 }
 
 const TAB_ITEMS: TabItem[] = [
@@ -37,7 +38,7 @@ const TAB_ITEMS: TabItem[] = [
     id: "background",
     label: "Background",
     icon: <HugeiconsIcon icon={BackgroundIcon} className="size-4" />,
-    content: <TabContentPlaceholder label="Background" />,
+    content: <BackgroundPanel />,
   },
   {
     id: "cursor",
@@ -69,23 +70,23 @@ const TAB_ITEMS: TabItem[] = [
     icon: <HugeiconsIcon icon={EaseInOutIcon} className="size-4" />,
     content: <TabContentPlaceholder label="Transition" />,
   },
-];
+]
 
 export default function EditorSidebar() {
-  const tabs = useMemo(() => TAB_ITEMS, []);
+  const tabs = useMemo(() => TAB_ITEMS, [])
   const { activeTab, selectTab, toggle, isOpen } = useSidebarTabs<TabId>(
-    tabs[0].id,
-  );
-  const activeIndex = tabs.findIndex((item) => item.id === activeTab);
-  const safeActiveIndex = activeIndex === -1 ? 0 : activeIndex;
+    tabs[0].id
+  )
+  const activeIndex = tabs.findIndex((item) => item.id === activeTab)
+  const safeActiveIndex = activeIndex === -1 ? 0 : activeIndex
 
   return (
-    <aside className="h-full border-r relative bg-background">
+    <aside className="relative h-full border-r bg-background">
       <div className="flex h-full flex-row">
         <ScrollArea className="h-full p-2">
           <div className="flex flex-col items-center gap-4">
             {tabs.map((tab) => {
-              const isActive = tab.id === activeTab;
+              const isActive = tab.id === activeTab
 
               return (
                 <button
@@ -111,7 +112,7 @@ export default function EditorSidebar() {
                         "relative inline-flex size-9 items-center justify-center rounded-md text-foreground transition-colors",
                         isActive
                           ? "z-2 [&_svg]:text-tertiary-foreground"
-                          : "group-hover:bg-tertiary group-hover:[&_svg]:text-tertiary-foreground",
+                          : "group-hover:bg-tertiary group-hover:[&_svg]:text-tertiary-foreground"
                       )}
                     >
                       {tab.icon}
@@ -124,7 +125,7 @@ export default function EditorSidebar() {
                     {tab.label}
                   </motion.span>
                 </button>
-              );
+              )
             })}
           </div>
         </ScrollArea>
@@ -146,8 +147,8 @@ export default function EditorSidebar() {
           >
             <div className="relative h-full overflow-hidden">
               {tabs.map((tab, index) => {
-                const offset = index - safeActiveIndex;
-                const isActive = offset === 0;
+                const offset = index - safeActiveIndex
+                const isActive = offset === 0
 
                 return (
                   <motion.div
@@ -172,11 +173,13 @@ export default function EditorSidebar() {
                       pointerEvents: isActive && isOpen ? "auto" : "none",
                     }}
                   >
-                    <ScrollArea className="w-full h-full">
-                      <div className="w-full space-y-6 p-4">{tab.content}</div>
+                    <ScrollArea className="h-full w-full">
+                      <div className="flex w-full flex-col gap-6 p-4">
+                        {tab.content}
+                      </div>
                     </ScrollArea>
                   </motion.div>
-                );
+                )
               })}
             </div>
           </motion.div>
@@ -186,12 +189,12 @@ export default function EditorSidebar() {
           <TooltipTrigger
             onClick={toggle}
             aria-label={isOpen ? "Collapse sidebar" : "Expand sidebar"}
-            className="absolute top-1/2 -right-3 z-10 -translate-y-1/2 py-4 bg-background border rounded-full outline-0"
+            className="absolute top-1/2 -right-3 z-10 -translate-y-1/2 rounded-full border bg-background py-4 outline-0"
           >
             {isOpen ? (
-              <HugeiconsIcon icon={ArrowLeft01Icon} className="size-5"/>
+              <HugeiconsIcon icon={ArrowLeft01Icon} className="size-5" />
             ) : (
-              <HugeiconsIcon icon={ArrowRight01Icon} className="size-5"/>
+              <HugeiconsIcon icon={ArrowRight01Icon} className="size-5" />
             )}
           </TooltipTrigger>
           <TooltipContent side="right">
@@ -200,5 +203,5 @@ export default function EditorSidebar() {
         </Tooltip>
       </div>
     </aside>
-  );
+  )
 }

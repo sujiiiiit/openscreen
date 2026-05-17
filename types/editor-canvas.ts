@@ -1,0 +1,45 @@
+import type { ArtboardPresetId } from "@/lib/editor-canvas"
+
+export type CanvasSize = {
+  width: number
+  height: number
+}
+
+export type EditorArtboard = CanvasSize & {
+  presetId: ArtboardPresetId
+}
+
+export type PixelGridSettings = {
+  enabled: boolean
+  unit: number
+  majorUnit: number
+  visibleFromScale: number
+  opacity: number
+  color: string
+  majorOpacity: number
+  majorColor: string
+  role: "visual-only"
+}
+
+export type ViewTransform = {
+  scale: number
+  x: number
+  y: number
+}
+
+export type CanvasVideoItem = {
+  id: string
+  fileName: string
+  objectUrl: string
+  intrinsicWidth: number
+  intrinsicHeight: number
+  x: number
+  y: number
+  width: number
+  height: number
+  rotation: number
+}
+
+export type CanvasVideoTransformPatch = Partial<
+  Pick<CanvasVideoItem, "x" | "y" | "width" | "height" | "rotation">
+>
