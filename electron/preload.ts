@@ -13,6 +13,7 @@ import type {
   RegionSelectionResult,
   WindowPickerSession,
 } from './ipc/window-picker'
+import type { ProjectSummary } from './ipc/projects'
 import type {
   WindowStateChange,
   WindowStateSnapshot,
@@ -67,6 +68,14 @@ const api = {
     getState: (): Promise<WindowStateSnapshot> => ipcRenderer.invoke('window:getState'),
     onStateChanged: (callback: (state: WindowStateChange) => void) =>
       subscribe<WindowStateChange>('window:stateChanged', callback),
+  },
+  projects: {
+    getLatest: (): Promise<ProjectSummary | null> =>
+      ipcRenderer.invoke('projects:getLatest'),
+    open: (folderPath: string): Promise<ProjectSummary | null> =>
+      ipcRenderer.invoke('projects:open', folderPath),
+    pickAndOpen: (): Promise<ProjectSummary | null> =>
+      ipcRenderer.invoke('projects:pickAndOpen'),
   },
   windowPicker: {
     confirm: (): Promise<void> => ipcRenderer.invoke('windowPicker:confirm'),

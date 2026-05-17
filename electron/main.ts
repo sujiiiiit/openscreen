@@ -17,11 +17,13 @@ import {
 import {
   finishPickerMode,
   flushActiveRecording,
+  getLatestRecordingDir,
   isRecordingActive,
   registerRecorderHandlers,
   reservePickerStart,
   startRecording,
 } from './ipc/recorder'
+import { registerProjectsHandlers } from './ipc/projects'
 import {
   clearLockedRegionOverlay,
   disposeWindowPicker,
@@ -732,6 +734,10 @@ app.whenReady().then(() => {
       // 'starting' and 'stopping' are transitional — leave window state as-is
       // so we don't blink the bar in and out of existence.
     },
+  })
+  registerProjectsHandlers({
+    getMainWindow: () => mainWin,
+    getLatestRecordingDir,
   })
   registerWindowPickerHandlers({
     webPreferences: SHARED_WEB_PREFERENCES,

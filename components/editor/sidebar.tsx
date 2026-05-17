@@ -9,6 +9,7 @@ import {
   ArrowRight01Icon,
   BackgroundIcon,
   EaseInOutIcon,
+  FolderLibraryIcon,
   Video01Icon,
   VolumeHighIcon,
 } from "@hugeicons/core-free-icons"
@@ -16,6 +17,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 import { CursorIcon, SubtitleIcon } from "@/components/ui/icons"
 import { BackgroundPanel } from "@/components/editor/background-panel"
+import { AssetsPanel } from "@/components/editor/assets-panel"
 import { useSidebarTabs } from "@/hooks/use-sidebar-tabs"
 import {
   Tooltip,
@@ -104,6 +106,12 @@ const TAB_ITEMS: TabItem[] = [
         description="Control timing, easing, and presets across scenes."
       />
     ),
+  },
+  {
+    id: "assets",
+    label: "Assets",
+    icon: <HugeiconsIcon icon={FolderLibraryIcon} className="size-4" />,
+    content: <AssetsPanel />,
   },
 ]
 

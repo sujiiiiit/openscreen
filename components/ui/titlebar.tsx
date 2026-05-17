@@ -14,11 +14,13 @@ import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { DRAG, NO_DRAG } from '@/lib/window-drag'
+import { useProject } from '@/components/editor/project/provider'
 
 export function Titlebar() {
   const [platform, setPlatform] = useState<NodeJS.Platform | null>(null)
   const [isMaximized, setIsMaximized] = useState(false)
   const [isFullScreen, setIsFullScreen] = useState(false)
+  const { openPicker } = useProject()
 
   useEffect(() => {
     let cancelled = false
@@ -63,10 +65,10 @@ export function Titlebar() {
                 {...props}
                 variant="ghost"
                 size="icon"
-                aria-label="Open recordings folder"
+                aria-label="Open project"
                 className="rounded-md"
                 onClick={() => {
-                  // Placeholder — folder open action wired up separately.
+                  void openPicker()
                 }}
               >
                 <HugeiconsIcon icon={Folder02Icon} />

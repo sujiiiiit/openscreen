@@ -133,6 +133,35 @@ export interface WindowStateChange {
   isFullScreen: boolean
 }
 
+export type ProjectAssetRole = 'screen' | 'camera'
+
+export interface ProjectAssetAudioTrack {
+  source: 'systemAudio' | 'microphone'
+  sampleRate?: number
+  channelCount?: number
+}
+
+export interface ProjectAsset {
+  role: ProjectAssetRole
+  fileName: string
+  filePath: string
+  fileUrl: string
+  fileSize: number
+  durationMs?: number
+  width?: number
+  height?: number
+  codec?: string
+  audioTracks: ProjectAssetAudioTrack[]
+}
+
+export interface ProjectSummary {
+  id: string
+  name: string
+  path: string
+  createdAtUnixMs: number
+  assets: ProjectAsset[]
+}
+
 export interface Api {
   recorder: {
     getState: () => Promise<RecorderState>
@@ -171,6 +200,11 @@ export interface Api {
     close: () => void
     getState: () => Promise<WindowStateSnapshot>
     onStateChanged: (callback: (state: WindowStateChange) => void) => Unsubscribe
+  }
+  projects: {
+    getLatest: () => Promise<ProjectSummary | null>
+    open: (folderPath: string) => Promise<ProjectSummary | null>
+    pickAndOpen: () => Promise<ProjectSummary | null>
   }
   windowPicker: {
     confirm: () => Promise<void>

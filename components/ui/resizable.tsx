@@ -1,5 +1,7 @@
 "use client"
 
+import { HugeiconsIcon } from "@hugeicons/react"
+import { DragDropVerticalIcon } from "@hugeicons/core-free-icons"
 import * as ResizablePrimitive from "react-resizable-panels"
 
 import { cn } from "@/lib/utils"
@@ -41,10 +43,12 @@ function ResizableHandle({
       {...props}
     >
       {withHandle && (
-        <div className="z-10 flex h-6 w-1 shrink-0 rounded-lg bg-border" />
+        <div className="z-10 flex h-4 w-3 items-center justify-center rounded-xs border bg-border">
+          <HugeiconsIcon icon={DragDropVerticalIcon} className="size-3" />
+        </div>
       )}
     </ResizablePrimitive.Separator>
   )
 }
 
-export { ResizableHandle, ResizablePanel, ResizablePanelGroup }
+export { ResizablePanelGroup, ResizablePanel, ResizableHandle }

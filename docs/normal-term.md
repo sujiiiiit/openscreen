@@ -6,6 +6,9 @@ Use this table when discussion language and implementation language differ. Pref
 | --------------------------- | ------------------------------- | ------------------------------------------------------------------------------------- |
 | Outer canvas                | Workspace or pasteboard         | The bounded editor surface around the artboard.                                       |
 | Inner canvas                | Artboard or frame               | The editable output area with a chosen aspect ratio and pixel size.                   |
+| Canvas section              | Workspace section               | Top editor section containing the fixed/collapsible sidebar and Konva workspace.      |
+| Timeline section            | Timeline panel                  | Resizable bottom editor panel reserved for timeline/playback UI.                      |
+| Sidebar section             | Editor sidebar                  | Fixed-width left editor panel with its own collapse animation; it is not resizable.   |
 | Fit canvas                  | Fit artboard to viewport        | Recenter and scale the artboard so it fits inside the available workspace.            |
 | Canvas zoom                 | Viewport zoom                   | The zoom scale applied to the workspace view.                                         |
 | Canvas position             | Viewport translation            | The `x` and `y` camera offset used to pan the workspace.                              |

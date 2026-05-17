@@ -6,7 +6,8 @@ export type TabId =
   | "video"
   | "subtitle"
   | "audio"
-  | "transition";
+  | "transition"
+  | "assets";
 
 export type TabItem = {
   id: TabId;

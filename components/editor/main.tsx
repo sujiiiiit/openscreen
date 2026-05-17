@@ -16,7 +16,7 @@ const EditorWorkspace = dynamic(
 
 export default function EditorMain() {
   return (
-    <div className="min-w-0 flex-1">
+    <div className="h-full min-h-0 w-full min-w-0">
       <EditorWorkspace />
     </div>
   )

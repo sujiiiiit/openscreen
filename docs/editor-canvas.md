@@ -10,6 +10,9 @@ Use these names in code review, docs, comments, and new implementation plans. Th
 | -------------------------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | Outer canvas                     | Workspace or pasteboard           | The bounded editor surface around the artboard. Implemented by the Konva `Stage` viewport and the workspace background. |
 | Inner canvas                     | Artboard or frame                 | The export-sized editable area, e.g. 1920 x 1080 for 16:9.                                                              |
+| Canvas section                   | Workspace section                 | Top editor section containing the fixed/collapsible sidebar and Konva workspace.                                        |
+| Timeline section                 | Timeline panel                    | Resizable bottom editor panel reserved for timeline/playback UI.                                                        |
+| Sidebar section                  | Editor sidebar                    | Fixed-width left editor panel with its own collapse animation; it is not resizable.                                     |
 | Canvas zoom                      | Viewport transform                | The `scale`, `x`, and `y` camera transform applied to the stage.                                                        |
 | Elements                         | Canvas nodes or layer items       | Videos now; future text, shapes, subtitles, images, etc.                                                                |
 | Hover bounds                     | Hover outline                     | A non-selecting visual outline shown around the canvas node under the pointer.                                          |
@@ -25,7 +28,7 @@ Use these names in code review, docs, comments, and new implementation plans. Th
 Implemented:
 
 - Canva-like bounded editor workspace using Konva and react-konva.
-- Resizable layout with sidebar, main workspace, and footer/timeline placeholder.
+- Two-section resizable layout: fixed/collapsible sidebar plus workspace in the top section, timeline panel in the bottom section.
 - Artboard presets: Wide 16:9, Vertical 9:16, Portrait 4:5, Standard 4:3, Square 1:1.
 - Local video import from the Background tab.
 - Live video playback inside the artboard.
@@ -56,29 +59,30 @@ Not implemented yet:
 
 ## Files
 
-| File                                                      | Responsibility                                                                                                                                                |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `app/page.tsx`                                            | Top-level editor layout. Wraps the editor in `EditorCanvasProvider`, tooltip provider, vertical resizable panels, sidebar, main workspace, and footer.        |
-| `components/editor/main.tsx`                              | Client-only dynamic import for `EditorWorkspace`.                                                                                                             |
-| `components/editor/background-panel.tsx`                  | Background tab upload UI for adding local video files.                                                                                                        |
-| `components/editor/footer.tsx`                            | Footer/timeline placeholder, artboard preset dropdown, and canvas zoom dropdown.                                                                              |
-| `components/editor/canvas/provider.tsx`                   | Editor canvas state, video import metadata, artboard state, viewport size, view transform, and actions.                                                       |
-| `components/editor/canvas/editor-workspace.tsx`           | Konva stage shell, layer composition, viewport sizing, zoom, pan, and keyboard shortcuts.                                                                     |
-| `components/editor/canvas/artboard-pixel-grid.tsx`        | Custom non-listening pixel grid renderer for high zoom inside the artboard.                                                                                   |
-| `components/editor/canvas/canvas-video-node.tsx`          | Live video node rendering, frame callbacks, object URL playback, cover crop attrs, and Konva node registration.                                               |
-| `components/editor/canvas/selected-video-transformer.tsx` | Selected node transformer wiring, handle sizing, rotation snaps, and transform constraints.                                                                   |
-| `components/editor/canvas/selection-toolbar.tsx`          | Floating DOM selection action bar for lock, duplicate, and delete.                                                                                            |
-| `components/editor/canvas/artboard-preset-dropdown.tsx`   | Artboard preset dropdown in the footer.                                                                                                                       |
-| `components/editor/canvas/canvas-zoom-menu.tsx`           | Canvas zoom dropdown and zoom percentage readout.                                                                                                             |
-| `components/editor/canvas/canvas-node-constants.ts`       | Shared canvas node names, hover outline constants, transformer anchors, snap angles, snap thresholds, guide colors, keyboard nudge steps, and control colors. |
-| `components/editor/canvas/snap-guide-overlay.tsx`         | Imperative Konva overlay drawing the pink Figma-style alignment and distance guides from a fixed line pool.                                                   |
-| `components/editor/canvas/view-transform-utils.ts`        | Viewport interaction helpers for input target checks, modifier detection, and screen-pixel snapping.                                                          |
-| `components/ui/dropdown-menu.tsx`                         | Shared dropdown menu primitives used by artboard and zoom controls.                                                                                           |
-| `lib/editor-canvas.ts`                                    | Artboard presets, zoom/grid constants, fit transform, clamped view helpers, and pointer-centered zoom helper.                                                 |
-| `lib/editor-canvas-snap.ts`                               | Pure snap math: rotated AABB, snap-cache builder, drag-snap and resize-snap solvers, equal-spacing distance guides, grid snap helpers.                        |
-| `types/editor-canvas.ts`                                  | Canvas types: size, artboard, pixel grid settings, view transform, video item, transform patch.                                                               |
-| `app/globals.css`                                         | Theme tokens, including `--editor-workspace`.                                                                                                                 |
-| `docs/normal-term.md`                                     | Developer-friendly translation table from discussion terms to industry terms.                                                                                 |
+| File                                                      | Responsibility                                                                                                                                                  |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `app/page.tsx`                                            | Top-level editor layout. Wraps the editor in `EditorCanvasProvider`, tooltip provider, one vertical resizable group, top workspace section, and timeline panel. |
+| `components/editor/main.tsx`                              | Client-only dynamic import for `EditorWorkspace` and full-size workspace panel wrapper.                                                                         |
+| `components/editor/background-panel.tsx`                  | Background tab upload UI for adding local video files.                                                                                                          |
+| `components/editor/footer.tsx`                            | Timeline panel placeholder, artboard preset dropdown, and canvas zoom dropdown.                                                                                 |
+| `components/editor/sidebar.tsx`                           | Left editor sidebar, tab rail, tab content panel, and fixed-width collapse/expand animation.                                                                    |
+| `components/editor/canvas/provider.tsx`                   | Editor canvas state, video import metadata, artboard state, viewport size, view transform, and actions.                                                         |
+| `components/editor/canvas/editor-workspace.tsx`           | Konva stage shell, layer composition, viewport sizing, zoom, pan, and keyboard shortcuts.                                                                       |
+| `components/editor/canvas/artboard-pixel-grid.tsx`        | Custom non-listening pixel grid renderer for high zoom inside the artboard.                                                                                     |
+| `components/editor/canvas/canvas-video-node.tsx`          | Live video node rendering, frame callbacks, object URL playback, cover crop attrs, and Konva node registration.                                                 |
+| `components/editor/canvas/selected-video-transformer.tsx` | Selected node transformer wiring, handle sizing, rotation snaps, and transform constraints.                                                                     |
+| `components/editor/canvas/selection-toolbar.tsx`          | Floating DOM selection action bar for lock, duplicate, and delete.                                                                                              |
+| `components/editor/canvas/artboard-preset-dropdown.tsx`   | Artboard preset dropdown in the footer.                                                                                                                         |
+| `components/editor/canvas/canvas-zoom-menu.tsx`           | Canvas zoom dropdown and zoom percentage readout.                                                                                                               |
+| `components/editor/canvas/canvas-node-constants.ts`       | Shared canvas node names, hover outline constants, transformer anchors, snap angles, snap thresholds, guide colors, keyboard nudge steps, and control colors.   |
+| `components/editor/canvas/snap-guide-overlay.tsx`         | Imperative Konva overlay drawing the pink Figma-style alignment and distance guides from a fixed line pool.                                                     |
+| `components/editor/canvas/view-transform-utils.ts`        | Viewport interaction helpers for input target checks, modifier detection, and screen-pixel snapping.                                                            |
+| `components/ui/dropdown-menu.tsx`                         | Shared dropdown menu primitives used by artboard and zoom controls.                                                                                             |
+| `lib/editor-canvas.ts`                                    | Artboard presets, zoom/grid constants, fit transform, clamped view helpers, and pointer-centered zoom helper.                                                   |
+| `lib/editor-canvas-snap.ts`                               | Pure snap math: rotated AABB, snap-cache builder, drag-snap and resize-snap solvers, equal-spacing distance guides, grid snap helpers.                          |
+| `types/editor-canvas.ts`                                  | Canvas types: size, artboard, pixel grid settings, view transform, video item, transform patch.                                                                 |
+| `app/globals.css`                                         | Theme tokens, including `--editor-workspace`.                                                                                                                   |
+| `docs/normal-term.md`                                     | Developer-friendly translation table from discussion terms to industry terms.                                                                                   |
 
 ## Architecture
 
@@ -87,30 +91,32 @@ The stage is a bounded viewport, not an infinite canvas.
 ```text
 Editor layout
   EditorCanvasProvider
-    Sidebar
-      BackgroundPanel
-    Main
-      EditorWorkspace
-        Konva Stage
-          Background/grid Layer, listening=false
-            Artboard fill
-            ArtboardPixelGrid
-          Content Layer
-            Transparent hit rect
-            Clipped artboard content group
-              CanvasVideoNode[]
-            Artboard border
-          Snap Guide Layer, listening=false
-            SnapGuideOverlay (pooled Konva.Line shapes)
-          Selection Overlay Layer
-            Hover outline
-            SelectedVideoTransformer
-        DOM selection toolbar
-        DOM rotation readout
-    Footer
-      ArtboardPresetDropdown
-      CanvasZoomMenu
-      Timeline placeholder
+    Root ResizablePanelGroup, vertical
+      Workspace section ResizablePanel
+        EditorSidebar
+          Sidebar tab rail
+          Sidebar tab content
+        EditorWorkspace
+          Konva Stage
+            Background/grid Layer, listening=false
+              Artboard fill
+              ArtboardPixelGrid
+            Content Layer
+              Transparent hit rect
+              Clipped artboard content group
+                CanvasVideoNode[]
+              Artboard border
+            Snap Guide Layer, listening=false
+              SnapGuideOverlay (pooled Konva.Line shapes)
+            Selection Overlay Layer
+              Hover outline
+              SelectedVideoTransformer
+          DOM selection toolbar
+          DOM rotation readout
+      Timeline ResizablePanel
+        ArtboardPresetDropdown
+        CanvasZoomMenu
+        Timeline placeholder
 ```
 
 Layer split:
@@ -153,7 +159,32 @@ Context hooks:
 - `useEditorCanvasActions()`: stable canvas actions.
 - `useEditorCanvas()`: compatibility hook that merges every context and should be avoided in hot or narrow components.
 
-`ResizeObserver` updates the viewport size from the main editor area, so the Konva stage follows sidebar/footer resizing.
+`ResizeObserver` updates the viewport size from the workspace area, so the Konva stage follows timeline resizing and sidebar collapse/expand.
+
+## Layout Resizing
+
+The editor shell uses the shared shadcn `Resizable` wrapper around `react-resizable-panels` only for the vertical split between the top workspace section and the bottom timeline panel.
+
+Panel groups:
+
+- `editor-root-layout`: vertical split between the workspace panel and timeline panel.
+
+Panel sizing:
+
+- Workspace panel default height: `69%`; minimum height: `260px`.
+- Timeline panel default height: `31%`; minimum height: `140px`; maximum height: `60%`.
+- The sidebar is not a resizable panel. It keeps its existing tab rail plus animated content width: `360px` when open and `0px` when collapsed.
+
+Collapse behavior:
+
+- `EditorSidebar` owns tab selection and open state through `useSidebarTabs`.
+- The sidebar collapse/expand button toggles the sidebar content width only. It does not call the resizable panel imperative API and does not expose a sidebar drag handle.
+
+Performance notes:
+
+- Resizing changes layout bounds only. It does not add Konva layers, per-node DOM overlays, or per-node listeners.
+- The existing workspace `ResizeObserver` is the bridge from DOM layout to Konva viewport size.
+- Large scenes remain bounded by the existing stage-level event delegation and constant layer count; a timeline resize or sidebar collapse may trigger a viewport-size state update and stage redraw, but it does not loop over canvas nodes.
 
 ## Artboard
 
@@ -504,6 +535,8 @@ Result:
 - Konva Transformer API: https://konvajs.org/api/Konva.Transformer.html
 - Konva performance tips: https://konvajs.org/docs/performance/All_Performance_Tips.html
 - Konva Stage API, pointer position: https://konvajs.org/api/Konva.Stage.html
+- shadcn `Resizable` component: https://ui.shadcn.com/docs/components/base/resizable
+- `react-resizable-panels` API: https://github.com/bvaughn/react-resizable-panels
 - Figma zoom and pixel grid behavior: https://help.figma.com/hc/en-us/articles/360041065034-Adjust-your-zoom-and-view-options
 - Figma layout grids: https://help.figma.com/hc/en-us/articles/360040450513-Create-layout-grids-with-grids-columns-and-rows
 - MDN `HTMLVideoElement.requestVideoFrameCallback()`: https://developer.mozilla.org/docs/Web/API/HTMLVideoElement/requestVideoFrameCallback

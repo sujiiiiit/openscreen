@@ -152,6 +152,10 @@ function refreshPausedMs(): void {
   }
 }
 
+export function getLatestRecordingDir(): string | null {
+  return state.outputDir
+}
+
 function publicState(): RecorderState {
   // structuredClone is ~5x faster than JSON round-tripping and handles
   // nested objects without dropping prototypes. Hot path: called on every
