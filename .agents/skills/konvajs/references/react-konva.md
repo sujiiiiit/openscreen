@@ -69,6 +69,19 @@ Why `onDragEnd` and not `onDragMove`? Because writing state every move forces a 
 
 If you need continuous state (e.g., to show coordinates), keep that "live" value in a `useRef` and read it in a rAF, or accept the cost.
 
+## Performance quick path for large scenes
+
+When the user reports slow dragging, hover jank, slow zoom/pan, mobile lag, or thousands of nodes, read `performance.md` too. The React-specific first moves are:
+
+- Keep generated shape data stable with `useMemo` or an external store.
+- Memoize heavy shape components with `React.memo`.
+- Use `useCallback` for handlers passed to many children.
+- Avoid `setState` inside every `onDragMove`, `onMouseMove`, animation frame, or filter slider tick unless it is throttled and measured.
+- Put hover tooltips, guides, Transformer handles, and active drag previews in separate layers.
+- For 10000+ mostly-static nodes, consider creating Konva nodes imperatively in `useEffect` and using React only for surrounding UI controls.
+
+React render order is canvas order. Reorder arrays for z-order changes, and use a drag layer or `react-konva-utils` `Portal` for temporary overlays instead of imperative `zIndex()` on React-managed nodes.
+
 ### Controlled vs uncontrolled
 
 - **Controlled** (preferred for editor-style apps): React state holds `x`/`y`; Konva renders from it. After drag, write back. This works because react-konva diffs and only changes attributes that differ — and `e.target.x()` already reflects the new value, so writing it back is a no-op visually.
@@ -203,7 +216,7 @@ import { Image as KImage } from 'react-konva';   // alias!
 
 Otherwise TypeScript/eslint confuses `Image` with `window.Image`.
 
-### 2. React 18 strict mode double-mounts
+### 2. React Strict Mode double-mounts
 
 Effects run twice in dev. Idempotent ref-attach code (`tr.nodes([...])`) is fine, but watch for:
 - `cache()` called twice — clear cache first

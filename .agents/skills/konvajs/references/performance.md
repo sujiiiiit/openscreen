@@ -1,153 +1,458 @@
 # Performance
 
-Konva runs on the CPU (2D canvas). With care you can render thousands of shapes smoothly; without care, a hundred shapes can stutter. Apply these in order of impact.
+Konva performance is mostly about two budgets: draw fewer pixels, and make fewer nodes participate in rendering and hit detection. When a user reports lag, stutter, slow dragging, slow zooming, high memory, mobile jank, or a scene with thousands of objects, use this reference first.
 
-## 1. Disable listening on non-interactive nodes
+## Fast triage workflow
 
-Single biggest free win. Every interactive shape draws to both the scene canvas AND a hidden hit canvas.
+1. Reproduce the hot path: dragging, zooming, panning, hover tooltip, free drawing, animation, image filter slider, resize, or initial load.
+2. Record the scene budget: stage size, device pixel ratio, layer count, shape count, listening node count, cached node count, filter count, and React component count.
+3. Measure before changing code. Use Chrome DevTools Performance, the React Profiler for react-konva apps, and a temporary `Konva.Animation` FPS label if useful.
+4. Apply the biggest lever first: stage pixels, layer split, `listening: false`, culling/removing offscreen nodes, drag layer, caching, then React state churn.
+5. Measure again. Some Konva "optimizations" are tradeoffs; keep only the ones that move the real interaction.
 
-```javascript
-backgroundGrid.listening(false);
-decorations.listening(false);
-```
+## Mental model
 
-Whole layer: `layer.listening(false)`.
+- A `Stage` owns DOM and multiple canvas elements.
+- Every `Layer` is a visible scene canvas, and interactive layers also maintain a hidden hit canvas for event detection.
+- A redraw cost is roughly proportional to affected layer pixels, device pixel ratio, number/complexity of drawn nodes, and any offscreen buffer work.
+- Node count matters even when a node is transparent or offscreen. Remove or virtualize large inactive sets.
+- In React, React rendering cost is separate from Konva drawing cost. A smooth Konva drag can still feel bad if `onDragMove` re-renders thousands of JSX nodes.
 
-In react-konva: `<Rect listening={false} ... />`.
+## Stage and pixel budget
 
-## 2. Keep layer count low
-
-Each Layer is a `<canvas>` element + a hit canvas + compositing cost. Aim for 1–3 total Layers in normal apps.
-
-Use Groups for organization, NOT Layers. Common useful layer split:
-- Layer 1: static background (grid, image, doesn't change)
-- Layer 2: main content (most shapes)
-- Layer 3: drag/transform overlay (only the active node)
-
-If you don't need redraw isolation, just use one Layer.
-
-## 3. Use a drag layer for many-shape scenes
-
-When dragging in a heavy scene, the whole Layer redraws each frame. Move the active node to a light Layer:
+Keep the stage close to viewport size. Do not create a 20000 x 20000 stage for an infinite canvas or map; keep the viewport-sized stage and pan/zoom the content coordinates.
 
 ```javascript
-node.on('dragstart', () => node.moveTo(dragLayer));
-node.on('dragend',   () => node.moveTo(mainLayer));
+const stage = new Konva.Stage({
+  container: 'container',
+  width: viewport.width,
+  height: viewport.height,
+});
 ```
 
-Order of magnitude faster for 500+ shapes.
+For mobile, include the viewport meta tag so the browser does not scale Konva output:
 
-## 4. `perfectDrawEnabled: false` for fill+stroke+opacity shapes
+```html
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+```
 
-When a shape has all three, Konva renders to a buffer first to prevent edge artifacts. If you can live with a tiny seam, disable it.
+On high-DPI devices, Konva renders crisp canvases by default. If retina devices are the bottleneck, set the global pixel ratio before creating any stage or layer:
 
 ```javascript
-rect.perfectDrawEnabled(false);
+Konva.pixelRatio = 1;
 ```
 
-## 5. `shadowForStrokeEnabled: false`
-
-If your stroked shapes have shadows, this skips an extra draw pass.
+For a special layer-level override, use the layer canvas wrapper:
 
 ```javascript
-rect.shadowForStrokeEnabled(false);
+layer.getCanvas().setPixelRatio(1);
 ```
 
-Caveat: open lines won't get a shadow. Closed shapes work fine.
-
-## 6. Cache complex subtrees
-
-If a Group has many shapes and rarely changes, cache it:
+Keep export quality separate from runtime quality:
 
 ```javascript
-complexLogo.cache();
-// when it changes:
-complexLogo.clearCache();
+const png = stage.toDataURL({ pixelRatio: 2 }); // high-quality export only
 ```
 
-`cache({ pixelRatio: 1 })` if you're memory-bound (e.g., dozens of cached groups on retina).
+Throttle stage resizes. A `ResizeObserver` that updates `Stage` size on every micro change can force expensive canvas reallocations.
 
-## 7. `transformsEnabled: 'position'` for shapes that only translate
+## Layer management
+
+Use layers to isolate redraw cadence, not for object organization. Groups are for organization; layers are real canvases.
+
+Good default for editors:
+
+- `backgroundLayer`: grid/background/image, often `listening: false`
+- `mainLayer`: normal editable content
+- `overlayLayer`: selection, Transformer, guides, tooltip
+- `dragLayer`: optional, only while dragging a node in a heavy scene
+
+Avoid more than 3-5 layers unless you have measured a real benefit. A layer per object is almost always wrong.
 
 ```javascript
-node.transformsEnabled('position');   // skip rotation/scale matrix math
+const backgroundLayer = new Konva.Layer({ listening: false });
+const mainLayer = new Konva.Layer();
+const overlayLayer = new Konva.Layer();
+stage.add(backgroundLayer, mainLayer, overlayLayer);
 ```
 
-Useful for many small markers/icons that just move.
+`FastLayer` is deprecated. For non-interactive rendering, use `new Konva.Layer({ listening: false })` or `<Layer listening={false}>`.
 
-## 8. Limit pixel ratio on huge stages
+## Hit detection and event work
+
+Disable listening wherever events are unnecessary. This removes nodes from the hit graph, so Konva can skip event-detection work.
 
 ```javascript
-Konva.pixelRatio = 1;   // global; halves draw work on retina
-// or per-stage via stage.canvas.setPixelRatio(1)
+backgroundLayer.listening(false);
+gridGroup.listening(false);
+shape.listening(false);
 ```
 
-## 9. Stage size matters
+React:
 
-A full-window stage on a 5K display is a LOT of pixels. If you can fit your stage in a smaller div (with internal pan/zoom for content), do so. Smaller stage = less GPU memory + less per-frame work.
+```jsx
+<Layer listening={false}>
+  <Rect width={width} height={height} fill="#f5f5f5" />
+</Layer>
+```
 
-## 10. `batchDraw` over `draw`
+For many similar interactive shapes, prefer event delegation over one custom handler closure per node:
 
-If you're updating many attributes in a tight loop, prefer mutating then calling `layer.batchDraw()` once. With `Konva.autoDrawEnabled = true` (default) Konva already batches per rAF, but explicit `batchDraw` lets you opt out and aggregate.
+```javascript
+layer.on('click tap', 'Circle', (e) => {
+  selectNode(e.target.id());
+});
+```
 
-For ultra-tight loops, temporarily disable auto-draw:
+`Konva.hitOnDragEnabled` is `false` by default for performance. Enable it only when hover/intersection behavior during drag is truly required:
+
+```javascript
+Konva.hitOnDragEnabled = true; // rare
+```
+
+## Shape count, visibility, and culling
+
+Every node has a cost just to exist. If thousands of objects are hidden, offscreen, filtered out, or at opacity 0, do not leave all of them active in the scene graph.
+
+Use `hide()` for short-lived visibility toggles. Hidden nodes are not hit-detectable, but they still occupy memory and tree traversal:
+
+```javascript
+node.hide();
+```
+
+Use `remove()` when you will reuse a node later, and `destroy()` when it is gone for good:
+
+```javascript
+node.remove();  // detach, keep reusable
+node.destroy(); // detach and release Konva references
+```
+
+For large maps, timelines, seat maps, spreadsheets, or diagrams, virtualize: render only visible nodes plus a margin. Prefer app-data bounds for virtualization so hidden nodes can become visible again when the viewport changes.
+
+```javascript
+const visible = intersectsBounds(item.bounds, expandedViewport);
+node.visible(visible);
+```
+
+For already-mounted visible nodes, `node.isClientRectOnScreen(margin)` is a useful diagnostic helper.
+
+If nodes only translate and never rotate/scale/skew, reduce transform math:
+
+```javascript
+marker.transformsEnabled('position');
+```
+
+## Dragging smoothness
+
+Dragging one node inside a heavy layer redraws that heavy layer every move. Move the active node to a light drag layer, then move it back on drag end.
+
+```javascript
+let sourceLayer = null;
+
+node.on('dragstart', () => {
+  sourceLayer = node.getLayer();
+  node.moveTo(dragLayer);
+});
+
+node.on('dragend', () => {
+  node.moveTo(sourceLayer);
+});
+```
+
+If exact z-order matters, restore order from app state after drag rather than relying on the temporary layer move.
+
+In React, avoid `setState` on every `onDragMove` for heavy scenes. Let Konva mutate the node during drag and commit final coordinates on `onDragEnd`.
+
+```jsx
+<Rect
+  draggable
+  x={shape.x}
+  y={shape.y}
+  onDragEnd={(e) => {
+    updateShape(shape.id, { x: e.target.x(), y: e.target.y() });
+  }}
+/>
+```
+
+For live coordinates, update a ref or throttle state updates with `requestAnimationFrame`.
+
+## Caching
+
+Cache complex, stable nodes or groups, especially when filters are used. After caching, Konva draws the cached bitmap instead of replaying all drawing commands.
+
+Good candidates:
+
+- Complex `Group`s with many children that move/rotate as a unit
+- Text-heavy labels reused across frames
+- Custom `sceneFunc` shapes with expensive drawing
+- Nodes that use function filters
+- Static decorations redrawn often because another sibling on the same layer changes
+
+Poor candidates:
+
+- Simple rectangles/circles/lines without filters
+- Nodes whose geometry or paint changes every frame
+- Thousands of tiny individual shapes where cache memory is worse than direct draw
+
+Prefer caching a group over caching every child:
+
+```javascript
+const markerCluster = new Konva.Group({ listening: false });
+// add many child shapes...
+markerCluster.cache({ pixelRatio: 1, hitCanvasPixelRatio: 1 });
+```
+
+For custom shapes, provide a cache bounding box. Use `drawBorder: true` while debugging cache bounds:
+
+```javascript
+customShape.cache({
+  x: -50,
+  y: -50,
+  width: 100,
+  height: 100,
+  offset: 8,
+  drawBorder: true,
+});
+```
+
+When cached content changes, clear and recreate the cache:
+
+```javascript
+node.clearCache();
+node.cache({ pixelRatio: 1 });
+```
+
+## Filters and visual effects
+
+Konva supports function filters and CSS filter strings. Function filters use pixel manipulation and require `cache()`. CSS filter strings can use native browser performance and do not require caching when used alone. Mixed CSS/function filter arrays require caching.
+
+```javascript
+// CSS filters only: no cache required.
+node.filters(['blur(4px)', 'brightness(1.15)']);
+
+// Function filter: cache required.
+image.cache();
+image.filters([Konva.Filters.Blur]);
+image.blurRadius(8);
+```
+
+Do not apply heavy filters to a whole stage on every frame. Apply filters to the smallest node that needs them, update filter parameters only when they change, and cache after the image is loaded.
+
+For image export, remember CORS: load cross-origin images with `crossOrigin = 'anonymous'` or the canvas becomes tainted.
+
+## Perfect drawing, strokes, and shadows
+
+Konva may use buffer canvases to make fill/stroke/opacity combinations visually correct. For large scenes, disable perfect drawing when the visual difference is acceptable:
+
+```javascript
+shape.perfectDrawEnabled(false);
+```
+
+If a shape has both stroke and shadow, Konva may do extra internal drawing for the stroke shadow. Disable stroke shadows when the stroke itself does not need a shadow:
+
+```javascript
+shape.shadowForStrokeEnabled(false);
+```
+
+For editors, consider `strokeScaleEnabled: false` so zoom/transform does not make strokes enormous:
+
+```javascript
+shape.strokeScaleEnabled(false);
+```
+
+This is primarily a UX choice, but it also avoids some pathological stroke costs at high zoom.
+
+## Draw scheduling
+
+In Konva 8 and newer, `Konva.autoDrawEnabled` defaults to `true`, and Konva batches many redraws automatically. Avoid `layer.draw()` inside `mousemove`, `dragmove`, or slider loops.
+
+Use `batchDraw()` when you intentionally control drawing or have disabled auto draw:
 
 ```javascript
 Konva.autoDrawEnabled = false;
-// … many mutations …
-layer.batchDraw();
+
+for (const node of nodes) {
+  node.setAttrs({ x: node.x() + 10 });
+}
+
+layer.batchDraw(); // schedules one rAF draw
 Konva.autoDrawEnabled = true;
 ```
 
-## 11. Avoid `intersects()` and `getAllIntersections()` in hot paths
+`stage.batchDraw()` is useful when several layers changed and you still want one scheduled update.
 
-Both create a temp canvas and redraw — slow. Use `stage.getIntersection(point)` (single pixel read) for hit testing.
+## Animation
 
-## 12. Avoid redrawing during animation when nothing changed
+Use `Konva.Animation` for frame loops instead of raw `requestAnimationFrame`; it integrates with layer redraws and exposes frame data.
 
-`Konva.Animation` redraws each frame. If your callback sometimes makes no visible change, return without doing work and Konva won't redraw if you don't mutate.
+```javascript
+const anim = new Konva.Animation((frame) => {
+  star.rotation(frame.time * 0.05);
+}, animLayer);
 
-For continuous external state (e.g., audio reactive), it's fine to redraw every frame.
+anim.start();
+```
 
-## 13. Keep filters off the hot path
+Attach animations only to layers that actually change. Put static labels/backgrounds in another layer so they do not redraw each frame.
 
-Filters require `cache()`, which is O(w × h). Don't filter the whole stage live. Cache + filter once when params change.
+For complex animated nodes, cache the node before animating transforms:
 
-Use CSS filter strings (`'blur(8px)'`) when possible — GPU accelerated.
+```javascript
+star.cache();
+```
 
-## 14. Strokes — `strokeScaleEnabled: false` for editors
+Stop animations when hidden or unmounted:
 
-Independent of perf, but: when the user zooms or scales, you usually want stroke widths to stay constant in screen pixels. Setting this avoids the visual surprise (and avoids the buffer-canvas perf cost of perfect-draw when strokes get huge).
+```javascript
+return () => anim.stop();
+```
 
-## 15. Remove hidden shapes
+Avoid driving high-frequency animation through React state. Use refs and native Konva node mutation in the animation loop.
 
-`visible: false` still keeps the node in the tree. If you have thousands of toggle-able shapes, `node.remove()` (or `node.destroy()` if not reused) is leaner.
+## React-specific performance
 
-## 16. Pool / reuse nodes for very dynamic scenes
+Treat React work and Konva work separately.
 
-For a particle-style scene with creation churn, allocate a pool of `Konva.Circle` nodes once and reposition them rather than create/destroy.
+- Keep large shape arrays stable with `useMemo` or an external store.
+- Wrap heavy shape components in `React.memo`.
+- Use stable handlers from `useCallback`.
+- Avoid creating fresh object/array props in hot parents when memoization matters.
+- Commit drag/transform state on end events, not every move.
+- Put tooltip/hover state in a separate layer or mutate a Konva tooltip node imperatively for very large scenes.
+- For 10000+ mostly-static nodes, consider creating the Konva nodes imperatively in one `useEffect` and use React only for UI controls.
 
-## 17. Profile, don't guess
+React render order controls canvas order. For normal z-order changes, reorder arrays. For temporary overlays such as active drag, use a separate layer or `react-konva-utils` `Portal` rather than imperative `zIndex()` calls from React-managed components.
 
-- Chrome DevTools → Performance tab. Record while interacting. Look for long "Paint" / "Composite Layers" frames.
-- Konva ships a way to toggle a debug border (`tr.toggleHitCanvas()` on a Layer shows the hit canvas — useful for understanding why something does/doesn't get events).
+```jsx
+const Shape = React.memo(function Shape({ shape, onChange }) {
+  return (
+    <Rect
+      {...shape}
+      draggable
+      onDragEnd={(e) => onChange(shape.id, { x: e.target.x(), y: e.target.y() })}
+    />
+  );
+});
+```
 
-## React-specific perf
+In React Strict Mode, effects may run more than once in development. Make `cache()`, animation setup, and event binding idempotent, and always return cleanup.
 
-- **State updates re-render React tree, which re-renders the whole `<Stage>` subtree.** Memoize shapes (`React.memo`) keyed on stable shape objects. With 1000 shapes and one moving, naive code re-renders all 1000 components — each is cheap, but it adds up.
-- **Don't drive position from React state every `onDragMove`.** Read it back only on `onDragEnd`. Or use a ref to bypass React during drag.
-- **Split heavy state.** Use a separate store (Zustand/Jotai/Redux) and have each shape subscribe to its own slice. Then a position update for shape #42 only re-renders shape #42's component.
-- **Stage size changes are expensive.** Resize on a throttle.
-- **Avoid inline object literals as props** (`fill={{...}}`) — they break memoization.
+## Memory and cleanup
 
-## Quick checklist for an editor
+Use `destroy()` for deleted nodes, layers, and stages. Use `remove()` only when the node will be reused.
 
-- [ ] One main layer + one drag layer
-- [ ] Background grid in its own layer, `listening: false`, `transformsEnabled: 'position'`
-- [ ] `strokeScaleEnabled: false` on all editable shapes
-- [ ] `perfectDrawEnabled: false` where seams aren't visible
-- [ ] Move dragging node to drag layer
-- [ ] Memo'd shape components, state in a fine-grained store
-- [ ] `onDragEnd` writes to state; `onDragMove` does NOT
-- [ ] Transformer's `boundBoxFunc` enforces min sizes
-- [ ] Reset `scaleX`/`scaleY` on `transformend` and bake to `width`/`height`
+Destroy direct `Konva.Tween` instances after use. The `node.to(...)` shortcut handles tween lifecycle for the common case.
+
+```javascript
+const tween = new Konva.Tween({
+  node,
+  x: 200,
+  duration: 0.3,
+  onFinish() {
+    tween.destroy();
+  },
+});
+tween.play();
+```
+
+When manually binding events, namespace handlers so cleanup is easy:
+
+```javascript
+stage.on('mousemove.selection', handleMove);
+stage.off('.selection');
+```
+
+For vanilla Konva in a React/Vue/Svelte component, destroy the stage on unmount:
+
+```javascript
+return () => stage.destroy();
+```
+
+`Konva.releaseCanvasOnDestroy` defaults to `true` and helps avoid canvas memory leaks on Safari; do not disable it unless you know why.
+
+## Hit testing and collision checks
+
+Use `stage.getIntersection(pos)` or `layer.getIntersection(pos)` for point hit testing. It uses the hit graph and ignores nodes with `listening: false`.
+
+Avoid `getAllIntersections(pos)` in hot paths. It redraws shapes into a temporary canvas and is intentionally expensive.
+
+For broad collision or selection, maintain your own spatial index or bounding boxes in app data, then use Konva hit testing only for final confirmation.
+
+## Common recipes
+
+### 10000 shapes with tooltip
+
+- One layer for circles.
+- One layer for tooltip, with tooltip nodes `listening: false`.
+- Stable generated data.
+- Event delegation from the layer/stage.
+- Move only the tooltip node on hover; avoid rerendering every circle.
+
+### 10000 draggable shapes
+
+- One main layer for shapes.
+- One drag layer.
+- On pointer down or drag start, move the active node to the drag layer and call `startDrag()` if you are delegating from the stage.
+- Move the node back on mouseup/dragend.
+- Keep React state updates to drag end.
+
+### Infinite canvas / large map
+
+- Stage is viewport-sized.
+- Content group/layer is panned and zoomed.
+- Render only visible nodes plus margin.
+- Disable listening for background tiles and grid.
+- Cache complex static tiles or clusters.
+
+### Image editor
+
+- Load images once with CORS if export is required.
+- Cache before function filters.
+- Prefer CSS filter strings when they cover the effect.
+- Update filter parameters on input, but debounce expensive re-cache operations.
+- Export with `toBlob`/`toDataURL({ pixelRatio })` only on demand.
+
+### Free drawing
+
+- Keep the current stroke as one `Line`; append points imperatively during pointer move.
+- Batch draw rather than forcing immediate draws.
+- Commit final stroke data to state on pointer up.
+- For eraser, `globalCompositeOperation` affects scene rendering but not hit graph; account for that in selection/hit logic.
+
+## Performance checklist
+
+- [ ] Stage is viewport-sized, not world-sized.
+- [ ] Mobile viewport meta is present.
+- [ ] `Konva.pixelRatio = 1` tested on slow retina devices if needed.
+- [ ] Layer count is intentional, usually 1-4.
+- [ ] Non-interactive layers/groups/shapes use `listening: false`.
+- [ ] Hidden/offscreen/filtered-out nodes are removed, destroyed, or virtualized.
+- [ ] Dragging uses a dedicated drag layer in heavy scenes.
+- [ ] Complex stable nodes/groups are cached; simple dynamic nodes are not.
+- [ ] Function filters are cached; CSS filters are preferred where enough.
+- [ ] `perfectDrawEnabled(false)` and `shadowForStrokeEnabled(false)` are used where visual output allows.
+- [ ] `batchDraw()` is used for manual imperative loops; `draw()` is not called in pointermove loops.
+- [ ] Animations affect only needed layers and stop on cleanup.
+- [ ] React state updates do not happen every drag/animation frame unless throttled and measured.
+- [ ] Direct tweens, event handlers, caches, and stages are cleaned up.
+
+## Official docs checked
+
+Use these official Konva pages when validating or extending this reference:
+
+- https://konvajs.org/docs/performance/All_Performance_Tips.html
+- https://konvajs.org/docs/performance/Layer_Management.html
+- https://konvajs.org/docs/performance/Listening_False.html
+- https://konvajs.org/docs/performance/Shape_Caching.html
+- https://konvajs.org/docs/performance/Batch_Draw.html
+- https://konvajs.org/docs/performance/Disable_Perfect_Draw.html
+- https://konvajs.org/docs/performance/Optimize_Strokes.html
+- https://konvajs.org/docs/performance/Optimize_Animation.html
+- https://konvajs.org/docs/performance/Avoid_Memory_Leaks.html
+- https://konvajs.org/api/Konva.html
+- https://konvajs.org/api/Konva.Node.html
+- https://konvajs.org/api/Konva.Layer.html
+- https://konvajs.org/api/Konva.FastLayer.html
+- https://konvajs.org/docs/sandbox/Drag_and_Drop_Stress_Test.html
+- https://konvajs.org/docs/sandbox/10000_Shapes_with_Tooltip.html
+- https://konvajs.org/docs/sandbox/20000_Nodes.html

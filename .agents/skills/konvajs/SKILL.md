@@ -4,7 +4,7 @@ description: Comprehensive guide to building 2D canvas applications with Konva.j
 metadata:
   type: library-guide
   library: konva, react-konva
-  version: "9.x / 18.x"
+  version: "10.x / current react-konva"
 ---
 
 # Konva.js & React-Konva
@@ -142,6 +142,9 @@ These are the issues that trip people up most often. If the user's question or b
 10. **Layer count costs more than shape count.** A common mistake is making one Layer per object. Use Groups for organization; reserve Layers (typically 1–4 total) for genuine compositing or perf isolation (e.g., a "drag layer" for the currently-moving node).
 11. **`stage.getPointerPosition()` returns absolute screen-canvas coords.** If the stage is scaled/panned, convert with `stage.getRelativePointerPosition()` or apply the inverse transform.
 12. **Hit detection respects `listening`.** A shape with `listening: false` (or whose ancestor has it) won't receive pointer events and won't be returned by `getIntersection`.
+13. **For slow Konva apps, start with `references/performance.md`.** Prioritize stage pixel area, layer count, hit graph/listening work, offscreen nodes, drag layers, caching, and React re-render churn before micro-tuning.
+14. **`FastLayer` is deprecated.** Use `new Konva.Layer({ listening: false })` or `<Layer listening={false}>` for non-interactive rendering.
+15. **In React, z-order is render order.** Avoid imperative `zIndex()`/`moveToTop()` for regular React state. Reorder arrays, or use a canvas portal/drag layer for temporary overlays.
 
 ## Two-line decision guide
 
