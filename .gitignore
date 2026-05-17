@@ -41,3 +41,7 @@ pnpm-debug.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# upstream reference clone — copied into packages/timeline & packages/timeline-engine,
+# kept locally for diffing against new upstream changes
+/react-timeline-editor/
