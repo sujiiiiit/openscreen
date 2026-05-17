@@ -28,9 +28,26 @@
 - (void)setOutputURL:(NSURL *)url;
 
 // SCKit setup.
+//
+// `getShareableContent:` is the legacy single-arg variant: always fresh, used
+// where staleness would change semantics. The `wasFromCache:` variant lets
+// `startSync` know whether the result came from the process-wide cache below
+// so it can retry once on a "not found" lookup after invalidating.
 - (BOOL)getShareableContent:(SCShareableContent **)content error:(NSError **)error;
+- (BOOL)getShareableContent:(SCShareableContent **)content
+                wasFromCache:(BOOL *)wasFromCache
+                       error:(NSError **)error;
 - (SCContentFilter *)contentFilterFromContent:(SCShareableContent *)content
                                         error:(NSError **)error;
+
+// Process-wide cache for the recording-path query (onScreenWindowsOnly:NO,
+// excludingDesktopWindows:NO). `SCShareableContent` is slow (~500ms–1s on
+// each cold call); prewarming when the recorder bar / picker opens lets the
+// click-to-recording-live path skip that wait. The cache has a short TTL
+// (see implementation) and is invalidated on a not-found lookup so a stale
+// snapshot never silently misses a freshly-opened window.
++ (void)prewarmShareableContent;
++ (void)invalidateShareableContentCache;
 
 // Builds the SCStreamConfiguration with 10-bit packed RGB pixels in Display
 // P3, recording-tuned queue depth, and an SDR dynamic range cap.

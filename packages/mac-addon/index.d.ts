@@ -269,6 +269,11 @@ export declare function startCameraPreview(
 export declare function stopCameraPreview(): Promise<void>
 export declare function pinWindowAcrossSpaces(nativeHandle: Buffer): boolean
 export declare function onActiveSpaceChange(callback: () => void): void
+// Fire-and-forget. Kicks an async SCShareableContent fetch and caches the
+// result so the next startRecording can skip the 500ms–1s cold-call wait.
+// Idempotent; safe to call multiple times — already-in-flight or recent
+// caches are reused.
+export declare function prewarmShareableContent(): void
 
 declare const _default: {
   hello: typeof hello
@@ -292,6 +297,7 @@ declare const _default: {
   stopCameraPreview: typeof stopCameraPreview
   pinWindowAcrossSpaces: typeof pinWindowAcrossSpaces
   onActiveSpaceChange: typeof onActiveSpaceChange
+  prewarmShareableContent: typeof prewarmShareableContent
 }
 
 export default _default

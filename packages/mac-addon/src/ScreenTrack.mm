@@ -173,7 +173,62 @@ static NSInteger EvenDimensionFromDouble(double value) {
 
 #pragma mark - SCKit setup
 
-- (BOOL)getShareableContent:(SCShareableContent **)content error:(NSError **)error {
+// Process-wide cache for the recording-path SCShareableContent query.
+// `SCShareableContent` is a 500ms–1s+ call cold; prewarming it during
+// recorder bar / picker open lets `startSync` skip the wait. TTL is short
+// (3s) so freshly-opened windows aren't silently missed; `startSync` also
+// invalidates + retries once if a window/app lookup returns nil. Stored
+// only for the (onScreenWindowsOnly:NO, excludingDesktopWindows:NO) flag
+// combo used here — the list worker uses different flags and doesn't share
+// this slot.
+static const NSTimeInterval kShareableContentCacheTTL = 3.0;
+static NSLock *gShareableContentCacheLock = nil;
+static SCShareableContent *gShareableContentCacheValue = nil;
+static NSDate *gShareableContentCacheAt = nil;
+static BOOL gShareableContentPrewarmInFlight = NO;
+
+static void EnsureShareableContentCacheLock(void) {
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    gShareableContentCacheLock = [[NSLock alloc] init];
+  });
+}
+
+static SCShareableContent *ReadShareableContentCache(void) {
+  EnsureShareableContentCacheLock();
+  SCShareableContent *result = nil;
+  [gShareableContentCacheLock lock];
+  if (gShareableContentCacheValue && gShareableContentCacheAt) {
+    NSTimeInterval age = -[gShareableContentCacheAt timeIntervalSinceNow];
+    if (age >= 0 && age <= kShareableContentCacheTTL) {
+      result = gShareableContentCacheValue;
+    } else {
+      gShareableContentCacheValue = nil;
+      gShareableContentCacheAt = nil;
+    }
+  }
+  [gShareableContentCacheLock unlock];
+  return result;
+}
+
+static void StoreShareableContentCache(SCShareableContent *content) {
+  if (!content) return;
+  EnsureShareableContentCacheLock();
+  [gShareableContentCacheLock lock];
+  gShareableContentCacheValue = content;
+  gShareableContentCacheAt = [NSDate date];
+  [gShareableContentCacheLock unlock];
+}
+
+static void ClearShareableContentCache(void) {
+  EnsureShareableContentCacheLock();
+  [gShareableContentCacheLock lock];
+  gShareableContentCacheValue = nil;
+  gShareableContentCacheAt = nil;
+  [gShareableContentCacheLock unlock];
+}
+
+static BOOL FetchShareableContentSync(SCShareableContent **outContent, NSError **outError) {
   __block SCShareableContent *result = nil;
   __block NSError *resultError = nil;
   dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
@@ -189,14 +244,69 @@ static NSInteger EvenDimensionFromDouble(double value) {
 
   dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
   if (!result || resultError) {
-    if (error) {
-      *error = resultError ?: MakeError(2101, @"Could not list shareable screen content");
+    if (outError) {
+      *outError = resultError ?: MakeError(2101, @"Could not list shareable screen content");
     }
     return NO;
   }
-
-  *content = result;
+  if (outContent) *outContent = result;
+  StoreShareableContentCache(result);
   return YES;
+}
+
+- (BOOL)getShareableContent:(SCShareableContent **)content error:(NSError **)error {
+  return [self getShareableContent:content wasFromCache:NULL error:error];
+}
+
+- (BOOL)getShareableContent:(SCShareableContent **)content
+                wasFromCache:(BOOL *)wasFromCache
+                       error:(NSError **)error {
+  SCShareableContent *cached = ReadShareableContentCache();
+  if (cached) {
+    if (content) *content = cached;
+    if (wasFromCache) *wasFromCache = YES;
+    return YES;
+  }
+  if (wasFromCache) *wasFromCache = NO;
+  return FetchShareableContentSync(content, error);
+}
+
++ (void)prewarmShareableContent {
+  EnsureShareableContentCacheLock();
+  [gShareableContentCacheLock lock];
+  // Skip if we already have a fresh cache or an in-flight fetch will
+  // populate it. The in-flight guard avoids piling up redundant SCKit
+  // queries when the recorder bar + picker both call prewarm in quick
+  // succession.
+  BOOL fresh = NO;
+  if (gShareableContentCacheValue && gShareableContentCacheAt) {
+    NSTimeInterval age = -[gShareableContentCacheAt timeIntervalSinceNow];
+    fresh = age >= 0 && age <= kShareableContentCacheTTL;
+  }
+  if (fresh || gShareableContentPrewarmInFlight) {
+    [gShareableContentCacheLock unlock];
+    return;
+  }
+  gShareableContentPrewarmInFlight = YES;
+  [gShareableContentCacheLock unlock];
+
+  [SCShareableContent getShareableContentExcludingDesktopWindows:NO
+                                             onScreenWindowsOnly:NO
+                                               completionHandler:^(SCShareableContent *shareableContent,
+                                                                   NSError *shareableError) {
+    EnsureShareableContentCacheLock();
+    [gShareableContentCacheLock lock];
+    gShareableContentPrewarmInFlight = NO;
+    if (shareableContent && !shareableError) {
+      gShareableContentCacheValue = shareableContent;
+      gShareableContentCacheAt = [NSDate date];
+    }
+    [gShareableContentCacheLock unlock];
+  }];
+}
+
++ (void)invalidateShareableContentCache {
+  ClearShareableContentCache();
 }
 
 - (SCDisplay *)displayFromContent:(SCShareableContent *)content {

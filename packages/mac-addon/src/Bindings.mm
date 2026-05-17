@@ -18,6 +18,7 @@
 #include "Permissions.h"
 #include "RecorderSession.h"
 #include "RecordingWorkers.h"
+#include "ScreenTrack.h"
 
 static RecordingOptions ParseRecordingOptions(const Napi::CallbackInfo &info) {
   RecordingOptions options;
@@ -670,8 +671,18 @@ static Napi::Value OnActiveSpaceChange(const Napi::CallbackInfo &info) {
   return env.Undefined();
 }
 
+// Fire-and-forget background fetch of SCShareableContent so the next
+// startRecording can skip the 500ms–1s wait. Idempotent and cheap to call
+// from multiple places (recorder bar open, picker open).
+static Napi::Value PrewarmShareableContent(const Napi::CallbackInfo &info) {
+  [ScreenTrack prewarmShareableContent];
+  return info.Env().Undefined();
+}
+
 static Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("hello", Napi::Function::New(env, Hello));
+  exports.Set("prewarmShareableContent",
+              Napi::Function::New(env, PrewarmShareableContent));
   exports.Set("getCapabilities", Napi::Function::New(env, GetCapabilities));
   exports.Set("getPermissions", Napi::Function::New(env, GetPermissions));
   exports.Set("requestPermissions", Napi::Function::New(env, RequestPermissions));

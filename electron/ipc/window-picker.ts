@@ -862,6 +862,17 @@ export function startWindowPicker(mode: RecorderPickerMode): void {
     finishPicker({ restoreRecorder: false, notifyFinished: false })
   }
 
+  // Refresh the SCShareableContent prewarm cache now while the user is
+  // still picking. By the time they click Start, the result is sitting in
+  // the cache and the native start path skips the 500ms–1s cold call.
+  if (process.platform === 'darwin' && typeof addon.prewarmShareableContent === 'function') {
+    try {
+      addon.prewarmShareableContent()
+    } catch {
+      // Older addon build — non-fatal.
+    }
+  }
+
   pickerMode = mode
   confirming = false
   lastCursorKey = ''
@@ -897,6 +908,25 @@ export function cancelWindowPicker(): void {
   finishPicker({ restoreRecorder: true })
 }
 
+// Freeze the picker overlay so it stops following the cursor but stays
+// on-screen with the user's selection highlighted and the renderer's
+// "confirming" spinner visible. Used for display/window picker mode while
+// awaiting native start — without this hold, the overlay tears down the
+// instant the user clicks Start and they see nothing for the ~1s native
+// startup latency. The overlay is destroyed by the caller after start
+// resolves (success or failure).
+function freezePickerOverlayForStart(): void {
+  stopPolling()
+  unregisterEscape()
+  pickerMode = null
+  const overlay = overlayWin
+  if (!overlay || overlay.isDestroyed()) return
+  // forward:true keeps clicks reaching whatever's underneath (e.g. the
+  // recording controls window the moment it appears) so the brief overlap
+  // between native completing and our teardown isn't a dead zone.
+  setOverlayIgnoresMouse(overlay, true)
+}
+
 async function confirmWindowPicker(): Promise<void> {
   if (!pickerMode || !activeTarget || confirming) return
 
@@ -912,12 +942,17 @@ async function confirmWindowPicker(): Promise<void> {
     await options?.startRecordingForTarget(target)
     return
   }
-  finishPicker({ restoreRecorder: false })
-  // Don't unconditionally show the recorder bar here — main.ts subscribes to
-  // recorder status changes and decides which window to show: the recording
-  // controls window if startRecordingForTarget succeeded, the recorder bar
-  // again if it bounced back to idle on error.
-  await options?.startRecordingForTarget(target)
+  // Keep the picker overlay visible during the native start so the spinner
+  // the renderer is already showing stays on screen until the recording
+  // controls window appears. main.ts subscribes to recorder status changes
+  // and shows the controls window when status flips to 'recording'; on
+  // error it bounces back to 'idle' and shows the recorder bar again.
+  freezePickerOverlayForStart()
+  try {
+    await options?.startRecordingForTarget(target)
+  } finally {
+    finishPicker({ restoreRecorder: false })
+  }
 }
 
 function setInteractive(sender: WebContents, interactive: boolean): void {

@@ -111,13 +111,33 @@
     }
 
     SCShareableContent *content = nil;
-    if (![_screen getShareableContent:&content error:error]) {
+    BOOL contentFromCache = NO;
+    if (![_screen getShareableContent:&content wasFromCache:&contentFromCache error:error]) {
       [self teardownPartialStart];
       return NO;
     }
 
-    SCContentFilter *filter = [_screen contentFilterFromContent:content error:error];
+    NSError *filterError = nil;
+    SCContentFilter *filter = [_screen contentFilterFromContent:content error:&filterError];
+    // If the cached snapshot pre-dates a freshly-opened window or app, the
+    // lookup returns nil with code 2201 (window) / 2203 (application). Drop
+    // the cache and re-fetch fresh once before surfacing the failure, so a
+    // stale prewarm never silently rejects a valid target the user just picked.
+    if (!filter && contentFromCache &&
+        (filterError.code == 2201 || filterError.code == 2203)) {
+      [ScreenTrack invalidateShareableContentCache];
+      content = nil;
+      NSError *refetchError = nil;
+      if (![_screen getShareableContent:&content wasFromCache:NULL error:&refetchError]) {
+        if (error) *error = refetchError;
+        [self teardownPartialStart];
+        return NO;
+      }
+      filterError = nil;
+      filter = [_screen contentFilterFromContent:content error:&filterError];
+    }
     if (!filter) {
+      if (error) *error = filterError;
       [self teardownPartialStart];
       return NO;
     }

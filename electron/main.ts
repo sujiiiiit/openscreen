@@ -622,6 +622,18 @@ function createRecorderBarWindow(): void {
     return
   }
 
+  // Kick off an async SCShareableContent fetch now so the user's eventual
+  // click on "Start recording" doesn't pay the 500ms–1s cold-call wait. The
+  // native cache is short-TTL and gracefully re-fetches if a freshly-opened
+  // window misses, so prewarming is always safe.
+  if (process.platform === 'darwin') {
+    try {
+      addon.prewarmShareableContent()
+    } catch {
+      // Older addon builds won't have this export — non-fatal.
+    }
+  }
+
   const winW = windowConfigs.recorderBarWin.width ?? 660
   const winH = windowConfigs.recorderBarWin.height ?? 52
 
