@@ -16,8 +16,10 @@ packages/node_modules
 /.next/
 /out/
 
-# production
+# native-addon build output (node-gyp writes to <pkg>/build/ — and any
+# accidental repo-root build/ from running node-gyp at the top level)
 /build
+**/build
 
 # electron
 /dist-electron/

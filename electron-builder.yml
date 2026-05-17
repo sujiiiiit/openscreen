@@ -13,6 +13,17 @@ asarUnpack:
   - "**/node_modules/@openscreen/mac-addon/index.js"
   - "**/node_modules/@openscreen/mac-addon/index.d.ts"
   - "**/node_modules/@openscreen/mac-addon/package.json"
+  - "**/node_modules/node-mac-permissions/build/Release/*.node"
+  - "**/node_modules/node-mac-permissions/index.js"
+  - "**/node_modules/node-mac-permissions/index.d.ts"
+  - "**/node_modules/node-mac-permissions/package.json"
 mac:
   target: dmg
   category: public.app-category.video
+  hardenedRuntime: true
+  entitlements: build-resources/entitlements.mac.plist
+  entitlementsInherit: build-resources/entitlements.mac.inherit.plist
+  extendInfo:
+    NSCameraUsageDescription: OpenScreen records camera video when you include camera capture in a recording.
+    NSMicrophoneUsageDescription: OpenScreen records microphone audio when you include voice capture in a recording.
+    NSAudioCaptureUsageDescription: OpenScreen records system audio when you include system sound in a recording.

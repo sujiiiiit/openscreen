@@ -5,9 +5,8 @@
   "private": true,
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev:next": "next dev --turbopack -p 3000",
-    "dev:electron": "pnpm --filter @openscreen/mac-addon build && tsc -p electron && cp electron/dist-package.json dist-electron/package.json && concurrently -k -n NEXT,ELEC -c blue,green \"pnpm dev:next\" \"wait-on tcp:3000 && cross-env NODE_ENV=development electron . --trace-warnings\"",
-    "dev": "pnpm dev:electron",
+    "dev:prebuild": "pnpm --filter @openscreen/mac-addon build && tsc -p electron && cp electron/dist-package.json dist-electron/package.json",
+    "dev": "pnpm dev:prebuild && concurrently -k -n NEXT,TSC,ELEC -c blue,yellow,green \"next dev --turbopack -p 3535\" \"tsc -w -p electron --preserveWatchOutput\" \"wait-on tcp:3535 dist-electron/main.js && cross-env NODE_ENV=development electronmon . --trace-warnings\"",
     "build:next": "cross-env NEXT_EXPORT=1 next build",
     "build:electron": "tsc -p electron && cp electron/dist-package.json dist-electron/package.json",
     "build": "pnpm --filter @openscreen/mac-addon build && pnpm build:next && pnpm build:electron",
@@ -16,6 +15,12 @@
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit && tsc -p electron --noEmit"
   },
+  "electronmon": {
+    "patterns": [
+      "dist-electron/**/*"
+    ],
+    "logLevel": "quiet"
+  },
   "dependencies": {
     "@base-ui/react": "^1.4.1",
     "@hugeicons/core-free-icons": "^4.1.3",
@@ -23,10 +28,13 @@
     "@openscreen/mac-addon": "workspace:*",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "motion": "^12.38.0",
     "next": "16.1.7",
     "next-themes": "^0.4.6",
+    "node-mac-permissions": "^2.5.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
+    "react-resizable-panels": "^4.11.1",
     "shadcn": "^4.7.0",
     "tailwind-merge": "^3.6.0",
     "tw-animate-css": "^1.4.0"
@@ -41,6 +49,7 @@
     "cross-env": "^10.1.0",
     "electron": "^42.0.1",
     "electron-builder": "^26.8.1",
+    "electronmon": "^2.0.4",
     "eslint": "^9.39.4",
     "eslint-config-next": "16.1.7",
     "postcss": "^8.5.14",
@@ -54,7 +63,8 @@
     "onlyBuiltDependencies": [
       "@openscreen/mac-addon",
       "electron",
-      "esbuild"
+      "esbuild",
+      "node-mac-permissions"
     ]
   }
 }

@@ -45,6 +45,10 @@
     --radius-2xl: calc(var(--radius) * 1.8);
     --radius-3xl: calc(var(--radius) * 2.2);
     --radius-4xl: calc(var(--radius) * 2.6);
+    --color-primary-active: var(--primary-active);
+    --color-primary-active-bg: var(--primary-active-bg);
+    --color-tertiary: var(--tertiary);
+    --color-tertiary-foreground: var(--tertiary-foreground);
 }
 
 :root {
@@ -80,10 +84,14 @@
     --sidebar-accent-foreground: oklch(0.205 0 0);
     --sidebar-border: oklch(0.922 0 0);
     --sidebar-ring: oklch(0.708 0 0);
+    --primary-active: oklch(0.55 0.18 280);
+    --primary-active-bg: oklch(0.96 0.02 280);
+    --tertiary: oklch(0.55 0.18 280 / 0.12);
+    --tertiary-foreground: oklch(0.55 0.18 280);
 }
 
 .dark {
-    --background: oklch(0.145 0 0);
+    --background: oklch(16.842% 0.00002 271.152);
     --foreground: oklch(0.985 0 0);
     --card: oklch(0.205 0 0);
     --card-foreground: oklch(0.985 0 0);
@@ -114,6 +122,10 @@
     --sidebar-accent-foreground: oklch(0.985 0 0);
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.556 0 0);
+    --primary-active: oklch(0.7 0.18 280);
+    --primary-active-bg: oklch(0.25 0.04 280);
+    --tertiary: oklch(0.7 0.18 280 / 0.18);
+    --tertiary-foreground: oklch(0.85 0.12 280);
 }
 
 @layer base {
@@ -126,4 +138,36 @@
   html {
     @apply font-sans;
     }
+}
+
+/* Electron transparent windows: pages that mount [data-window] draw their own surface. */
+html:has([data-window="recorder"]),
+html:has([data-window="recorder"]) body,
+html:has([data-window="recording-controls"]),
+html:has([data-window="recording-controls"]) body,
+html:has([data-window="permission"]),
+html:has([data-window="permission"]) body,
+html:has([data-window="camera"]),
+html:has([data-window="camera"]) body,
+html:has([data-window="window-picker"]),
+html:has([data-window="window-picker"]) body {
+  background: transparent !important;
+}
+
+html:has([data-window="recorder"]),
+html:has([data-window="recorder"]) body,
+html:has([data-window="recording-controls"]),
+html:has([data-window="recording-controls"]) body,
+html:has([data-window="camera"]),
+html:has([data-window="camera"]) body,
+html:has([data-window="window-picker"]),
+html:has([data-window="window-picker"]) body {
+  height: 100%;
+  overflow: hidden;
+}
+
+[data-window="window-picker"],
+[data-window="window-picker"] * {
+  transition-delay: 0ms !important;
+  transition-duration: 0ms !important;
 }

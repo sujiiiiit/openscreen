@@ -3,7 +3,19 @@
     {
       "target_name": "mac_addon",
       "sources": [
-        "src/addon.mm"
+        "src/Common.mm",
+        "src/Events.mm",
+        "src/Permissions.mm",
+        "src/Devices.mm",
+        "src/MediaFileWriter.mm",
+        "src/ScreenTrack.mm",
+        "src/CameraTrack.mm",
+        "src/SystemAudioTrack.mm",
+        "src/MicrophoneTrack.mm",
+        "src/CameraPreview.mm",
+        "src/RecorderSession.mm",
+        "src/RecordingWorkers.mm",
+        "src/Bindings.mm"
       ],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")"
@@ -17,7 +29,7 @@
       "conditions": [
         ["OS==\"mac\"", {
           "xcode_settings": {
-            "MACOSX_DEPLOYMENT_TARGET": "13.0",
+            "MACOSX_DEPLOYMENT_TARGET": "15.0",
             "GCC_ENABLE_CPP_EXCEPTIONS": "NO",
             "CLANG_CXX_LIBRARY": "libc++",
             "OTHER_CPLUSPLUSFLAGS": [
@@ -26,7 +38,17 @@
               "-fobjc-arc"
             ],
             "OTHER_LDFLAGS": [
-              "-framework Foundation"
+              "-framework ScreenCaptureKit",
+              "-framework AVFoundation",
+              "-framework VideoToolbox",
+              "-framework CoreMedia",
+              "-framework CoreVideo",
+              "-framework CoreGraphics",
+              "-framework IOSurface",
+              "-framework AudioToolbox",
+              "-framework AppKit",
+              "-framework Foundation",
+              "-framework Accelerate"
             ]
           }
         }]
