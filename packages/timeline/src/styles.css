@@ -1,0 +1,65 @@
+@layer components {
+  /* react-virtualized scrollbar overrides — cannot reach via JSX className */
+  .timeline-editor-time-area .ReactVirtualized__Grid {
+    outline: none;
+  }
+  .timeline-editor-time-area .ReactVirtualized__Grid::-webkit-scrollbar {
+    display: none;
+  }
+  .timeline-editor-edit-area .ReactVirtualized__Grid {
+    outline: none !important;
+    overflow: overlay !important;
+  }
+  .timeline-editor-edit-area .ReactVirtualized__Grid::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+  .timeline-editor-edit-area .ReactVirtualized__Grid::-webkit-scrollbar-track {
+    background-color: transparent !important;
+  }
+  .timeline-editor-edit-area .ReactVirtualized__Grid::-webkit-scrollbar-thumb {
+    background: #313132;
+    border-radius: 16px;
+  }
+  .timeline-editor:hover .timeline-editor-edit-area .ReactVirtualized__Grid::-webkit-scrollbar {
+    height: 4px;
+  }
+
+  /* Cursor — chained transforms, easier as a marker class than arbitrary Tailwind */
+  .timeline-editor-cursor-body {
+    transform: translateX(-25%) scaleX(0.5);
+  }
+  .timeline-editor-cursor-top {
+    transform: translate(-50%, 0) scaleX(2);
+  }
+
+  /* Row tick-grid background — multi-layer gradient is verbose as a Tailwind arbitrary value */
+  .timeline-editor-edit-row-bg {
+    background-repeat: no-repeat, repeat;
+    background-image: linear-gradient(var(--timeline-bg), var(--timeline-bg)),
+      linear-gradient(90deg, var(--timeline-divider) 1px, transparent 0);
+  }
+
+  /* Resize-handle triangles (::after border trick — interactjs also targets these classes) */
+  .timeline-editor-action-left-stretch::after,
+  .timeline-editor-action-right-stretch::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    margin: auto;
+    border-radius: 4px;
+    border-top: 28px solid transparent;
+    border-bottom: 28px solid transparent;
+  }
+  .timeline-editor-action-left-stretch::after {
+    left: 0;
+    border-left: 7px solid rgba(255, 255, 255, 0.1);
+    border-right: 7px solid transparent;
+  }
+  .timeline-editor-action-right-stretch::after {
+    right: 0;
+    border-right: 7px solid rgba(255, 255, 255, 0.1);
+    border-left: 7px solid transparent;
+  }
+}

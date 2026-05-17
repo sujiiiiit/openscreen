@@ -50,6 +50,11 @@
   --color-tertiary: var(--tertiary);
   --color-tertiary-foreground: var(--tertiary-foreground);
   --color-editor-workspace: var(--editor-workspace);
+  --color-timeline-bg: var(--timeline-bg);
+  --color-timeline-row: var(--timeline-row);
+  --color-timeline-cursor: var(--timeline-cursor);
+  --color-timeline-guide: var(--timeline-guide);
+  --color-timeline-divider: var(--timeline-divider);
 }
 
 :root {
@@ -90,6 +95,11 @@
   --tertiary: oklch(0.55 0.18 280 / 0.12);
   --tertiary-foreground: oklch(0.55 0.18 280);
   --editor-workspace: #1e1e1e;
+  --timeline-bg: #191b1d;
+  --timeline-row: #2f3134;
+  --timeline-cursor: #5297ff;
+  --timeline-guide: #4a90e2;
+  --timeline-divider: rgba(255, 255, 255, 0.08);
 }
 
 .dark {
@@ -129,6 +139,11 @@
   --tertiary: oklch(0.7 0.18 280 / 0.18);
   --tertiary-foreground: oklch(0.85 0.12 280);
   --editor-workspace: #1e1e1e;
+  --timeline-bg: #191b1d;
+  --timeline-row: #2f3134;
+  --timeline-cursor: #5297ff;
+  --timeline-guide: #4a90e2;
+  --timeline-divider: rgba(255, 255, 255, 0.08);
 }
 
 @layer base {
