@@ -13,18 +13,24 @@ import {
 
 import {
   type ArtboardPresetId,
+  AUTO_ARTBOARD_PRESET_ID,
   clampWorkspaceView,
   DEFAULT_ARTBOARD_PRESET_ID,
   getArtboardPreset,
   getFitViewTransform,
+  resolveAutoArtboard,
 } from "@/lib/editor-canvas"
+import { useProject } from "@/components/editor/project/provider"
 import type {
   CanvasSize,
+  CanvasVideoCropShape,
   CanvasVideoItem,
+  CanvasVideoRole,
   CanvasVideoTransformPatch,
   EditorArtboard,
   ViewTransform,
 } from "@/types/editor-canvas"
+import type { ProjectAsset } from "@/types/api"
 
 const DEFAULT_VIEWPORT_SIZE: CanvasSize = { width: 0, height: 0 }
 const DEFAULT_ARTBOARD_PRESET = getArtboardPreset(DEFAULT_ARTBOARD_PRESET_ID)
@@ -38,6 +44,19 @@ const DEFAULT_VIEW_TRANSFORM = getFitViewTransform(
   DEFAULT_ARTBOARD
 )
 const DUPLICATED_VIDEO_OFFSET = 48
+const CAMERA_DEFAULT_DIAMETER = 240
+const CAMERA_DEFAULT_MARGIN = 32
+
+type AddRemoteVideoInput = {
+  id?: string
+  url: string
+  fileName: string
+  intrinsicWidth: number
+  intrinsicHeight: number
+  role: "screen" | "camera"
+  cropShape?: CanvasVideoCropShape
+  placement?: Partial<Pick<CanvasVideoItem, "x" | "y" | "width" | "height">>
+}
 
 type VideoMetadata = {
   width: number
@@ -53,6 +72,7 @@ type EditorCanvasContextValue = {
   viewTransform: ViewTransform
   importError: string | null
   addVideoFile: (file: File) => Promise<void>
+  addRemoteVideo: (input: AddRemoteVideoInput) => string | null
   selectItem: (id: string | null) => void
   updateVideoTransform: (id: string, patch: CanvasVideoTransformPatch) => void
   setVideoLocked: (id: string, locked: boolean) => void
@@ -82,6 +102,7 @@ type EditorCanvasViewContextValue = Pick<
 type EditorCanvasActionsContextValue = Pick<
   EditorCanvasContextValue,
   | "addVideoFile"
+  | "addRemoteVideo"
   | "selectItem"
   | "updateVideoTransform"
   | "setVideoLocked"
@@ -160,6 +181,56 @@ function getCoverVideoPlacement(
   }
 }
 
+function relayoutVideoForArtboard(
+  video: CanvasVideoItem,
+  prev: CanvasSize,
+  next: CanvasSize
+): CanvasVideoItem {
+  if (prev.width <= 0 || prev.height <= 0) return video
+
+  if (video.role === "screen") {
+    const cover = getCoverVideoPlacement(
+      { width: video.intrinsicWidth, height: video.intrinsicHeight },
+      next
+    )
+    return { ...video, ...cover }
+  }
+
+  const scaleX = next.width / prev.width
+  const scaleY = next.height / prev.height
+  const uniformScale = Math.min(scaleX, scaleY)
+
+  if (video.role === "camera") {
+    const nextWidth = video.width
+    const nextHeight = video.height
+    const targetX = video.x * scaleX
+    const targetY = video.y * scaleY
+    const clampedX = Math.max(0, Math.min(next.width - nextWidth, targetX))
+    const clampedY = Math.max(0, Math.min(next.height - nextHeight, targetY))
+    return {
+      ...video,
+      x: clampedX,
+      y: clampedY,
+      width: nextWidth,
+      height: nextHeight,
+    }
+  }
+
+  const nextWidth = video.width * uniformScale
+  const nextHeight = video.height * uniformScale
+  const targetX = video.x * uniformScale
+  const targetY = video.y * uniformScale
+  const clampedX = Math.max(0, Math.min(next.width - nextWidth, targetX))
+  const clampedY = Math.max(0, Math.min(next.height - nextHeight, targetY))
+  return {
+    ...video,
+    x: clampedX,
+    y: clampedY,
+    width: nextWidth,
+    height: nextHeight,
+  }
+}
+
 function createCanvasId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID()
@@ -187,6 +258,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const artboardRef = useRef(artboard)
   const viewTransformRef = useRef(viewTransform)
   const hasCustomViewRef = useRef(false)
+  const sourceVideoDimsRef = useRef<{ width: number; height: number } | null>(
+    null
+  )
+  const hydratedProjectIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     videosRef.current = videos
@@ -283,13 +358,24 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const setArtboardPreset = useCallback((id: ArtboardPresetId) => {
-    const preset = getArtboardPreset(id)
-    const nextArtboard: EditorArtboard = {
-      presetId: preset.id,
-      width: preset.width,
-      height: preset.height,
+    let nextArtboard: EditorArtboard
+    if (id === AUTO_ARTBOARD_PRESET_ID) {
+      const auto = resolveAutoArtboard(sourceVideoDimsRef.current)
+      nextArtboard = {
+        presetId: AUTO_ARTBOARD_PRESET_ID,
+        width: auto.width,
+        height: auto.height,
+      }
+    } else {
+      const preset = getArtboardPreset(id)
+      nextArtboard = {
+        presetId: preset.id,
+        width: preset.width,
+        height: preset.height,
+      }
     }
 
+    const prevArtboard = artboardRef.current
     artboardRef.current = nextArtboard
     hasCustomViewRef.current = false
     setArtboard(nextArtboard)
@@ -299,6 +385,29 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     )
     viewTransformRef.current = fitTransform
     setViewTransformState(fitTransform)
+
+    if (
+      prevArtboard.width === nextArtboard.width &&
+      prevArtboard.height === nextArtboard.height
+    ) {
+      return
+    }
+
+    setVideos((current) => {
+      let didChange = false
+      const nextVideos = current.map((video) => {
+        const adjusted = relayoutVideoForArtboard(
+          video,
+          prevArtboard,
+          nextArtboard
+        )
+        if (adjusted !== video) didChange = true
+        return adjusted
+      })
+      if (!didChange) return current
+      videosRef.current = nextVideos
+      return nextVideos
+    })
   }, [])
 
   const addVideoFile = useCallback(async (file: File) => {
@@ -322,6 +431,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         intrinsicHeight: metadata.height,
         rotation: 0,
         locked: false,
+        cropShape: "rect",
+        role: "media",
         ...placement,
       }
 
@@ -343,6 +454,80 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       )
     }
   }, [])
+
+  const addRemoteVideo = useCallback(
+    (input: AddRemoteVideoInput): string | null => {
+      if (
+        !input.url ||
+        !Number.isFinite(input.intrinsicWidth) ||
+        !Number.isFinite(input.intrinsicHeight) ||
+        input.intrinsicWidth <= 0 ||
+        input.intrinsicHeight <= 0
+      ) {
+        return null
+      }
+
+      const desiredId = input.id ?? createCanvasId()
+      if (videosRef.current.some((video) => video.id === desiredId)) {
+        return desiredId
+      }
+
+      const artboardSize = artboardRef.current
+      const cropShape: CanvasVideoCropShape =
+        input.cropShape ?? (input.role === "camera" ? "circle" : "rect")
+
+      let placement: { x: number; y: number; width: number; height: number }
+      if (input.role === "camera") {
+        const width = input.placement?.width ?? CAMERA_DEFAULT_DIAMETER
+        const height = input.placement?.height ?? CAMERA_DEFAULT_DIAMETER
+        const x =
+          input.placement?.x ??
+          artboardSize.width - width - CAMERA_DEFAULT_MARGIN
+        const y =
+          input.placement?.y ??
+          artboardSize.height - height - CAMERA_DEFAULT_MARGIN
+        placement = { x, y, width, height }
+      } else {
+        const cover = getCoverVideoPlacement(
+          { width: input.intrinsicWidth, height: input.intrinsicHeight },
+          artboardSize
+        )
+        placement = {
+          x: input.placement?.x ?? cover.x,
+          y: input.placement?.y ?? cover.y,
+          width: input.placement?.width ?? cover.width,
+          height: input.placement?.height ?? cover.height,
+        }
+      }
+
+      const role: CanvasVideoRole =
+        input.role === "screen" || input.role === "camera"
+          ? input.role
+          : "media"
+
+      const item: CanvasVideoItem = {
+        id: desiredId,
+        fileName: input.fileName,
+        objectUrl: input.url,
+        intrinsicWidth: input.intrinsicWidth,
+        intrinsicHeight: input.intrinsicHeight,
+        rotation: 0,
+        locked: false,
+        cropShape,
+        role,
+        ...placement,
+      }
+
+      setVideos((current) => {
+        if (current.some((video) => video.id === desiredId)) return current
+        const nextVideos = [...current, item]
+        videosRef.current = nextVideos
+        return nextVideos
+      })
+      return desiredId
+    },
+    []
+  )
 
   const selectItem = useCallback((id: string | null) => {
     selectedItemIdRef.current = id
@@ -478,6 +663,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const actionsValue = useMemo<EditorCanvasActionsContextValue>(
     () => ({
       addVideoFile,
+      addRemoteVideo,
       selectItem,
       updateVideoTransform,
       setVideoLocked,
@@ -490,6 +676,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     }),
     [
       addVideoFile,
+      addRemoteVideo,
       selectItem,
       updateVideoTransform,
       setVideoLocked,
@@ -501,6 +688,113 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       fitArtboardToViewport,
     ]
   )
+
+  const { project } = useProject()
+
+  useEffect(() => {
+    if (!project) return
+    if (hydratedProjectIdRef.current === project.id) return
+
+    const findAsset = (role: ProjectAsset["role"]) =>
+      project.assets.find((asset) => asset.role === role) ?? null
+
+    const screenAsset = findAsset("screen")
+    const cameraAsset = findAsset("camera")
+
+    if (!screenAsset && !cameraAsset) return
+
+    if (
+      hydratedProjectIdRef.current !== null &&
+      hydratedProjectIdRef.current !== project.id
+    ) {
+      const previousBlobs = Array.from(objectUrlsRef.current)
+      objectUrlsRef.current.clear()
+      for (const url of previousBlobs) URL.revokeObjectURL(url)
+      videosRef.current = []
+      selectedItemIdRef.current = null
+      setVideos([])
+      setSelectedItemId(null)
+    }
+
+    if (
+      screenAsset &&
+      typeof screenAsset.width === "number" &&
+      typeof screenAsset.height === "number" &&
+      screenAsset.width > 0 &&
+      screenAsset.height > 0
+    ) {
+      sourceVideoDimsRef.current = {
+        width: screenAsset.width,
+        height: screenAsset.height,
+      }
+
+      // Display captures inherit the source's aspect via the Auto preset so
+      // the recording fills the artboard with no letterboxing. Window /
+      // region / application captures fall back to the Wide 16:9 preset —
+      // those source shapes are arbitrary and would otherwise produce an
+      // odd-shaped artboard.
+      const useAuto = project.recordingType === "display"
+      const nextArtboard: EditorArtboard = useAuto
+        ? (() => {
+            const auto = resolveAutoArtboard(sourceVideoDimsRef.current)
+            return {
+              presetId: AUTO_ARTBOARD_PRESET_ID,
+              width: auto.width,
+              height: auto.height,
+            }
+          })()
+        : (() => {
+            const preset = getArtboardPreset(DEFAULT_ARTBOARD_PRESET_ID)
+            return {
+              presetId: preset.id,
+              width: preset.width,
+              height: preset.height,
+            }
+          })()
+      artboardRef.current = nextArtboard
+      hasCustomViewRef.current = false
+      setArtboard(nextArtboard)
+      const fit = getFitViewTransform(viewportSizeRef.current, nextArtboard)
+      viewTransformRef.current = fit
+      setViewTransformState(fit)
+    }
+
+    if (
+      screenAsset &&
+      typeof screenAsset.width === "number" &&
+      typeof screenAsset.height === "number" &&
+      screenAsset.width > 0 &&
+      screenAsset.height > 0
+    ) {
+      addRemoteVideo({
+        id: `${project.id}:screen`,
+        url: screenAsset.fileUrl,
+        fileName: screenAsset.fileName,
+        intrinsicWidth: screenAsset.width,
+        intrinsicHeight: screenAsset.height,
+        role: "screen",
+      })
+    }
+
+    if (
+      cameraAsset &&
+      typeof cameraAsset.width === "number" &&
+      typeof cameraAsset.height === "number" &&
+      cameraAsset.width > 0 &&
+      cameraAsset.height > 0
+    ) {
+      addRemoteVideo({
+        id: `${project.id}:camera`,
+        url: cameraAsset.fileUrl,
+        fileName: cameraAsset.fileName,
+        intrinsicWidth: cameraAsset.width,
+        intrinsicHeight: cameraAsset.height,
+        role: "camera",
+      })
+    }
+
+    hydratedProjectIdRef.current = project.id
+  }, [addRemoteVideo, project])
 
   return (
     <EditorCanvasActionsContext.Provider value={actionsValue}>

@@ -62,14 +62,37 @@ export const ARTBOARD_PRESETS = [
   },
 ] as const
 
-export type ArtboardPresetId = (typeof ARTBOARD_PRESETS)[number]["id"]
+export const AUTO_ARTBOARD_PRESET_ID = "auto" as const
+
+export type FixedArtboardPresetId = (typeof ARTBOARD_PRESETS)[number]["id"]
+export type ArtboardPresetId =
+  | FixedArtboardPresetId
+  | typeof AUTO_ARTBOARD_PRESET_ID
 
 export const DEFAULT_ARTBOARD_PRESET_ID: ArtboardPresetId = "wide"
 
 export function getArtboardPreset(id: ArtboardPresetId) {
+  if (id === AUTO_ARTBOARD_PRESET_ID) return ARTBOARD_PRESETS[0]
   return (
     ARTBOARD_PRESETS.find((preset) => preset.id === id) ?? ARTBOARD_PRESETS[0]
   )
+}
+
+export function resolveAutoArtboard(source: {
+  width?: number
+  height?: number
+} | null): { width: number; height: number } {
+  const sourceWidth = source?.width
+  const sourceHeight = source?.height
+  if (
+    typeof sourceWidth === "number" &&
+    sourceWidth > 0 &&
+    typeof sourceHeight === "number" &&
+    sourceHeight > 0
+  ) {
+    return { width: sourceWidth, height: sourceHeight }
+  }
+  return { width: ARTBOARD_PRESETS[0].width, height: ARTBOARD_PRESETS[0].height }
 }
 
 export function clampWorkspaceZoom(scale: number) {

@@ -69,7 +69,8 @@ const CSP = [
   "default-src 'self' app:",
   "script-src 'self' app:",
   "style-src 'self' app: 'unsafe-inline'",
-  "img-src 'self' app: data:",
+  "img-src 'self' app: file: data: blob:",
+  "media-src 'self' app: file: blob:",
   "font-src 'self' app: data:",
   "connect-src 'self' app:",
   "object-src 'none'",
@@ -156,7 +157,13 @@ function createMainWindow(): void {
     height: 800,
     show: false,
     backgroundColor: '#000000',
-    webPreferences: SHARED_WEB_PREFERENCES,
+    // webSecurity is relaxed on the editor window only so <video> tags can
+    // play local recording assets via file:// URLs. The renderer keeps
+    // sandbox/contextIsolation/nodeIntegration locked down, so even with
+    // same-origin relaxed it cannot reach Node APIs. Other windows (recorder
+    // bar, controls, camera preview, permission gate) keep the default
+    // hardened SHARED_WEB_PREFERENCES.
+    webPreferences: { ...SHARED_WEB_PREFERENCES, webSecurity: false },
     // Custom titlebar: macOS keeps native traffic lights (hidden chrome,
     // repositioned to align with the 40px React header), Windows/Linux drop
     // the frame entirely and render min/maximize/close buttons in React.

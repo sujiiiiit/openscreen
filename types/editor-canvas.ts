@@ -27,6 +27,10 @@ export type ViewTransform = {
   y: number
 }
 
+export type CanvasVideoCropShape = "rect" | "circle"
+
+export type CanvasVideoRole = "screen" | "camera" | "media"
+
 export type CanvasVideoItem = {
   id: string
   fileName: string
@@ -39,6 +43,8 @@ export type CanvasVideoItem = {
   height: number
   rotation: number
   locked: boolean
+  cropShape: CanvasVideoCropShape
+  role: CanvasVideoRole
 }
 
 export type CanvasVideoTransformPatch = Partial<

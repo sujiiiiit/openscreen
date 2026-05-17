@@ -12,6 +12,12 @@ import type {
 // here MUST be reflected there.
 export type ProjectAssetRole = 'screen' | 'camera'
 
+export type ProjectRecordingType =
+  | 'display'
+  | 'window'
+  | 'region'
+  | 'application'
+
 export interface ProjectAssetAudioTrack {
   source: 'systemAudio' | 'microphone'
   sampleRate?: number
@@ -36,6 +42,7 @@ export interface ProjectSummary {
   name: string
   path: string
   createdAtUnixMs: number
+  recordingType: ProjectRecordingType | null
   assets: ProjectAsset[]
 }
 
@@ -143,11 +150,25 @@ async function loadProjectFromFolder(folder: string): Promise<ProjectSummary | n
     assets.push(await buildAsset('camera', cameraPath, pickOutput(outputs, 'camera'), []))
   }
 
+  const recordingType: ProjectRecordingType | null = (() => {
+    const raw = manifest.target?.type
+    if (
+      raw === 'display' ||
+      raw === 'window' ||
+      raw === 'region' ||
+      raw === 'application'
+    ) {
+      return raw
+    }
+    return null
+  })()
+
   return {
     id: path.basename(folder),
     name: path.basename(folder),
     path: folder,
     createdAtUnixMs: manifest.startedAtUnixMs ?? Date.now(),
+    recordingType,
     assets,
   }
 }

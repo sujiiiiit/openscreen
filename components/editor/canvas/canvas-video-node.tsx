@@ -18,6 +18,87 @@ import {
 import { getVideoCoverCrop } from "@/components/editor/canvas/video-cover-crop"
 import type { CanvasVideoItem } from "@/types/editor-canvas"
 
+// Konva.Image does not natively support non-rectangular masking, but Shape's
+// sceneFunc/hitFunc props accept overrides. Replicating Konva.Image's draw
+// inside an elliptical clip lets the camera render and hit-test as a circle
+// while remaining a Konva.Image instance — the transformer and event code
+// still recognize it.
+function drawEllipticalVideo(
+  context: Konva.Context,
+  shape: Konva.Shape
+): void {
+  const image = (shape as Konva.Image).image()
+  const width = shape.width()
+  const height = shape.height()
+  if (!image || width <= 0 || height <= 0) return
+
+  context.beginPath()
+  context.ellipse(
+    width / 2,
+    height / 2,
+    width / 2,
+    height / 2,
+    0,
+    0,
+    Math.PI * 2
+  )
+  context.closePath()
+  context.fillStrokeShape(shape)
+  context.save()
+  context.beginPath()
+  context.ellipse(
+    width / 2,
+    height / 2,
+    width / 2,
+    height / 2,
+    0,
+    0,
+    Math.PI * 2
+  )
+  context.closePath()
+  context.clip()
+
+  const cropWidth = (shape as Konva.Image).cropWidth()
+  const cropHeight = (shape as Konva.Image).cropHeight()
+  if (cropWidth && cropHeight) {
+    context.drawImage(
+      image as CanvasImageSource,
+      (shape as Konva.Image).cropX(),
+      (shape as Konva.Image).cropY(),
+      cropWidth,
+      cropHeight,
+      0,
+      0,
+      width,
+      height
+    )
+  } else {
+    context.drawImage(image as CanvasImageSource, 0, 0, width, height)
+  }
+  context.restore()
+}
+
+function drawEllipticalHit(
+  context: Konva.Context,
+  shape: Konva.Shape
+): void {
+  const width = shape.width()
+  const height = shape.height()
+  if (width <= 0 || height <= 0) return
+  context.beginPath()
+  context.ellipse(
+    width / 2,
+    height / 2,
+    width / 2,
+    height / 2,
+    0,
+    0,
+    Math.PI * 2
+  )
+  context.closePath()
+  context.fillStrokeShape(shape)
+}
+
 // Videos stay as live HTMLVideoElement sources: no canvas cache, no transcoding,
 // and no intermediate bitmap resize. Zoom preserves available source detail, but
 // it cannot invent pixels beyond the file's intrinsic resolution.
@@ -193,6 +274,8 @@ function CanvasVideoNodeComponent({
     }
   )
 
+  const isCircle = video.cropShape === "circle"
+
   return (
     <KonvaImage
       ref={setImageNode}
@@ -210,6 +293,8 @@ function CanvasVideoNodeComponent({
       rotation={video.rotation}
       draggable={!isPanMode && !video.locked}
       perfectDrawEnabled={false}
+      sceneFunc={isCircle ? drawEllipticalVideo : undefined}
+      hitFunc={isCircle ? drawEllipticalHit : undefined}
     />
   )
 }

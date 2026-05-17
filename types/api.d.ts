@@ -135,6 +135,12 @@ export interface WindowStateChange {
 
 export type ProjectAssetRole = 'screen' | 'camera'
 
+export type ProjectRecordingType =
+  | 'display'
+  | 'window'
+  | 'region'
+  | 'application'
+
 export interface ProjectAssetAudioTrack {
   source: 'systemAudio' | 'microphone'
   sampleRate?: number
@@ -159,6 +165,7 @@ export interface ProjectSummary {
   name: string
   path: string
   createdAtUnixMs: number
+  recordingType: ProjectRecordingType | null
   assets: ProjectAsset[]
 }
 
