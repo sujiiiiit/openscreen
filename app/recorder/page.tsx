@@ -119,7 +119,7 @@ export default function RecorderPage() {
   return (
     <div
       data-window="recorder"
-      className="flex w-full h-13 items-center justify-center overflow-hidden"
+      className="flex w-full h-13 items-center justify-center overflow-hidden bg-transparent"
       style={DRAG}
     >
       <div className="flex h-full w-full items-center overflow-hidden px-1 select-none">

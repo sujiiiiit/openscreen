@@ -87,7 +87,7 @@ export default function CameraPage() {
   return (
     <div
       data-window="camera"
-      className="relative h-full w-full overflow-hidden rounded-2xl select-none"
+      className="relative h-full w-full overflow-hidden rounded-2xl select-none bg-transparent"
       style={DRAG}
     >
       <canvas

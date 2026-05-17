@@ -109,7 +109,7 @@ export default function RecordingControlsPage() {
   return (
     <div
       data-window="recording-controls"
-      className="flex h-13 w-full items-center justify-center overflow-hidden"
+      className="flex h-13 w-full items-center justify-center overflow-hidden bg-transparent"
       style={DRAG}
     >
       <div className="flex h-full w-full items-center px-2 select-none">
