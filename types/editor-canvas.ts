@@ -38,6 +38,7 @@ export type CanvasVideoItem = {
   width: number
   height: number
   rotation: number
+  locked: boolean
 }
 
 export type CanvasVideoTransformPatch = Partial<

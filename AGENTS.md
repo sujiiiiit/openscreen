@@ -14,4 +14,6 @@ Use industry terms consistently in implementation and documentation. If the user
 
 When working on Konva or react-konva code, use the Konva skill and keep the implementation focused on quality, performance, and editor-grade interaction behavior.
 
+For every editor canvas change, reason about large-scene performance before finalizing. Treat `5000+` canvas nodes as the stress case even when the current feature only uses one selected video. Prefer patterns that scale: constant layer counts, no DOM overlay per canvas node, no per-frame React state updates, no hot-path layout reads, no per-node expensive listeners when delegation or hit testing is enough, no `getClientRect()` loops across many nodes, and redraw only the layers that actually changed. If a feature would not scale to thousands of nodes, document the limitation and keep the implementation isolated so it can be replaced with culling, indexing, batching, or virtualization later.
+
 After code changes, run targeted checks for touched files and `pnpm typecheck` when practical. Note any checks that cannot be run.

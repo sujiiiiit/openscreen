@@ -25,11 +25,21 @@ import {
 
 import { type TabItem, type TabId } from "@/types/editor-tabs"
 
-function TabContentPlaceholder({ label }: { label: string }) {
+function TabSection({
+  title,
+  description,
+  children,
+}: {
+  title: string
+  description: string
+  children?: React.ReactNode
+}) {
   return (
-    <div className="text-xs text-muted-foreground">
-      {label} content placeholder
-    </div>
+    <section className="w-full space-y-2">
+      <h3 className="text-sm font-semibold select-none">{title}</h3>
+      <p className="text-xs text-muted-foreground select-none">{description}</p>
+      {children ? <div className="pt-2">{children}</div> : null}
+    </section>
   )
 }
 
@@ -44,31 +54,56 @@ const TAB_ITEMS: TabItem[] = [
     id: "cursor",
     label: "Cursor",
     icon: <CursorIcon className="size-4" />,
-    content: <TabContentPlaceholder label="Cursor" />,
+    content: (
+      <TabSection
+        title="Cursor Effects"
+        description="Highlight clicks, add ripples, or magnify your pointer for emphasis."
+      />
+    ),
   },
   {
     id: "video",
     label: "Video",
     icon: <HugeiconsIcon icon={Video01Icon} className="size-4" />,
-    content: <TabContentPlaceholder label="Video" />,
+    content: (
+      <TabSection
+        title="Video Settings"
+        description="Configure video appearance including border radius, shadow, and other visual properties."
+      />
+    ),
   },
   {
     id: "subtitle",
     label: "Subtitle",
     icon: <SubtitleIcon className="size-4" />,
-    content: <TabContentPlaceholder label="Subtitle" />,
+    content: (
+      <TabSection
+        title="Transcription"
+        description="Style captions, adjust timings, and manage language tracks."
+      />
+    ),
   },
   {
     id: "audio",
     label: "Audio",
     icon: <HugeiconsIcon icon={VolumeHighIcon} className="size-4" />,
-    content: <TabContentPlaceholder label="Audio" />,
+    content: (
+      <TabSection
+        title="Audio Mix"
+        description="Balance input devices, noise suppression, and music beds."
+      />
+    ),
   },
   {
     id: "transition",
     label: "Transition",
     icon: <HugeiconsIcon icon={EaseInOutIcon} className="size-4" />,
-    content: <TabContentPlaceholder label="Transition" />,
+    content: (
+      <TabSection
+        title="Transitions"
+        description="Control timing, easing, and presets across scenes."
+      />
+    ),
   },
 ]
 

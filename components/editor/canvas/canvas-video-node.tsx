@@ -10,13 +10,13 @@ import {
 } from "react"
 import Konva from "konva"
 import { Image as KonvaImage } from "react-konva"
-import type { KonvaEventObject } from "konva/lib/Node"
 
-import { MIN_VIDEO_NODE_SIZE } from "@/components/editor/canvas/canvas-node-constants"
-import type {
-  CanvasVideoItem,
-  CanvasVideoTransformPatch,
-} from "@/types/editor-canvas"
+import {
+  CANVAS_NODE_NAME,
+  VIDEO_NODE_NAME,
+} from "@/components/editor/canvas/canvas-node-constants"
+import { getVideoCoverCrop } from "@/components/editor/canvas/video-cover-crop"
+import type { CanvasVideoItem } from "@/types/editor-canvas"
 
 // Videos stay as live HTMLVideoElement sources: no canvas cache, no transcoding,
 // and no intermediate bitmap resize. Zoom preserves available source detail, but
@@ -33,8 +33,6 @@ type CanvasVideoNodeProps = {
   isPanMode: boolean
   contentLayerRef: RefObject<Konva.Layer | null>
   onNodeChange: (id: string, node: Konva.Image | null) => void
-  onSelect: (id: string) => void
-  onChange: (id: string, patch: CanvasVideoTransformPatch) => void
 }
 
 function CanvasVideoNodeComponent({
@@ -42,8 +40,6 @@ function CanvasVideoNodeComponent({
   isPanMode,
   contentLayerRef,
   onNodeChange,
-  onSelect,
-  onChange,
 }: CanvasVideoNodeProps) {
   const imageRef = useRef<Konva.Image | null>(null)
   const videoElementRef = useRef<VideoWithFrameCallback | null>(null)
@@ -176,37 +172,6 @@ function CanvasVideoNodeComponent({
     }
   }, [contentLayerRef, isVideoReady])
 
-  const handleTransformEnd = () => {
-    const node = imageRef.current
-    if (!node) return
-
-    const nextWidth = Math.max(
-      MIN_VIDEO_NODE_SIZE,
-      Math.abs(node.width() * node.scaleX())
-    )
-    const nextHeight = Math.max(
-      MIN_VIDEO_NODE_SIZE,
-      Math.abs(node.height() * node.scaleY())
-    )
-
-    node.scaleX(1)
-    node.scaleY(1)
-    onChange(video.id, {
-      x: node.x(),
-      y: node.y(),
-      width: nextWidth,
-      height: nextHeight,
-      rotation: node.rotation(),
-    })
-  }
-
-  const handlePointerDown = (event: KonvaEventObject<MouseEvent>) => {
-    if (isPanMode || event.evt.button === 1) return
-
-    event.cancelBubble = true
-    onSelect(video.id)
-  }
-
   const setImageNode = useCallback(
     (node: Konva.Image | null) => {
       imageRef.current = node
@@ -217,27 +182,34 @@ function CanvasVideoNodeComponent({
 
   if (!isVideoReady) return null
 
+  const coverCrop = getVideoCoverCrop(
+    {
+      width: video.intrinsicWidth,
+      height: video.intrinsicHeight,
+    },
+    {
+      width: video.width,
+      height: video.height,
+    }
+  )
+
   return (
     <KonvaImage
       ref={setImageNode}
+      id={video.id}
+      name={`${CANVAS_NODE_NAME} ${VIDEO_NODE_NAME}`}
       image={renderableVideo}
       x={video.x}
       y={video.y}
       width={video.width}
       height={video.height}
+      cropX={coverCrop.cropX}
+      cropY={coverCrop.cropY}
+      cropWidth={coverCrop.cropWidth}
+      cropHeight={coverCrop.cropHeight}
       rotation={video.rotation}
-      draggable={!isPanMode}
+      draggable={!isPanMode && !video.locked}
       perfectDrawEnabled={false}
-      onMouseDown={handlePointerDown}
-      onTap={() => onSelect(video.id)}
-      onDragStart={() => onSelect(video.id)}
-      onDragEnd={(event) => {
-        onChange(video.id, {
-          x: event.target.x(),
-          y: event.target.y(),
-        })
-      }}
-      onTransformEnd={handleTransformEnd}
     />
   )
 }

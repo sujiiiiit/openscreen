@@ -37,6 +37,7 @@ const DEFAULT_VIEW_TRANSFORM = getFitViewTransform(
   DEFAULT_VIEWPORT_SIZE,
   DEFAULT_ARTBOARD
 )
+const DUPLICATED_VIDEO_OFFSET = 48
 
 type VideoMetadata = {
   width: number
@@ -54,6 +55,9 @@ type EditorCanvasContextValue = {
   addVideoFile: (file: File) => Promise<void>
   selectItem: (id: string | null) => void
   updateVideoTransform: (id: string, patch: CanvasVideoTransformPatch) => void
+  setVideoLocked: (id: string, locked: boolean) => void
+  duplicateVideo: (id: string) => void
+  deleteVideo: (id: string) => void
   setArtboardPreset: (id: ArtboardPresetId) => void
   setViewportSize: (size: CanvasSize) => void
   setViewTransform: (transform: ViewTransform) => void
@@ -80,6 +84,9 @@ type EditorCanvasActionsContextValue = Pick<
   | "addVideoFile"
   | "selectItem"
   | "updateVideoTransform"
+  | "setVideoLocked"
+  | "duplicateVideo"
+  | "deleteVideo"
   | "setArtboardPreset"
   | "setViewportSize"
   | "setViewTransform"
@@ -174,10 +181,20 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const [importError, setImportError] = useState<string | null>(null)
 
   const objectUrlsRef = useRef(new Set<string>())
+  const videosRef = useRef(videos)
+  const selectedItemIdRef = useRef(selectedItemId)
   const viewportSizeRef = useRef(viewportSize)
   const artboardRef = useRef(artboard)
   const viewTransformRef = useRef(viewTransform)
   const hasCustomViewRef = useRef(false)
+
+  useEffect(() => {
+    videosRef.current = videos
+  }, [videos])
+
+  useEffect(() => {
+    selectedItemIdRef.current = selectedItemId
+  }, [selectedItemId])
 
   useEffect(() => {
     viewportSizeRef.current = viewportSize
@@ -304,10 +321,16 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         intrinsicWidth: metadata.width,
         intrinsicHeight: metadata.height,
         rotation: 0,
+        locked: false,
         ...placement,
       }
 
-      setVideos((current) => [...current, item])
+      setVideos((current) => {
+        const nextVideos = [...current, item]
+        videosRef.current = nextVideos
+        return nextVideos
+      })
+      selectedItemIdRef.current = id
       setSelectedItemId(id)
       setImportError(null)
     } catch (error) {
@@ -322,6 +345,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const selectItem = useCallback((id: string | null) => {
+    selectedItemIdRef.current = id
     setSelectedItemId((current) => (current === id ? current : id))
   }, [])
 
@@ -331,6 +355,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         let didChange = false
         const nextVideos = current.map((video) => {
           if (video.id !== id) return video
+          if (video.locked) return video
 
           const nextVideo = { ...video, ...patch }
           didChange =
@@ -343,11 +368,82 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           return didChange ? nextVideo : video
         })
 
-        return didChange ? nextVideos : current
+        if (!didChange) return current
+
+        videosRef.current = nextVideos
+        return nextVideos
       })
     },
     []
   )
+
+  const setVideoLocked = useCallback((id: string, locked: boolean) => {
+    setVideos((current) => {
+      let didChange = false
+      const nextVideos = current.map((video) => {
+        if (video.id !== id || video.locked === locked) return video
+
+        didChange = true
+        return {
+          ...video,
+          locked,
+        }
+      })
+
+      if (!didChange) return current
+
+      videosRef.current = nextVideos
+      return nextVideos
+    })
+  }, [])
+
+  const duplicateVideo = useCallback((id: string) => {
+    const currentVideos = videosRef.current
+    const selectedIndex = currentVideos.findIndex((video) => video.id === id)
+    const selectedVideo = currentVideos[selectedIndex]
+    if (!selectedVideo) return
+
+    const duplicate: CanvasVideoItem = {
+      ...selectedVideo,
+      id: createCanvasId(),
+      x: selectedVideo.x + DUPLICATED_VIDEO_OFFSET,
+      y: selectedVideo.y + DUPLICATED_VIDEO_OFFSET,
+    }
+    const nextVideos = [
+      ...currentVideos.slice(0, selectedIndex + 1),
+      duplicate,
+      ...currentVideos.slice(selectedIndex + 1),
+    ]
+
+    videosRef.current = nextVideos
+    selectedItemIdRef.current = duplicate.id
+    setVideos(nextVideos)
+    setSelectedItemId(duplicate.id)
+  }, [])
+
+  const deleteVideo = useCallback((id: string) => {
+    const currentVideos = videosRef.current
+    const deletedVideo = currentVideos.find((video) => video.id === id)
+    if (!deletedVideo) return
+
+    const nextVideos = currentVideos.filter((video) => video.id !== id)
+    const objectUrlStillUsed = nextVideos.some(
+      (video) => video.objectUrl === deletedVideo.objectUrl
+    )
+
+    if (!objectUrlStillUsed) {
+      objectUrlsRef.current.delete(deletedVideo.objectUrl)
+      URL.revokeObjectURL(deletedVideo.objectUrl)
+    }
+
+    videosRef.current = nextVideos
+    setVideos(nextVideos)
+
+    if (selectedItemIdRef.current === id) {
+      selectedItemIdRef.current = null
+      setSelectedItemId(null)
+    }
+  }, [])
 
   const selectedVideo = useMemo(
     () => videos.find((video) => video.id === selectedItemId) ?? null,
@@ -384,6 +480,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       addVideoFile,
       selectItem,
       updateVideoTransform,
+      setVideoLocked,
+      duplicateVideo,
+      deleteVideo,
       setArtboardPreset,
       setViewportSize,
       setViewTransform,
@@ -393,6 +492,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       addVideoFile,
       selectItem,
       updateVideoTransform,
+      setVideoLocked,
+      duplicateVideo,
+      deleteVideo,
       setArtboardPreset,
       setViewportSize,
       setViewTransform,
