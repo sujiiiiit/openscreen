@@ -1,40 +1,36 @@
-'use client'
+"use client";
 
-import { useState } from 'react'
-
-import { Titlebar } from '@/components/ui/titlebar'
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { Titlebar } from "@/components/ui/titlebar";
+import EditorSidebar from "@/components/editor/sidebar";
+import EditorMain from "@/components/editor/main";
+import EditorFooter from "@/components/editor/footer";
 
 export default function Page() {
-  const [result, setResult] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  async function ping() {
-    setError(null)
-    try {
-      if (!window.api?.recorder?.getState) {
-        throw new Error('window.api.recorder is not available — preload not loaded?')
-      }
-      const state = await window.api.recorder.getState()
-      setResult(`recorder status: ${state.status}`)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    }
-  }
-
   return (
-    <div className="flex min-h-screen flex-col">
-      <Titlebar />
-      <main className="flex flex-1 flex-col items-center justify-center gap-4 p-8">
-        <h1 className="text-2xl font-semibold">openscreen</h1>
-        <button
-          onClick={ping}
-          className="rounded border px-4 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-900"
-        >
-          Ping recorder bridge
-        </button>
-        {result && <pre className="text-sm">{result}</pre>}
-        {error && <pre className="text-sm text-red-500">{error}</pre>}
-      </main>
-    </div>
-  )
+    <TooltipProvider>
+      <div className="h-dvh w-dvw overflow-hidden flex flex-col">
+        <Titlebar />
+        <div className="flex-1 min-h-0">
+          <ResizablePanelGroup orientation="vertical">
+            <ResizablePanel>
+              <section className="flex h-full flex-row">
+                <EditorSidebar />
+                <EditorMain />
+              </section>
+            </ResizablePanel>
+            <ResizableHandle withHandle />
+            <ResizablePanel defaultSize={31} minSize={30} maxSize={60}>
+              <EditorFooter />
+            </ResizablePanel>
+          </ResizablePanelGroup>
+        </div>
+      </div>
+    </TooltipProvider>
+  );
 }

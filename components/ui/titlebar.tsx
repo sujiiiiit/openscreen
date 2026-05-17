@@ -11,6 +11,7 @@ import {
 } from '@hugeicons/core-free-icons'
 
 import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { DRAG, NO_DRAG } from '@/lib/window-drag'
 
@@ -47,26 +48,33 @@ export function Titlebar() {
 
   return (
     <div
-      className="bg-background border-border flex h-10 w-full shrink-0 items-stretch border-b select-none"
+      className="bg-background border-border flex h-11 w-full shrink-0 items-stretch border-b select-none"
       style={DRAG}
     >
       {showMacSpacer && <div className="h-10 w-20 shrink-0" />}
 
-      <div className="flex flex-1 items-center px-3">
-        <span className="text-sm font-medium">openscreen</span>
-      </div>
+     
 
-      <div className="flex items-center gap-1 pr-2" style={NO_DRAG}>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Open recordings folder"
-          onClick={() => {
-            // Placeholder — folder open action wired up separately.
-          }}
-        >
-          <HugeiconsIcon icon={Folder02Icon} />
-        </Button>
+      <div className="flex items-center gap-1 pl-5 pr-2" style={NO_DRAG}>
+        <Tooltip>
+          <TooltipTrigger
+            render={(props) => (
+              <Button
+                {...props}
+                variant="ghost"
+                size="icon"
+                aria-label="Open recordings folder"
+                className="rounded-md"
+                onClick={() => {
+                  // Placeholder — folder open action wired up separately.
+                }}
+              >
+                <HugeiconsIcon icon={Folder02Icon} />
+              </Button>
+            )}
+          />
+          <TooltipContent side="bottom">Open project</TooltipContent>
+        </Tooltip>
       </div>
 
       {showWindowControls && <WindowControls isMaximized={isMaximized} />}
