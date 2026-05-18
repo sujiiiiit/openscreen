@@ -52,3 +52,5 @@ Use this table when discussion language and implementation language differ. Pref
 | Even-spacing arrows         | Distance guides                 | Equal-spacing segments shown when the dragged node lands between neighbors.                                 |
 | Hold Cmd to ignore snapping | Snap override modifier          | Cmd or Ctrl held during drag or resize, which disables snapping for that interaction.                       |
 | Arrow keys nudge            | Keyboard nudge                  | Move a selected node by 1 artboard pixel per arrow key, 10 with Shift.                                      |
+| Margin around the recording | Artboard padding                | Inset of the screen-role video from each artboard edge, stored in artboard pixels for direct control.       |
+| Fit inside padded box       | Padded contain-fit              | Aspect-preserving fit of a screen-role video inside the padded inner rect; reveals background on the sides. |

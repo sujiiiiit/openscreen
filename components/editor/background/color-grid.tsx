@@ -17,6 +17,7 @@ import {
 } from "@/components/editor/canvas/provider"
 
 const COLOR_PRESETS = [
+  { value: "#ffffff", label: "White" },
   { value: "#ff6b6b", label: "Red" },
   { value: "#4ecdc4", label: "Teal" },
   { value: "#45b7d1", label: "Blue" },
@@ -25,6 +26,8 @@ const COLOR_PRESETS = [
   { value: "#cbcadb", label: "Lavender" },
   { value: "#d97757", label: "Terracotta" },
 ] as const
+
+const DEFAULT_COLOR = COLOR_PRESETS[0].value
 
 const SHADE_STEPS = 10
 
@@ -81,8 +84,16 @@ export function ColorGrid() {
   const { artboard } = useEditorCanvasArtboard()
   const { setArtboardBackground } = useEditorCanvasActions()
 
+  // White is the artboard's implicit default — the workspace paints it via
+  // CSS even when no background is set. Treating null as white here means the
+  // Color tab shows white as checked by default and stays consistent with what
+  // the user actually sees on the canvas.
   const selected: string | null =
-    artboard.background?.type === "color" ? artboard.background.value : null
+    artboard.background === null
+      ? DEFAULT_COLOR
+      : artboard.background.type === "color"
+        ? artboard.background.value
+        : null
 
   // The base hue feeds the shade strip. Local state so clicking a shade doesn't
   // re-derive a new strip (which would hide the check on the freshly-clicked

@@ -43,7 +43,9 @@ const DEFAULT_ARTBOARD: EditorArtboard = {
   height: DEFAULT_ARTBOARD_PRESET.height,
   background: null,
   grain: 0,
+  padding: 0,
 }
+const ARTBOARD_PADDING_MAX = 500
 const DEFAULT_VIEW_TRANSFORM = getFitViewTransform(
   DEFAULT_VIEWPORT_SIZE,
   DEFAULT_ARTBOARD
@@ -135,6 +137,7 @@ type EditorCanvasContextValue = {
   setArtboardPreset: (id: ArtboardPresetId) => void
   setArtboardBackground: (background: ArtboardBackground | null) => void
   setArtboardGrain: (grain: number) => void
+  setArtboardPadding: (padding: number) => void
   setViewportSize: (size: CanvasSize) => void
   setViewTransform: (transform: ViewTransform) => void
   fitArtboardToViewport: () => void
@@ -209,6 +212,7 @@ type EditorCanvasActionsContextValue = Pick<
   | "setArtboardPreset"
   | "setArtboardBackground"
   | "setArtboardGrain"
+  | "setArtboardPadding"
   | "setViewportSize"
   | "setViewTransform"
   | "fitArtboardToViewport"
@@ -309,19 +313,62 @@ function getCoverVideoPlacement(
   }
 }
 
+// Padding is stored in artboard pixels for direct, one-to-one control. We
+// still clamp against the artboard's shorter edge so the inner rect can never
+// collapse to zero — leaving a 2px floor keeps `getScreenVideoPlacement`'s
+// `Math.max(1, ...)` from masking a too-aggressive value.
+function getPaddingInsetPx(artboard: EditorArtboard) {
+  const raw = Math.max(
+    0,
+    Math.min(ARTBOARD_PADDING_MAX, artboard.padding ?? 0)
+  )
+  if (raw <= 0) return 0
+  const maxInset = Math.max(0, Math.floor(Math.min(artboard.width, artboard.height) / 2) - 1)
+  return Math.min(raw, maxInset)
+}
+
+function getScreenVideoPlacement(
+  metadata: CanvasSize,
+  artboard: EditorArtboard
+) {
+  const inset = getPaddingInsetPx(artboard)
+  // No padding → keep cover-fit: the screen recording fills the artboard
+  // edge-to-edge with whatever crop is needed. This preserves the existing
+  // "auto layout" behavior for users who never touch the padding slider.
+  if (inset <= 0) return getCoverVideoPlacement(metadata, artboard)
+
+  // With padding > 0 we switch to contain-fit inside the inner rect so the
+  // *entire* video is visible with breathing room on all four sides. Aspect
+  // ratio is always preserved by using the smaller of the two scales.
+  const innerWidth = Math.max(1, artboard.width - inset * 2)
+  const innerHeight = Math.max(1, artboard.height - inset * 2)
+  const containScale = Math.min(
+    innerWidth / metadata.width,
+    innerHeight / metadata.height
+  )
+  const width = metadata.width * containScale
+  const height = metadata.height * containScale
+  return {
+    x: (artboard.width - width) / 2,
+    y: (artboard.height - height) / 2,
+    width,
+    height,
+  }
+}
+
 function relayoutVideoForArtboard(
   video: CanvasVideoItem,
   prev: CanvasSize,
-  next: CanvasSize
+  next: EditorArtboard
 ): CanvasVideoItem {
   if (prev.width <= 0 || prev.height <= 0) return video
 
   if (video.role === "screen") {
-    const cover = getCoverVideoPlacement(
+    const placement = getScreenVideoPlacement(
       { width: video.intrinsicWidth, height: video.intrinsicHeight },
       next
     )
-    return { ...video, ...cover }
+    return { ...video, ...placement }
   }
 
   const scaleX = next.width / prev.width
@@ -1499,6 +1546,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     (id: ArtboardPresetId) => {
       const prevBackground = artboardRef.current.background
       const prevGrain = artboardRef.current.grain
+      const prevPadding = artboardRef.current.padding
       let nextArtboard: EditorArtboard
       if (id === AUTO_ARTBOARD_PRESET_ID) {
         const auto = resolveAutoArtboard(sourceVideoDimsRef.current)
@@ -1508,6 +1556,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           height: auto.height,
           background: prevBackground,
           grain: prevGrain,
+          padding: prevPadding,
         }
       } else {
         const preset = getArtboardPreset(id)
@@ -1517,6 +1566,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           height: preset.height,
           background: prevBackground,
           grain: prevGrain,
+          padding: prevPadding,
         }
       }
 
@@ -1782,15 +1832,25 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           artboardSize.height - height - CAMERA_DEFAULT_MARGIN
         placement = { x, y, width, height }
       } else {
-        const cover = getCoverVideoPlacement(
-          { width: input.intrinsicWidth, height: input.intrinsicHeight },
-          artboardSize
-        )
+        // Screen-role videos honor the artboard's padding so the hydrated
+        // recording lands inside the padded inner rect (contain-fit). Other
+        // media roles continue to use cover-fit since padding only describes
+        // the framing of the screen recording itself.
+        const fit =
+          input.role === "screen"
+            ? getScreenVideoPlacement(
+                { width: input.intrinsicWidth, height: input.intrinsicHeight },
+                artboardSize
+              )
+            : getCoverVideoPlacement(
+                { width: input.intrinsicWidth, height: input.intrinsicHeight },
+                artboardSize
+              )
         placement = {
-          x: input.placement?.x ?? cover.x,
-          y: input.placement?.y ?? cover.y,
-          width: input.placement?.width ?? cover.width,
-          height: input.placement?.height ?? cover.height,
+          x: input.placement?.x ?? fit.x,
+          y: input.placement?.y ?? fit.y,
+          width: input.placement?.width ?? fit.width,
+          height: input.placement?.height ?? fit.height,
         }
       }
 
@@ -1843,6 +1903,51 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     artboardRef.current = nextArtboard
     setArtboard(nextArtboard)
   }, [])
+
+  const setArtboardPadding = useCallback(
+    (padding: number) => {
+      const current = artboardRef.current
+      const clamped = Math.max(
+        0,
+        Math.min(ARTBOARD_PADDING_MAX, Math.round(padding))
+      )
+      if (current.padding === clamped) return
+      const nextArtboard: EditorArtboard = { ...current, padding: clamped }
+      artboardRef.current = nextArtboard
+      setArtboard(nextArtboard)
+
+      // Re-fit any screen-role videos to the new padded inner rect. Locked
+      // videos are skipped on purpose — `updateVideoTransform` already treats
+      // a locked video as immovable, and overriding that from a slider would
+      // surprise the user. Other roles (camera, media) are untouched by
+      // padding since it only frames the screen recording.
+      setVideos((currentVideos) => {
+        let didChange = false
+        const nextVideos = currentVideos.map((video) => {
+          if (video.role !== "screen") return video
+          if (video.locked) return video
+          const placement = getScreenVideoPlacement(
+            { width: video.intrinsicWidth, height: video.intrinsicHeight },
+            nextArtboard
+          )
+          if (
+            placement.x === video.x &&
+            placement.y === video.y &&
+            placement.width === video.width &&
+            placement.height === video.height
+          ) {
+            return video
+          }
+          didChange = true
+          return { ...video, ...placement }
+        })
+        if (!didChange) return currentVideos
+        commitVideosRef(nextVideos)
+        return nextVideos
+      })
+    },
+    [commitVideosRef]
+  )
 
   const setArtboardBackground = useCallback(
     (background: ArtboardBackground | null) => {
@@ -2069,6 +2174,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setArtboardPreset,
       setArtboardBackground,
       setArtboardGrain,
+      setArtboardPadding,
       setViewportSize,
       setViewTransform,
       fitArtboardToViewport,
@@ -2084,6 +2190,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setArtboardPreset,
       setArtboardBackground,
       setArtboardGrain,
+      setArtboardPadding,
       setViewportSize,
       setViewTransform,
       fitArtboardToViewport,
@@ -2190,6 +2297,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const useAuto = project.recordingType === "display"
       const previousBackground = artboardRef.current.background
       const previousGrain = artboardRef.current.grain
+      const previousPadding = artboardRef.current.padding
       const nextArtboard: EditorArtboard = useAuto
         ? (() => {
             const auto = resolveAutoArtboard(sourceVideoDimsRef.current)
@@ -2199,6 +2307,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               height: auto.height,
               background: previousBackground,
               grain: previousGrain,
+              padding: previousPadding,
             }
           })()
         : (() => {
@@ -2209,6 +2318,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               height: preset.height,
               background: previousBackground,
               grain: previousGrain,
+              padding: previousPadding,
             }
           })()
       artboardRef.current = nextArtboard

@@ -231,6 +231,25 @@ Current presets:
 
 Changing the preset resets the view to fit and changes future video placement.
 
+### Artboard Padding
+
+The Background panel exposes a `Padding` slider above `Background blur`. Padding is stored on `EditorArtboard.padding` as absolute artboard pixels in the range `0–500`. We use pixels rather than a percentage so every notch on the slider maps to the same number of artboard pixels regardless of preset, giving users one-to-one control when they trim or frame the recording.
+
+Behavior:
+
+- Padding insets the screen-role recording on all four sides while preserving its intrinsic aspect ratio.
+- At `padding === 0`, screen-role video uses the existing cover-fit (`getCoverVideoPlacement`) so default auto-layout is unchanged.
+- At `padding > 0`, screen-role video switches to contain-fit inside the inner rect (`artboard.width - 2 * inset` × `artboard.height - 2 * inset`), revealing the background on the surrounding margin.
+- Padding only affects videos with `role === "screen"`. Camera and media nodes are left alone — padding describes the framing of the recording, not other layers.
+- Locked screen videos are skipped; users explicitly chose to pin those.
+- Slider is disabled when no screen-role video is present.
+- Preset changes and project hydration preserve `padding` (same lifecycle as `background` and `grain`). When the preset changes, screen-role videos relayout via `relayoutVideoForArtboard`, which now consults the next artboard's `padding` instead of just its size.
+
+Helpers:
+
+- `getPaddingInsetPx(artboard)` clamps the stored pixel value against `floor(min(width, height) / 2) - 1` so the inner rect can never collapse to zero, regardless of slider position or canvas preset.
+- `getScreenVideoPlacement(metadata, artboard)` is the single source of truth for screen-role placement and routes between cover-fit and padded contain-fit.
+
 ## Video Import And Rendering
 
 The Background tab uses a local file picker with `accept="video/*"`.

@@ -13,6 +13,7 @@ export type EditorArtboard = CanvasSize & {
   presetId: ArtboardPresetId
   background: ArtboardBackground | null
   grain: number
+  padding: number
 }
 
 export const ARTBOARD_SELECTION_ID = "__artboard__"

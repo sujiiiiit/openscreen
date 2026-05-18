@@ -18,6 +18,7 @@ import { ColorGrid } from "@/components/editor/background/color-grid"
 import {
   useEditorCanvasActions,
   useEditorCanvasArtboard,
+  useEditorCanvasMedia,
 } from "@/components/editor/canvas/provider"
 
 const BACKGROUND_TABS = [
@@ -29,6 +30,8 @@ const BACKGROUND_BLUR_DEFAULT = 0
 const BACKGROUND_BLUR_MAX = 200
 const GRAIN_DEFAULT = 0
 const GRAIN_MAX = 100
+const PADDING_DEFAULT = 0
+const PADDING_MAX = 500
 
 type AdjustmentRowProps = {
   label: string
@@ -94,12 +97,18 @@ function AdjustmentRow({
 export function BackgroundPanel() {
   const switchId = useId()
   const { artboard } = useEditorCanvasArtboard()
-  const { setArtboardBackground, setArtboardGrain } = useEditorCanvasActions()
+  const { videos } = useEditorCanvasMedia()
+  const { setArtboardBackground, setArtboardGrain, setArtboardPadding } =
+    useEditorCanvasActions()
   const [enabled, setEnabled] = useState(true)
 
   const wallpaperBackground =
     artboard.background?.type === "wallpaper" ? artboard.background : null
   const isWallpaperActive = wallpaperBackground !== null
+  // Padding insets the screen recording specifically — when no screen-role
+  // video exists there's nothing to inset, so we disable the control instead
+  // of letting users move a slider that does nothing visible.
+  const hasScreenVideo = videos.some((video) => video.role === "screen")
   const blurStrength = Math.max(
     BACKGROUND_BLUR_DEFAULT,
     Math.min(BACKGROUND_BLUR_MAX, wallpaperBackground?.blurRadius ?? 0)
@@ -107,6 +116,10 @@ export function BackgroundPanel() {
   const grainStrength = Math.max(
     GRAIN_DEFAULT,
     Math.min(GRAIN_MAX, artboard.grain)
+  )
+  const paddingStrength = Math.max(
+    PADDING_DEFAULT,
+    Math.min(PADDING_MAX, artboard.padding)
   )
 
   const applyBlur = (next: number) => {
@@ -124,6 +137,10 @@ export function BackgroundPanel() {
 
   const applyGrain = (next: number) => {
     setArtboardGrain(Math.max(GRAIN_DEFAULT, Math.min(GRAIN_MAX, next)))
+  }
+
+  const applyPadding = (next: number) => {
+    setArtboardPadding(Math.max(PADDING_DEFAULT, Math.min(PADDING_MAX, next)))
   }
 
   return (
@@ -162,6 +179,17 @@ export function BackgroundPanel() {
         </TabsContents>
       </Tabs>
       <div className="flex flex-col gap-5">
+        <AdjustmentRow
+          label="Padding"
+          value={paddingStrength}
+          onValueChange={applyPadding}
+          onReset={() => applyPadding(PADDING_DEFAULT)}
+          min={0}
+          max={PADDING_MAX}
+          disabled={!hasScreenVideo}
+          showValueTooltip
+          formatValue={(v) => `${Math.round(v)}px`}
+        />
         <AdjustmentRow
           label="Background blur"
           value={blurStrength}
