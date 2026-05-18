@@ -9,7 +9,7 @@ import { checkProps } from '../utils/check_props';
 import { getScaleCountByRows, parserPixelToTime, parserTimeToPixel } from '../utils/deal_data';
 import { Cursor } from './cursor/cursor';
 import { EditArea } from './edit_area/edit_area';
-import { TimeArea } from './time_area/time_area';
+import { TimeArea, TimeAreaHandle } from './time_area/time_area';
 
 export const Timeline = React.forwardRef<TimelineState, TimelineEditor>((props, ref) => {
   const checkedProps = checkProps(props);
@@ -41,6 +41,7 @@ export const Timeline = React.forwardRef<TimelineState, TimelineEditor>((props, 
   const draggingCursorRef = useRef(false);
 
   const scrollSync = useRef<ScrollSync>(null);
+  const timeAreaRef = useRef<TimeAreaHandle>(null);
 
   // Editor data
   const [editorData, setEditorData] = useState(data);
@@ -191,6 +192,7 @@ export const Timeline = React.forwardRef<TimelineState, TimelineEditor>((props, 
           <>
             <TimeArea
               {...checkedProps}
+              ref={timeAreaRef}
               timelineWidth={width}
               disableDrag={disableDrag || isPlaying}
               setCursor={handleSetCursor}
@@ -219,6 +221,9 @@ export const Timeline = React.forwardRef<TimelineState, TimelineEditor>((props, 
               deltaScrollLeft={autoScroll ? handleDeltaScrollLeft : () => {}}
               onScroll={(params) => {
                 onScroll(params);
+                // Sync the ruler immediately (bypass the ScrollSync → prop → Grid state chain
+                // which lags 2 React renders behind the tracks, causing visual desync).
+                timeAreaRef.current?.syncScrollLeft(params.scrollLeft);
                 onScrollVertical && onScrollVertical(params);
               }}
             />

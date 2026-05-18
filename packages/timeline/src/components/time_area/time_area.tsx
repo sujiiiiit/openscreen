@@ -1,7 +1,8 @@
-import { FC, useEffect, useRef } from 'react';
+import React, { useEffect, useImperativeHandle, useRef } from 'react';
 import { AutoSizer, Grid, GridCellRenderer, OnScrollParams } from 'react-virtualized';
 import { useTimelineClassNames } from '../../interface/class_names';
 import { CommonProp } from '../../interface/common_prop';
+import { PREFIX } from '../../interface/const';
 import { cn } from '../../utils/cn';
 import { parserPixelToTime } from '../../utils/deal_data';
 
@@ -15,10 +16,24 @@ export type TimeAreaProps = CommonProp & {
   setCursor: (param: { left?: number; time?: number }) => void;
 };
 
+export interface TimeAreaHandle {
+  /** Immediately sync the ruler to a new horizontal scroll offset, bypassing React state. */
+  syncScrollLeft: (left: number) => void;
+}
+
 /** Animation timeline component */
-export const TimeArea: FC<TimeAreaProps> = ({ setCursor, maxScaleCount, maxCursorTime, hideCursor, scale, scaleWidth, scaleCount, scaleSplitCount, startLeft, scrollLeft, onClickTimeArea, onTimeAreaHover, draggingCursorRef, getScaleRender }) => {
+export const TimeArea = React.forwardRef<TimeAreaHandle, TimeAreaProps>(({ setCursor, maxScaleCount, maxCursorTime, hideCursor, scale, scaleWidth, scaleCount, scaleSplitCount, startLeft, scrollLeft, onScroll, onClickTimeArea, onTimeAreaHover, draggingCursorRef, getScaleRender }, ref) => {
   const gridRef = useRef<Grid>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
   const slots = useTimelineClassNames();
+
+  useImperativeHandle(ref, () => ({
+    syncScrollLeft: (left: number) => {
+      const container = (gridRef.current as any)?._scrollingContainer as HTMLElement | undefined;
+      if (container) container.scrollLeft = left;
+    },
+  }));
+
   /** Whether to render subdivision ticks */
   const showUnit = scaleSplitCount > 0;
 
@@ -55,6 +70,44 @@ export const TimeArea: FC<TimeAreaProps> = ({ setCursor, maxScaleCount, maxCurso
     gridRef.current?.recomputeGridSize();
   }, [scaleWidth, startLeft]);
 
+  // Forward wheel events from the interactive overlay to the edit area's scroll
+  // container. Without this, wheeling over the ruler does nothing because the
+  // overlay swallows the event before it can reach a scrollable ancestor.
+  // Forwarding to the edit area (rather than the ruler's own grid) keeps the
+  // existing onScroll → ScrollSync → ruler sync path as the single source of
+  // truth, so horizontal and vertical scroll stay aligned without flicker.
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const handleWheel = (e: WheelEvent) => {
+      const root = overlay.closest(`.${PREFIX}`);
+      const editGrid = root?.querySelector('.timeline-editor-edit-area .ReactVirtualized__Grid') as HTMLElement | null;
+      if (!editGrid) return;
+      const { deltaX, deltaY } = e;
+      if (deltaX === 0 && deltaY === 0) return;
+      let consumed = false;
+      if (deltaX !== 0) {
+        const maxX = editGrid.scrollWidth - editGrid.clientWidth;
+        const nextX = Math.max(0, Math.min(maxX, editGrid.scrollLeft + deltaX));
+        if (nextX !== editGrid.scrollLeft) {
+          editGrid.scrollLeft = nextX;
+          consumed = true;
+        }
+      }
+      if (deltaY !== 0) {
+        const maxY = editGrid.scrollHeight - editGrid.clientHeight;
+        const nextY = Math.max(0, Math.min(maxY, editGrid.scrollTop + deltaY));
+        if (nextY !== editGrid.scrollTop) {
+          editGrid.scrollTop = nextY;
+          consumed = true;
+        }
+      }
+      if (consumed) e.preventDefault();
+    };
+    overlay.addEventListener('wheel', handleWheel, { passive: false });
+    return () => overlay.removeEventListener('wheel', handleWheel);
+  }, []);
+
   /** Get the column width */
   const getColumnWidth = (data: { index: number }) => {
     switch (data.index) {
@@ -84,8 +137,10 @@ export const TimeArea: FC<TimeAreaProps> = ({ setCursor, maxScaleCount, maxCurso
                 overscanColumnCount={10}
                 cellRenderer={cellRenderer}
                 scrollLeft={scrollLeft}
+                onScroll={onScroll}
               ></Grid>
               <div
+                ref={overlayRef}
                 style={{ width, height }}
                 onClick={(e) => {
                   if (hideCursor) return;
@@ -127,4 +182,4 @@ export const TimeArea: FC<TimeAreaProps> = ({ setCursor, maxScaleCount, maxCurso
       </AutoSizer>
     </div>
   );
-};
+});
