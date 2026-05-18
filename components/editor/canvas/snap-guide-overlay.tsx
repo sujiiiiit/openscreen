@@ -7,8 +7,8 @@ import { Group, Line, Text } from "react-konva"
 import {
   SNAP_GUIDE_DASH,
   SNAP_GUIDE_STROKE,
+  SNAP_GUIDE_STROKE_WIDTH_SCREEN_PX,
 } from "@/components/editor/canvas/canvas-node-constants"
-import { useEditorCanvasView } from "@/components/editor/canvas/provider"
 import type {
   DimensionGuide,
   DistanceGuide,
@@ -34,8 +34,6 @@ export type SnapGuideOverlayHandle = {
 
 export const SnapGuideOverlay = forwardRef<SnapGuideOverlayHandle>(
   function SnapGuideOverlay(_, ref) {
-    const { viewTransform } = useEditorCanvasView()
-    const scale = viewTransform.scale || 1
     const guideRefs = useRef<Array<Konva.Line | null>>([])
     const distanceRefs = useRef<Array<Konva.Line | null>>([])
     const labelRefs = useRef<Array<Konva.Text | null>>([])
@@ -168,8 +166,6 @@ export const SnapGuideOverlay = forwardRef<SnapGuideOverlayHandle>(
             const dragged = dim.draggedRect
             const matched = dim.matchedRect
             if (dim.axis === "width") {
-              // Two horizontal markers above each rect spanning their width,
-              // and a label centered on the dragged rect's top.
               const labelOffset = DISTANCE_LABEL_OFFSET_PX / currentScaleForDims
               dimLines.push({
                 x1: dragged.x,
@@ -271,9 +267,6 @@ export const SnapGuideOverlay = forwardRef<SnapGuideOverlayHandle>(
       []
     )
 
-    const strokeWidth = 1 / scale
-    const dash = [SNAP_GUIDE_DASH[0] / scale, SNAP_GUIDE_DASH[1] / scale]
-
     return (
       <Group listening={false}>
         {guideIndexes.map((index) => (
@@ -284,8 +277,9 @@ export const SnapGuideOverlay = forwardRef<SnapGuideOverlayHandle>(
             }}
             visible={false}
             stroke={SNAP_GUIDE_STROKE}
-            strokeWidth={strokeWidth}
-            dash={dash}
+            strokeWidth={SNAP_GUIDE_STROKE_WIDTH_SCREEN_PX}
+            strokeScaleEnabled={false}
+            dash={[...SNAP_GUIDE_DASH]}
             listening={false}
             perfectDrawEnabled={false}
             shadowForStrokeEnabled={false}
@@ -299,8 +293,9 @@ export const SnapGuideOverlay = forwardRef<SnapGuideOverlayHandle>(
             }}
             visible={false}
             stroke={SNAP_GUIDE_STROKE}
-            strokeWidth={strokeWidth}
-            dash={dash}
+            strokeWidth={SNAP_GUIDE_STROKE_WIDTH_SCREEN_PX}
+            strokeScaleEnabled={false}
+            dash={[...SNAP_GUIDE_DASH]}
             listening={false}
             perfectDrawEnabled={false}
             shadowForStrokeEnabled={false}
@@ -314,7 +309,7 @@ export const SnapGuideOverlay = forwardRef<SnapGuideOverlayHandle>(
             }}
             visible={false}
             fill={SNAP_GUIDE_STROKE}
-            fontSize={DISTANCE_LABEL_FONT_SIZE_PX / scale}
+            fontSize={DISTANCE_LABEL_FONT_SIZE_PX}
             fontStyle="600"
             text=""
             listening={false}
@@ -330,8 +325,9 @@ export const SnapGuideOverlay = forwardRef<SnapGuideOverlayHandle>(
             }}
             visible={false}
             stroke={SNAP_GUIDE_STROKE}
-            strokeWidth={strokeWidth}
-            dash={dash}
+            strokeWidth={SNAP_GUIDE_STROKE_WIDTH_SCREEN_PX}
+            strokeScaleEnabled={false}
+            dash={[...SNAP_GUIDE_DASH]}
             listening={false}
             perfectDrawEnabled={false}
             shadowForStrokeEnabled={false}
@@ -345,7 +341,7 @@ export const SnapGuideOverlay = forwardRef<SnapGuideOverlayHandle>(
             }}
             visible={false}
             fill={SNAP_GUIDE_STROKE}
-            fontSize={DISTANCE_LABEL_FONT_SIZE_PX / scale}
+            fontSize={DISTANCE_LABEL_FONT_SIZE_PX}
             fontStyle="600"
             text=""
             listening={false}

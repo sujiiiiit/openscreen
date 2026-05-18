@@ -21,11 +21,17 @@ function snapScreenValue(value: number) {
   return Math.round(value * pixelRatio) / pixelRatio
 }
 
+const SCALE_QUANTUM = 1e-4
+
+function snapScale(scale: number) {
+  return Math.round(scale / SCALE_QUANTUM) * SCALE_QUANTUM
+}
+
 export function snapViewTransformToScreenPixels(
   viewTransform: ViewTransform
 ): ViewTransform {
   return {
-    ...viewTransform,
+    scale: snapScale(viewTransform.scale),
     x: snapScreenValue(viewTransform.x),
     y: snapScreenValue(viewTransform.y),
   }

@@ -17,6 +17,7 @@ export const VIDEO_ROTATION_SNAPS = [0, 45, 90, 135, 180, 225, 270, 315]
 
 export const SNAP_THRESHOLD_SCREEN_PX = 6
 export const SNAP_GUIDE_STROKE = "#FF00FF"
+export const SNAP_GUIDE_STROKE_WIDTH_SCREEN_PX = 1
 export const SNAP_GUIDE_DASH: readonly [number, number] = [4, 4]
 export const KEYBOARD_NUDGE_STEP = 1
 export const KEYBOARD_NUDGE_LARGE_STEP = 10
