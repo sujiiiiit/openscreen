@@ -37,6 +37,7 @@ export type CanvasVideoItem = {
   objectUrl: string
   intrinsicWidth: number
   intrinsicHeight: number
+  durationMs: number
   x: number
   y: number
   width: number
@@ -50,3 +51,12 @@ export type CanvasVideoItem = {
 export type CanvasVideoTransformPatch = Partial<
   Pick<CanvasVideoItem, "x" | "y" | "width" | "height" | "rotation">
 >
+
+export type CanvasTimelineClip = {
+  id: string
+  videoId: string
+  start: number
+  end: number
+  sourceIn: number
+  sourceOut: number
+}

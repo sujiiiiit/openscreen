@@ -36,10 +36,7 @@ export default function Page() {
                     <EditorMain />
                   </section>
                 </ResizablePanel>
-                <ResizableHandle
-                  withHandle
-                  aria-label="Resize workspace and timeline"
-                />
+                <ResizableHandle aria-label="Resize workspace and timeline" />
                 <ResizablePanel
                   id="editor-timeline-panel"
                   defaultSize="31%"

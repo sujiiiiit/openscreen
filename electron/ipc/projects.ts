@@ -97,11 +97,29 @@ function pickOutput(
   return outputs.find((output) => output.source === source)
 }
 
+function getPositiveDurationMs(durationMs: number | undefined): number | undefined {
+  return typeof durationMs === 'number' && Number.isFinite(durationMs) && durationMs > 0
+    ? durationMs
+    : undefined
+}
+
+function getProjectDurationMs(
+  outputs: RecordingOutputMetadata[],
+): number | undefined {
+  const durationMs = outputs.reduce((longest, output) => {
+    const outputDurationMs = getPositiveDurationMs(output.durationMs)
+    return outputDurationMs ? Math.max(longest, outputDurationMs) : longest
+  }, 0)
+
+  return durationMs > 0 ? durationMs : undefined
+}
+
 async function buildAsset(
   role: ProjectAssetRole,
   filePath: string,
   primary: RecordingOutputMetadata | undefined,
   audioTracks: ProjectAssetAudioTrack[],
+  fallbackDurationMs?: number,
 ): Promise<ProjectAsset> {
   const fileSize = await statSize(filePath)
   return {
@@ -110,7 +128,7 @@ async function buildAsset(
     filePath,
     fileUrl: pathToFileURL(filePath).toString(),
     fileSize,
-    durationMs: primary?.durationMs,
+    durationMs: getPositiveDurationMs(primary?.durationMs) ?? fallbackDurationMs,
     width: primary?.width,
     height: primary?.height,
     codec: primary?.codec,
@@ -127,6 +145,7 @@ async function loadProjectFromFolder(folder: string): Promise<ProjectSummary | n
 
   const files: RecordingFiles | undefined = manifest.files
   const outputs = manifest.outputs ?? []
+  const projectDurationMs = getProjectDurationMs(outputs)
 
   const audioTracks: ProjectAssetAudioTrack[] = outputs
     .filter((output) => output.muxedInto === 'screen')
@@ -141,13 +160,27 @@ async function loadProjectFromFolder(folder: string): Promise<ProjectSummary | n
   const screenPath = resolveAssetPath(folder, files?.screen)
   if (screenPath) {
     assets.push(
-      await buildAsset('screen', screenPath, pickOutput(outputs, 'screen'), audioTracks),
+      await buildAsset(
+        'screen',
+        screenPath,
+        pickOutput(outputs, 'screen'),
+        audioTracks,
+        projectDurationMs,
+      ),
     )
   }
 
   const cameraPath = resolveAssetPath(folder, files?.camera)
   if (cameraPath) {
-    assets.push(await buildAsset('camera', cameraPath, pickOutput(outputs, 'camera'), []))
+    assets.push(
+      await buildAsset(
+        'camera',
+        cameraPath,
+        pickOutput(outputs, 'camera'),
+        [],
+        projectDurationMs,
+      ),
+    )
   }
 
   const recordingType: ProjectRecordingType | null = (() => {

@@ -132,7 +132,7 @@ export function ColorGrid() {
           <Squircle
             cornerRadius={17}
             cornerSmoothing={4}
-            className="flex h-16 w-full overflow-hidden"
+            className="flex h-12 w-full overflow-hidden"
           >
             {shades.map((shade) => {
               const isSelected =
