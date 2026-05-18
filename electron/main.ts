@@ -46,6 +46,7 @@ let cameraWin: BrowserWindow | null = null
 let permissionWin: BrowserWindow | null = null
 let activeCameraDeviceId: string | null = null
 const fixedWindowSizeEnforcers = new WeakMap<BrowserWindow, () => void>()
+const zoomLockedWindows = new WeakSet<BrowserWindow>()
 const DEV_URL = 'http://localhost:3535'
 const OUT_DIR = path.resolve(__dirname, '..', 'out')
 type AlwaysOnTopLevel = NonNullable<Parameters<BrowserWindow['setAlwaysOnTop']>[1]>
@@ -136,6 +137,44 @@ function hardenWebContents(win: BrowserWindow): void {
   win.webContents.on('will-navigate', (event, url) => {
     const allowed = isDev ? url.startsWith(DEV_URL) : url.startsWith('app://')
     if (!allowed) event.preventDefault()
+  })
+}
+
+function lockWindowZoom(win: BrowserWindow): void {
+  if (zoomLockedWindows.has(win)) return
+  zoomLockedWindows.add(win)
+
+  const contents = win.webContents
+  const resetZoom = () => {
+    if (contents.isDestroyed()) return
+    contents.setZoomLevel(0)
+    contents.setZoomFactor(1)
+  }
+
+  resetZoom()
+  void contents.setVisualZoomLevelLimits(1, 1).catch(() => {})
+  contents.on('did-finish-load', resetZoom)
+  contents.on('zoom-changed', (event) => {
+    event.preventDefault()
+    resetZoom()
+  })
+  contents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || (!input.control && !input.meta)) return
+    const key = input.key.toLowerCase()
+    const isZoomShortcut =
+      key === '+' ||
+      key === '=' ||
+      key === '-' ||
+      key === '_' ||
+      key === '0' ||
+      input.code === 'NumpadAdd' ||
+      input.code === 'NumpadSubtract' ||
+      input.code === 'Numpad0'
+
+    if (isZoomShortcut) {
+      event.preventDefault()
+      resetZoom()
+    }
   })
 }
 
@@ -272,7 +311,7 @@ function createCameraWindow(deviceId: string): void {
     x,
     y,
     ...windowConfigs.cameraWin,
-    webPreferences: SHARED_WEB_PREFERENCES,
+    webPreferences: { ...SHARED_WEB_PREFERENCES, devTools: false },
   })
   cameraWin = win
 
@@ -317,10 +356,6 @@ function createCameraWindow(deviceId: string): void {
       stopNativeCameraPreview()
     }
   })
-
-  if (isDev) {
-    win.webContents.openDevTools({ mode: 'detach' })
-  }
 
   loadAppRoute(win, '/camera/')
 }
@@ -470,6 +505,8 @@ function enforceFixedWindowSize(win: BrowserWindow, width: number, height: numbe
 }
 
 function loadAppRoute(win: BrowserWindow, route: string): void {
+  lockWindowZoom(win)
+
   if (isDev) {
     void win.loadURL(`${DEV_URL}${route}`)
     return
@@ -663,7 +700,7 @@ function createRecorderBarWindow(): void {
     x,
     y,
     ...windowConfigs.recorderBarWin,
-    webPreferences: SHARED_WEB_PREFERENCES,
+    webPreferences: { ...SHARED_WEB_PREFERENCES, devTools: false },
   })
 
   keepRecorderBarOnTop(recorderBarWin)
