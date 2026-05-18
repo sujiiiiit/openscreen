@@ -54,3 +54,7 @@ Use this table when discussion language and implementation language differ. Pref
 | Arrow keys nudge            | Keyboard nudge                  | Move a selected node by 1 artboard pixel per arrow key, 10 with Shift.                                      |
 | Margin around the recording | Artboard padding                | Inset of the screen-role video from each artboard edge, stored in artboard pixels for direct control.       |
 | Fit inside padded box       | Padded contain-fit              | Aspect-preserving fit of a screen-role video inside the padded inner rect; reveals background on the sides. |
+| Border radius / rounded corners | Corner radius                  | The squircle corner radius applied to a video node, stored in artboard pixels.                              |
+| Smooth corners / iOS corners | Corner smoothing (squircle)    | Per-node 0–1 smoothing factor; 0 = circular arc, 0.6 = macOS look, 1 = fully continuous-curvature squircle. |
+| Round camera                | Camera squircle (max radius)    | Default camera appearance: corner radius = ½·min(w,h), smoothing = 1. Renders identically to the prior elliptical sceneFunc but goes through the unified squircle pipeline. |
+| Click-to-open panel         | Sidebar selection bridge        | Mounting that auto-routes any video selection (canvas or timeline) to the Video tab and opens the sidebar.  |

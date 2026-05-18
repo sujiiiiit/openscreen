@@ -5,9 +5,7 @@ export type TabId =
   | "cursor"
   | "video"
   | "subtitle"
-  | "audio"
-  | "transition"
-  | "assets";
+  | "audio";
 
 export type TabItem = {
   id: TabId;

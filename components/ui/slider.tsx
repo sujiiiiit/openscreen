@@ -96,7 +96,7 @@ function Slider({
                 <span
                   data-slot="slider-value-tooltip"
                   aria-hidden="true"
-                  className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 -translate-x-1/2 scale-95 rounded-md bg-foreground px-2 py-0.5 text-[10px] font-medium text-background tabular-nums whitespace-nowrap opacity-0 shadow-md ring-1 ring-black/10 transition-[opacity,transform] duration-150 group-data-dragging/slider-thumb:scale-100 group-data-dragging/slider-thumb:opacity-100 group-focus-within/slider-thumb:scale-100 group-focus-within/slider-thumb:opacity-100"
+                  className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 -translate-x-1/2 scale-95 rounded-md bg-foreground px-2 py-0.5 text-[10px] font-medium text-background tabular-nums whitespace-nowrap opacity-0 shadow-md ring-1 ring-black/10 transition-[opacity,transform] duration-150 group-hover/slider-thumb:scale-100 group-hover/slider-thumb:opacity-100 group-data-dragging/slider-thumb:scale-100 group-data-dragging/slider-thumb:opacity-100 group-focus-within/slider-thumb:scale-100 group-focus-within/slider-thumb:opacity-100"
                 >
                   {formatted}
                 </span>

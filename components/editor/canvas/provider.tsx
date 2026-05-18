@@ -26,7 +26,7 @@ import type {
   ArtboardBackground,
   CanvasTimelineClip,
   CanvasSize,
-  CanvasVideoCropShape,
+  CanvasVideoAppearancePatch,
   CanvasVideoItem,
   CanvasVideoRole,
   CanvasVideoTransformPatch,
@@ -75,11 +75,11 @@ type AddRemoteVideoInput = {
   id?: string
   url: string
   fileName: string
+  fileSize?: number
   intrinsicWidth: number
   intrinsicHeight: number
   durationMs?: number
   role: "screen" | "camera"
-  cropShape?: CanvasVideoCropShape
   placement?: Partial<Pick<CanvasVideoItem, "x" | "y" | "width" | "height">>
   shouldAbort?: () => boolean
 }
@@ -131,6 +131,7 @@ type EditorCanvasContextValue = {
   addRemoteVideo: (input: AddRemoteVideoInput) => Promise<string | null>
   selectItem: (id: string | null) => void
   updateVideoTransform: (id: string, patch: CanvasVideoTransformPatch) => void
+  updateVideoAppearance: (id: string, patch: CanvasVideoAppearancePatch) => void
   setVideoLocked: (id: string, locked: boolean) => void
   duplicateVideo: (id: string) => void
   deleteVideo: (id: string) => void
@@ -206,6 +207,7 @@ type EditorCanvasActionsContextValue = Pick<
   | "addRemoteVideo"
   | "selectItem"
   | "updateVideoTransform"
+  | "updateVideoAppearance"
   | "setVideoLocked"
   | "duplicateVideo"
   | "deleteVideo"
@@ -412,6 +414,29 @@ function createCanvasId() {
   }
 
   return `canvas-item-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+// Per-role appearance defaults. Camera defaults to a fully-rounded squircle
+// at maximum smoothing, which visually matches the prior elliptical sceneFunc
+// without needing a separate `cropShape` field. Screen and media start at
+// radius 0 with `cornerSmoothing = 0.6` (the macOS look) so users get an
+// already-correct curve the moment they nudge the radius slider.
+function createVideoAppearanceDefaults(
+  role: CanvasVideoRole,
+  size: CanvasSize
+): Pick<CanvasVideoItem, "cornerRadius" | "cornerSmoothing"> {
+  if (role === "camera") {
+    const radius = Math.max(0, Math.floor(Math.min(size.width, size.height) / 2))
+    return {
+      cornerRadius: radius,
+      cornerSmoothing: 1,
+    }
+  }
+
+  return {
+    cornerRadius: 0,
+    cornerSmoothing: 0.6,
+  }
 }
 
 function createTimelineClipId(videoId: string) {
@@ -1738,14 +1763,15 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           id,
           fileName: file.name,
           objectUrl,
+          fileSize: file.size,
           intrinsicWidth: metadata.width,
           intrinsicHeight: metadata.height,
           durationMs: metadata.durationMs,
           rotation: 0,
           locked: false,
-          cropShape: "rect",
           role: "media",
           ...placement,
+          ...createVideoAppearanceDefaults("media", placement),
         }
 
         setVideos((current) => {
@@ -1817,8 +1843,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       }
 
       const artboardSize = artboardRef.current
-      const cropShape: CanvasVideoCropShape =
-        input.cropShape ?? (input.role === "camera" ? "circle" : "rect")
 
       let placement: { x: number; y: number; width: number; height: number }
       if (input.role === "camera") {
@@ -1863,14 +1887,18 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         id: desiredId,
         fileName: input.fileName,
         objectUrl: input.url,
+        fileSize:
+          typeof input.fileSize === "number" && Number.isFinite(input.fileSize)
+            ? Math.max(0, input.fileSize)
+            : 0,
         intrinsicWidth: input.intrinsicWidth,
         intrinsicHeight: input.intrinsicHeight,
         durationMs,
         rotation: 0,
         locked: false,
-        cropShape,
         role,
         ...placement,
+        ...createVideoAppearanceDefaults(role, placement),
       }
 
       setVideos((current) => {
@@ -1988,6 +2016,38 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
             nextVideo.rotation !== video.rotation
 
           return didChange ? nextVideo : video
+        })
+
+        if (!didChange) return current
+
+        commitVideosRef(nextVideos)
+        return nextVideos
+      })
+    },
+    [commitVideosRef]
+  )
+
+  // Appearance updates (radius, smoothing) bypass the `locked` gate — locking
+  // only prevents geometry edits. Bail out early when every patched field
+  // already matches so the same slider value dragged at its current position
+  // never triggers a downstream redraw.
+  const updateVideoAppearance = useCallback(
+    (id: string, patch: CanvasVideoAppearancePatch) => {
+      setVideos((current) => {
+        let didChange = false
+        const nextVideos = current.map((video) => {
+          if (video.id !== id) return video
+
+          const nextVideo: CanvasVideoItem = { ...video, ...patch }
+          if (
+            nextVideo.cornerRadius === video.cornerRadius &&
+            nextVideo.cornerSmoothing === video.cornerSmoothing
+          ) {
+            return video
+          }
+
+          didChange = true
+          return nextVideo
         })
 
         if (!didChange) return current
@@ -2168,6 +2228,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       addRemoteVideo,
       selectItem,
       updateVideoTransform,
+      updateVideoAppearance,
       setVideoLocked,
       duplicateVideo,
       deleteVideo,
@@ -2184,6 +2245,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       addRemoteVideo,
       selectItem,
       updateVideoTransform,
+      updateVideoAppearance,
       setVideoLocked,
       duplicateVideo,
       deleteVideo,
@@ -2345,6 +2407,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         id: `${project.id}:screen`,
         url: screenAsset.fileUrl,
         fileName: screenAsset.fileName,
+        fileSize: screenAsset.fileSize,
         intrinsicWidth: screenAsset.width,
         intrinsicHeight: screenAsset.height,
         durationMs: screenAsset.durationMs,
@@ -2364,6 +2427,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         id: `${project.id}:camera`,
         url: cameraAsset.fileUrl,
         fileName: cameraAsset.fileName,
+        fileSize: cameraAsset.fileSize,
         intrinsicWidth: cameraAsset.width,
         intrinsicHeight: cameraAsset.height,
         durationMs: cameraAsset.durationMs,

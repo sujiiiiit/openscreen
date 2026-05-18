@@ -4,6 +4,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type RefObject,
@@ -16,82 +17,13 @@ import {
   VIDEO_NODE_NAME,
 } from "@/components/editor/canvas/canvas-node-constants"
 import { getVideoCoverCrop } from "@/components/editor/canvas/video-cover-crop"
+import {
+  clampSquircleRadius,
+  computeSquircleCornerParams,
+  tracePathOrRect,
+  type SquircleCornerParams,
+} from "@/lib/squircle"
 import type { CanvasVideoItem } from "@/types/editor-canvas"
-
-// Konva.Image does not natively support non-rectangular masking, but Shape's
-// sceneFunc/hitFunc props accept overrides. Replicating Konva.Image's draw
-// inside an elliptical clip lets the camera render and hit-test as a circle
-// while remaining a Konva.Image instance — the transformer and event code
-// still recognize it.
-function drawEllipticalVideo(context: Konva.Context, shape: Konva.Shape): void {
-  const image = (shape as Konva.Image).image()
-  const width = shape.width()
-  const height = shape.height()
-  if (!image || width <= 0 || height <= 0) return
-
-  context.beginPath()
-  context.ellipse(
-    width / 2,
-    height / 2,
-    width / 2,
-    height / 2,
-    0,
-    0,
-    Math.PI * 2
-  )
-  context.closePath()
-  context.fillStrokeShape(shape)
-  context.save()
-  context.beginPath()
-  context.ellipse(
-    width / 2,
-    height / 2,
-    width / 2,
-    height / 2,
-    0,
-    0,
-    Math.PI * 2
-  )
-  context.closePath()
-  context.clip()
-
-  const cropWidth = (shape as Konva.Image).cropWidth()
-  const cropHeight = (shape as Konva.Image).cropHeight()
-  if (cropWidth && cropHeight) {
-    context.drawImage(
-      image as CanvasImageSource,
-      (shape as Konva.Image).cropX(),
-      (shape as Konva.Image).cropY(),
-      cropWidth,
-      cropHeight,
-      0,
-      0,
-      width,
-      height
-    )
-  } else {
-    context.drawImage(image as CanvasImageSource, 0, 0, width, height)
-  }
-  context.restore()
-}
-
-function drawEllipticalHit(context: Konva.Context, shape: Konva.Shape): void {
-  const width = shape.width()
-  const height = shape.height()
-  if (width <= 0 || height <= 0) return
-  context.beginPath()
-  context.ellipse(
-    width / 2,
-    height / 2,
-    width / 2,
-    height / 2,
-    0,
-    0,
-    Math.PI * 2
-  )
-  context.closePath()
-  context.fillStrokeShape(shape)
-}
 
 // Videos stay as live HTMLVideoElement sources: no canvas cache, no transcoding,
 // and no intermediate bitmap resize. Zoom preserves available source detail, but
@@ -271,6 +203,85 @@ function CanvasVideoNodeComponent({
     [onNodeChange, video.id]
   )
 
+  // Squircle params are independent of width/height in principle, but the
+  // effective radius is clamped against the current box's shorter side so we
+  // recompute when geometry changes. The memo means steady-state playback
+  // never reruns the trig — only an actual radius / smoothing / size change
+  // does — and the same constants are reused across every decoded frame.
+  const squircleParams = useMemo<SquircleCornerParams | null>(() => {
+    if (video.cornerRadius <= 0) return null
+    const safeRadius = clampSquircleRadius(
+      video.width,
+      video.height,
+      video.cornerRadius
+    )
+    if (safeRadius <= 0) return null
+    return computeSquircleCornerParams(safeRadius, video.cornerSmoothing)
+  }, [
+    video.cornerRadius,
+    video.cornerSmoothing,
+    video.width,
+    video.height,
+  ])
+
+  // The custom sceneFunc clips the video bitmap to the squircle so the
+  // rounded corners disappear. When `cornerRadius === 0` the trace collapses
+  // to `ctx.rect(0,0,w,h)` and clipping is skipped entirely — the entire
+  // path is one canvas call and effectively free.
+  const drawSquircleVideo = useCallback(
+    (context: Konva.Context, shape: Konva.Shape) => {
+      const image = (shape as Konva.Image).image()
+      const width = shape.width()
+      const height = shape.height()
+      if (!image || width <= 0 || height <= 0) return
+
+      context.save()
+      context.beginPath()
+      tracePathOrRect(context, width, height, squircleParams)
+      context.closePath()
+      // Only clip when we actually rounded the corners. A full-rect clip is
+      // a no-op visually but still costs the canvas a state push — skip it.
+      if (squircleParams !== null) {
+        context.clip()
+      }
+
+      const konvaImage = shape as Konva.Image
+      const cropWidth = konvaImage.cropWidth()
+      const cropHeight = konvaImage.cropHeight()
+      if (cropWidth && cropHeight) {
+        context.drawImage(
+          image as CanvasImageSource,
+          konvaImage.cropX(),
+          konvaImage.cropY(),
+          cropWidth,
+          cropHeight,
+          0,
+          0,
+          width,
+          height
+        )
+      } else {
+        context.drawImage(image as CanvasImageSource, 0, 0, width, height)
+      }
+      context.restore()
+    },
+    [squircleParams]
+  )
+
+  const drawSquircleHit = useCallback(
+    (context: Konva.Context, shape: Konva.Shape) => {
+      const width = shape.width()
+      const height = shape.height()
+      if (width <= 0 || height <= 0) return
+
+      context.beginPath()
+      tracePathOrRect(context, width, height, squircleParams)
+      context.closePath()
+      context.fillStrokeShape(shape)
+    },
+    [squircleParams]
+  )
+
   if (!isVideoReady) return null
 
   const coverCrop = getVideoCoverCrop(
@@ -284,8 +295,10 @@ function CanvasVideoNodeComponent({
     }
   )
 
-  const isCircle = video.cropShape === "circle"
-
+  // We always go through the custom sceneFunc so the same code path handles
+  // radius = 0 (plain rect) and radius > 0 (squircle). This keeps the draw
+  // pipeline identical for every video and lets the screen → camera → media
+  // mix share one render path.
   return (
     <KonvaImage
       ref={setImageNode}
@@ -303,8 +316,8 @@ function CanvasVideoNodeComponent({
       rotation={video.rotation}
       draggable={!isPanMode && !video.locked}
       perfectDrawEnabled={false}
-      sceneFunc={isCircle ? drawEllipticalVideo : undefined}
-      hitFunc={isCircle ? drawEllipticalHit : undefined}
+      sceneFunc={drawSquircleVideo}
+      hitFunc={drawSquircleHit}
     />
   )
 }

@@ -36,14 +36,14 @@ export type ViewTransform = {
   y: number
 }
 
-export type CanvasVideoCropShape = "rect" | "circle"
-
 export type CanvasVideoRole = "screen" | "camera" | "media"
 
 export type CanvasVideoItem = {
   id: string
   fileName: string
   objectUrl: string
+  /** Source file size in bytes. `0` when unknown (e.g. remote stream). */
+  fileSize: number
   intrinsicWidth: number
   intrinsicHeight: number
   durationMs: number
@@ -53,12 +53,17 @@ export type CanvasVideoItem = {
   height: number
   rotation: number
   locked: boolean
-  cropShape: CanvasVideoCropShape
   role: CanvasVideoRole
+  cornerRadius: number
+  cornerSmoothing: number
 }
 
 export type CanvasVideoTransformPatch = Partial<
   Pick<CanvasVideoItem, "x" | "y" | "width" | "height" | "rotation">
+>
+
+export type CanvasVideoAppearancePatch = Partial<
+  Pick<CanvasVideoItem, "cornerRadius" | "cornerSmoothing">
 >
 
 export type CanvasTimelineClip = {

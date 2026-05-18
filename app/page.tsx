@@ -10,6 +10,7 @@ import { Titlebar } from "@/components/ui/titlebar"
 import { EditorCanvasProvider } from "@/components/editor/canvas/provider"
 import { ProjectProvider } from "@/components/editor/project/provider"
 import { SidebarTabsProvider } from "@/components/editor/sidebar/tabs-provider"
+import { SidebarSelectionBridge } from "@/components/editor/sidebar/selection-bridge"
 import EditorSidebar from "@/components/editor/sidebar"
 import EditorMain from "@/components/editor/main"
 import EditorFooter from "@/components/editor/footer"
@@ -20,6 +21,7 @@ export default function Page() {
       <ProjectProvider>
         <EditorCanvasProvider>
           <SidebarTabsProvider>
+            <SidebarSelectionBridge />
             <div className="flex h-dvh w-dvw flex-col overflow-hidden">
               <Titlebar />
               <div className="min-h-0 flex-1">

@@ -8,8 +8,6 @@ import {
   ArrowLeft01Icon,
   ArrowRight01Icon,
   BackgroundIcon,
-  EaseInOutIcon,
-  FolderLibraryIcon,
   Video01Icon,
   VolumeHighIcon,
 } from "@hugeicons/core-free-icons"
@@ -17,7 +15,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 import { CursorIcon, SubtitleIcon } from "@/components/ui/icons"
 import { BackgroundPanel } from "@/components/editor/background-panel"
-import { AssetsPanel } from "@/components/editor/assets-panel"
+import { VideoPanel } from "@/components/editor/video-panel"
 import { useSidebarTabsContext } from "@/components/editor/sidebar/tabs-provider"
 import {
   Tooltip,
@@ -67,12 +65,7 @@ const TAB_ITEMS: TabItem[] = [
     id: "video",
     label: "Video",
     icon: <HugeiconsIcon icon={Video01Icon} className="size-4" />,
-    content: (
-      <TabSection
-        title="Video Settings"
-        description="Configure video appearance including border radius, shadow, and other visual properties."
-      />
-    ),
+    content: <VideoPanel />,
   },
   {
     id: "subtitle",
@@ -95,23 +88,6 @@ const TAB_ITEMS: TabItem[] = [
         description="Balance input devices, noise suppression, and music beds."
       />
     ),
-  },
-  {
-    id: "transition",
-    label: "Transition",
-    icon: <HugeiconsIcon icon={EaseInOutIcon} className="size-4" />,
-    content: (
-      <TabSection
-        title="Transitions"
-        description="Control timing, easing, and presets across scenes."
-      />
-    ),
-  },
-  {
-    id: "assets",
-    label: "Assets",
-    icon: <HugeiconsIcon icon={FolderLibraryIcon} className="size-4" />,
-    content: <AssetsPanel />,
   },
 ]
 

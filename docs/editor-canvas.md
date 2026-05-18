@@ -36,6 +36,8 @@ Use these names in code review, docs, comments, and new implementation plans. Th
 | Frames going forth and back      | Stale seek redraw                 | An older completed media seek repainting the canvas after a newer committed playhead seek; guarded by committed-time redraw checks.   |
 | Cut video edge                   | Source trim                       | Non-destructive `sourceIn` / `sourceOut` adjustment created by resizing a timeline clip.                                              |
 | Frozen clip frame                | Inactive clip visibility          | Playback sync rule that hides a canvas media node outside its active clip range instead of holding an edge frame.                     |
+| Border radius / rounded corners  | Corner radius (squircle)          | Per-node corner radius in artboard pixels, drawn as an iOS / macOS-style continuous-corner squircle.                                  |
+| iOS / macOS smooth corners       | Corner smoothing                  | Per-node 0–1 smoothing factor; 0 = circular arc, 0.6 = macOS look, 1 = fully continuous-curvature.                                    |
 
 ## Current Scope
 
@@ -56,6 +58,8 @@ Implemented:
 - High-zoom artboard pixel grid.
 - Snapping with Figma-style alignment guides during drag and resize, plus keyboard arrow nudging with grid snap.
 - Workspace theme color token: `editor-workspace` = `#1e1e1e`.
+- Per-node video appearance via the Video sidebar tab: squircle corner radius + smoothing.
+- Auto-routing of canvas / timeline selection to the Video tab via a `SidebarSelectionBridge`.
 
 Not implemented yet:
 
@@ -85,7 +89,10 @@ Not implemented yet:
 | `components/editor/canvas/provider.tsx`                   | Editor canvas state, video import metadata, artboard state, viewport size, view transform, and actions.                                                         |
 | `components/editor/canvas/editor-workspace.tsx`           | Konva stage shell, layer composition, viewport sizing, zoom, pan, and keyboard shortcuts.                                                                       |
 | `components/editor/canvas/artboard-pixel-grid.tsx`        | Custom non-listening pixel grid renderer for high zoom inside the artboard.                                                                                     |
-| `components/editor/canvas/canvas-video-node.tsx`          | Live video node rendering, frame callbacks, object URL playback, cover crop attrs, and Konva node registration.                                                 |
+| `components/editor/canvas/canvas-video-node.tsx`          | Live video node rendering, frame callbacks, object URL playback, cover crop attrs, squircle sceneFunc, and Konva node registration.                             |
+| `components/editor/video-panel.tsx`                       | Video tab UI: file-card list of every video on the canvas, with the appearance controls (corner radius + smoothing) shown when a card is selected.              |
+| `components/editor/sidebar/selection-bridge.tsx`          | Subscribes to canvas selection and switches the sidebar to the Video tab + opens the sidebar whenever a video is selected.                                      |
+| `lib/squircle.ts`                                         | Figma-style continuous-corner math. `computeSquircleCornerParams(radius, smoothing)` and `traceSquirclePath(ctx, w, h, params)` for allocation-free hot path.   |
 | `components/editor/canvas/selected-video-transformer.tsx` | Selected node transformer wiring, handle sizing, rotation snaps, and transform constraints.                                                                     |
 | `components/editor/canvas/selection-toolbar.tsx`          | Floating DOM selection action bar for lock, duplicate, and delete.                                                                                              |
 | `components/editor/canvas/artboard-preset-dropdown.tsx`   | Artboard preset dropdown in the footer.                                                                                                                         |
@@ -153,7 +160,7 @@ Layer split:
 
 Important types:
 
-- `CanvasVideoItem`: `id`, `fileName`, `objectUrl`, `intrinsicWidth`, `intrinsicHeight`, `durationMs`, `x`, `y`, `width`, `height`, `rotation`, `locked`.
+- `CanvasVideoItem`: `id`, `fileName`, `objectUrl`, `fileSize`, `intrinsicWidth`, `intrinsicHeight`, `durationMs`, `x`, `y`, `width`, `height`, `rotation`, `locked`, `role`, plus per-node appearance fields `cornerRadius`, `cornerSmoothing`.
 - `CanvasTimelineClip`: `id`, `videoId`, `start`, `end`, `sourceIn`, `sourceOut`.
 - `EditorArtboard`: `presetId`, `width`, `height`.
 - `ViewTransform`: `scale`, `x`, `y`.
@@ -164,6 +171,7 @@ Important actions:
 - `addVideoFile(file)`
 - `selectItem(id | null)`
 - `updateVideoTransform(id, patch)`
+- `updateVideoAppearance(id, patch)` — partial update covering `cornerRadius` and `cornerSmoothing`. Bypasses the `locked` gate (locking only blocks geometry).
 - `setVideoLocked(id, locked)`
 - `duplicateVideo(id)`
 - `deleteVideo(id)`
@@ -286,6 +294,64 @@ Quality notes:
 - We do not cache video nodes, because caching would freeze or resample moving video.
 - We keep image smoothing behavior natural for regular video. Turning smoothing off is more appropriate for pixel art, not normal video.
 - Zoom can reveal source detail, but no renderer can invent detail beyond the video file's actual pixels.
+
+## Video Appearance
+
+Every video node carries per-node appearance state on `CanvasVideoItem`. There is no separate `cropShape` field anymore — circular camera previews are expressed as a max-radius, max-smoothing squircle so all three roles share one render path.
+
+State, per video:
+
+- `cornerRadius` — artboard pixels. `0` means a sharp rectangle.
+- `cornerSmoothing` — `0..1`. `0` = circular arc (CSS `border-radius`). `0.6` = macOS look. `1` = fully continuous-curvature squircle.
+
+Defaults per role at creation:
+
+- `screen`, `media`: `cornerRadius = 0`, `cornerSmoothing = 0.6`.
+- `camera`: `cornerRadius = floor(min(intrinsicW, intrinsicH) / 2)`, `cornerSmoothing = 1`. Renders as a perfect circle by default.
+
+Squircle math (`lib/squircle.ts`):
+
+- `computeSquircleCornerParams(radius, smoothing)` returns the Figma-derived per-corner constants `{ p, a, b, c, d, angleAlpha, arcSweep, radius }`. Independent of width and height, so the same params survive resize without recomputation.
+- `traceSquirclePath(ctx, width, height, params)` walks the four corners, each composed of one cubic Bézier ramp, one circular arc of `arcSweep` radians via `ctx.arc()`, and a second cubic Bézier back onto the next edge. No allocations, no temporary objects.
+- `clampSquircleRadius(width, height, radius)` clamps to `min(width, height) / 2` so the path can never self-intersect.
+- `tracePathOrRect(ctx, width, height, params | null)` collapses to a single `ctx.rect()` call when `params === null` (radius = 0), keeping the radius-0 case effectively free.
+
+`CanvasVideoNode` sceneFunc:
+
+1. If `squircleParams !== null`: trace the silhouette and call `context.clip()`. When `cornerRadius === 0` the trace collapses to a single `ctx.rect()` call and clipping is skipped entirely.
+2. `drawImage` the live `HTMLVideoElement` with the existing object-fit-cover crop attrs.
+
+The `hitFunc` uses the same squircle path so clicks in the rounded-off corners pass through to whatever sits underneath — what the user sees is what they can click.
+
+Tab routing:
+
+- `SidebarSelectionBridge` mounts inside both `EditorCanvasProvider` and `SidebarTabsProvider`. It is render-less and reacts only to `selectedItemId` changes.
+- On selection transition `null → id` or `idA → idB`, it routes to the Video tab and opens the sidebar.
+- The `useSidebarTabs` reducer toggles `isOpen` when `selectTab` is called with the already-active tab; the bridge calls `open()` instead when `activeTab === "video"` to avoid an accidental collapse.
+- Deselection (`id → null`) is deliberately ignored — the user keeps whatever panel they were last working in.
+
+Panel layout:
+
+- The Video panel has two mutually-exclusive views driven entirely by `selectedItemId`. It uses `Tabs` from `@/components/ui/tabs` as a controlled motion container only — there is no visible tab bar; the active value is fully derived from selection, with no `onValueChange` so nothing inside the Tabs subtree can toggle the view on its own:
+  - **List view** (no selection): heading + one-line description + a single-column stack of `Squircle` file cards, one per video on the canvas. Each card shows the `FileEmpty02` icon on the left and the file name + file size stacked on the right (formatted via a local `formatFileSize` helper — no monospace digit treatment). Tapping a card calls `selectItem(id)`, which is the single source of truth: canvas Transformer, timeline clip highlight, and the panel itself all derive from it.
+  - **Settings view** (video selected): replaces the heading with a `Button variant="link"` "← Videos" affordance at the same `text-sm font-semibold` slot, with its own one-line description below. Clicking it calls `selectItem(null)`, returning the user to list view and clearing the canvas / timeline selection in the same hop. Beneath the heading sit the appearance controls (Corners — radius + smoothing).
+- When no videos exist yet, list view shows an inline `Squircle` hint pointing at the Background tab.
+- The settings-view subtree is keyed on the video id so internal refs reset cleanly across selections.
+- `CanvasVideoItem.fileSize` is populated from `File.size` on local uploads and `ProjectAsset.fileSize` on hydration, and falls back to `0` ("Unknown size") for remote streams without a known byte count.
+
+Performance posture:
+
+- Squircle params are memoized in `CanvasVideoNode` on `(cornerRadius, cornerSmoothing, width, height)`. Steady-state playback and pan/zoom never recompute trig.
+- The hot-path trace is allocation-free and issues a constant ~17 canvas calls per node per draw (4 lineTo + 8 bezierCurveTo + 4 arc + 1 moveTo). The non-rounded fast-path is one `ctx.rect()` call.
+- Rounded clipping is only enabled when `cornerRadius > 0`; otherwise the sceneFunc skips `context.clip()` entirely, saving a canvas state push per node per frame.
+- The `updateVideoAppearance` action bails out when every patched field equals the current value, so a slider dragged at its committed position never triggers a downstream React re-render or Konva redraw.
+- The Transformer border and hover outline remain rectangular (bounding box). Both stay imperative and pooled; squircle clipping does not change that contract.
+
+Known limitations / v2 work:
+
+- Per-corner radii (TL/TR/BR/BL). The data model is single-radius today; the storage shape can grow to `number | [tl, tr, br, bl]` without a breaking change at the type-level boundary.
+- During a Transformer side-handle drag the corners visually stretch because the path is drawn at base `width`/`height` and Konva's scale is applied on top. After `transformend` the radius snaps back to absolute artboard pixels. Acceptable for v1 per the agreed unit ("absolute artboard px").
+- A rounded hover outline / rounded transformer border would require a custom shape replacing Konva's built-in transformer border; left out for v1 to keep the bounding-box hit area predictable.
 
 ## Timeline And Playback
 
@@ -638,6 +704,31 @@ Recommended next solution:
 - Draw it in viewport/workspace coordinates with adaptive spacing.
 - Keep it distinct from the artboard pixel grid.
 
+### Squircle Corners (iOS / macOS)
+
+Problem:
+
+- The editor needs corner-radius support for video nodes, but a plain CSS-style `border-radius` shows the elbow at large radii. The user explicitly wanted iOS / macOS-style continuous corners so the seam between the straight edge and the corner is invisible.
+- Camera previews already rendered as a perfect circle via a separate elliptical `sceneFunc` and a `cropShape` field. Maintaining two render paths blocked a unified appearance model and any future per-corner radii.
+
+Decision:
+
+- Drop `cropShape` entirely. Express a perfect circle as a max-radius (`min(w,h) / 2`), max-smoothing (`1.0`) squircle — the visual result is identical and the render path collapses to a single sceneFunc for all roles.
+- Use the Figma-derived continuous-corner algorithm with two knobs: `cornerRadius` (artboard px) and `cornerSmoothing` (0–1). Smoothing defaults: camera = `1.0`, screen / media = `0.6` (the macOS look).
+- Trace the path on the Konva.Context directly (no `Path2D`) and feed it into `ctx.clip()` so the image draw inside the sceneFunc takes the squircle silhouette.
+- Memoize the per-corner constants on `(radius, smoothing, width, height)`. The constants are independent of width / height in principle, but the clamped effective radius depends on the box's shorter side.
+
+Result:
+
+- One sceneFunc handles `screen`, `camera`, and `media`. No `cropShape`, no separate elliptical drawing.
+- Radius-0 fast path is a single `ctx.rect()` call; clipping is skipped entirely when no rounding is in effect.
+- Visually matches macOS app-window / app-icon corners at `cornerSmoothing = 0.6`, and matches the prior elliptical camera at `cornerRadius = min(w,h)/2`, `cornerSmoothing = 1`.
+
+References:
+
+- Figma, "Desperately Seeking Squircles".
+- Apple HIG continuous corners (iOS / macOS app icons).
+
 ### Canvas Module Refactor
 
 Problem:
@@ -668,6 +759,8 @@ Result:
 - Figma layout grids: https://help.figma.com/hc/en-us/articles/360040450513-Create-layout-grids-with-grids-columns-and-rows
 - MDN `HTMLVideoElement.requestVideoFrameCallback()`: https://developer.mozilla.org/docs/Web/API/HTMLVideoElement/requestVideoFrameCallback
 - MDN `CanvasRenderingContext2D.imageSmoothingEnabled`: https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/imageSmoothingEnabled
+- Figma blog, "Desperately Seeking Squircles": https://www.figma.com/blog/desperately-seeking-squircles/
+- Apple Human Interface Guidelines, continuous corners (app icons): https://developer.apple.com/design/human-interface-guidelines/app-icons
 
 ## Verification Used So Far
 
