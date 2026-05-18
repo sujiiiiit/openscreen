@@ -4,33 +4,13 @@ import { Shape } from "react-konva"
 import type Konva from "konva"
 
 import { PIXEL_GRID_SETTINGS } from "@/lib/editor-canvas"
-import type { CanvasSize, ViewTransform } from "@/types/editor-canvas"
+import type { CanvasSize } from "@/types/editor-canvas"
 
 type ArtboardPixelGridProps = {
   artboard: CanvasSize
-  viewportSize: CanvasSize
-  viewTransform: ViewTransform
 }
 
-export function ArtboardPixelGrid({
-  artboard,
-  viewportSize,
-  viewTransform,
-}: ArtboardPixelGridProps) {
-  const {
-    color,
-    enabled,
-    majorColor,
-    majorOpacity,
-    majorUnit,
-    opacity,
-    unit,
-    visibleFromScale,
-  } = PIXEL_GRID_SETTINGS
-  const isVisible = enabled && viewTransform.scale >= visibleFromScale
-
-  if (!isVisible) return null
-
+export function ArtboardPixelGrid({ artboard }: ArtboardPixelGridProps) {
   return (
     <Shape
       x={0}
@@ -39,20 +19,35 @@ export function ArtboardPixelGrid({
       height={artboard.height}
       listening={false}
       perfectDrawEnabled={false}
-      sceneFunc={(context) => {
-        const scale = viewTransform.scale
-        const visibleLeft = Math.max(0, -viewTransform.x / scale)
-        const visibleTop = Math.max(0, -viewTransform.y / scale)
+      shadowForStrokeEnabled={false}
+      transformsEnabled="position"
+      sceneFunc={(context, shape) => {
+        const stage = shape.getStage()
+        if (!stage) return
+
+        const scale = stage.scaleX()
+        if (scale < PIXEL_GRID_SETTINGS.visibleFromScale) return
+
+        const stageX = stage.x()
+        const stageY = stage.y()
+        const stageWidth = stage.width()
+        const stageHeight = stage.height()
+
+        const visibleLeft = Math.max(0, -stageX / scale)
+        const visibleTop = Math.max(0, -stageY / scale)
         const visibleRight = Math.min(
           artboard.width,
-          (viewportSize.width - viewTransform.x) / scale
+          (stageWidth - stageX) / scale
         )
         const visibleBottom = Math.min(
           artboard.height,
-          (viewportSize.height - viewTransform.y) / scale
+          (stageHeight - stageY) / scale
         )
 
         if (visibleRight <= visibleLeft || visibleBottom <= visibleTop) return
+
+        const { color, majorColor, majorOpacity, majorUnit, opacity, unit } =
+          PIXEL_GRID_SETTINGS
 
         context.save()
         context.beginPath()

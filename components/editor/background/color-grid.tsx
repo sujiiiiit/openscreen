@@ -11,6 +11,10 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
+import {
+  useEditorCanvasActions,
+  useEditorCanvasArtboard,
+} from "@/components/editor/canvas/provider"
 
 const COLOR_PRESETS = [
   { value: "#ff6b6b", label: "Red" },
@@ -23,6 +27,30 @@ const COLOR_PRESETS = [
 ] as const
 
 const SHADE_STEPS = 10
+
+function shadesFor(baseHex: string): string[] {
+  try {
+    const base = Color(baseHex)
+    const [h, s] = base.hsl().array()
+    return Array.from({ length: SHADE_STEPS }, (_, index) => {
+      const lightness = 95 - index * 9
+      return Color.hsl(h, s, lightness).hex()
+    })
+  } catch {
+    return []
+  }
+}
+
+function findPresetForColor(target: string): string {
+  const lower = target.toLowerCase()
+  for (const preset of COLOR_PRESETS) {
+    if (preset.value.toLowerCase() === lower) return preset.value
+    if (shadesFor(preset.value).some((shade) => shade.toLowerCase() === lower)) {
+      return preset.value
+    }
+  }
+  return COLOR_PRESETS[0].value
+}
 
 function CheckBadge({ className }: { className?: string }) {
   return (
@@ -50,20 +78,44 @@ function CheckBadge({ className }: { className?: string }) {
 
 export function ColorGrid() {
   const groupId = useId()
-  const [selected, setSelected] = useState<string>(COLOR_PRESETS[0].value)
+  const { artboard } = useEditorCanvasArtboard()
+  const { setArtboardBackground } = useEditorCanvasActions()
 
-  const shades = useMemo(() => {
-    try {
-      const base = Color(selected)
-      const [h, s] = base.hsl().array()
-      return Array.from({ length: SHADE_STEPS }, (_, index) => {
-        const lightness = 95 - index * 9 // 95 → 14
-        return Color.hsl(h, s, lightness).hex()
-      })
-    } catch {
-      return []
+  const selected: string | null =
+    artboard.background?.type === "color" ? artboard.background.value : null
+
+  // The base hue feeds the shade strip. Local state so clicking a shade doesn't
+  // re-derive a new strip (which would hide the check on the freshly-clicked
+  // shade). Only preset clicks change it. Lazy initializer matches the saved
+  // color to whichever preset owns it (directly, or via that preset's strip).
+  const [baseColor, setBaseColor] = useState<string>(() =>
+    selected ? findPresetForColor(selected) : COLOR_PRESETS[0].value
+  )
+
+  const handlePresetSelect = (value: string) => {
+    setBaseColor(value)
+    if (
+      artboard.background?.type === "color" &&
+      artboard.background.value.toLowerCase() === value.toLowerCase()
+    ) {
+      setArtboardBackground(null)
+      return
     }
-  }, [selected])
+    setArtboardBackground({ type: "color", value })
+  }
+
+  const handleShadeSelect = (value: string) => {
+    if (
+      artboard.background?.type === "color" &&
+      artboard.background.value.toLowerCase() === value.toLowerCase()
+    ) {
+      setArtboardBackground(null)
+      return
+    }
+    setArtboardBackground({ type: "color", value })
+  }
+
+  const shades = useMemo(() => shadesFor(baseColor), [baseColor])
 
   return (
     <TooltipProvider>
@@ -75,6 +127,7 @@ export function ColorGrid() {
         >
           {COLOR_PRESETS.map((color) => {
             const isSelected =
+              selected !== null &&
               selected.toLowerCase() === color.value.toLowerCase()
             const inputId = `${groupId}-${color.value}`
             return (
@@ -92,7 +145,7 @@ export function ColorGrid() {
                         name={groupId}
                         value={color.value}
                         checked={isSelected}
-                        onChange={() => setSelected(color.value)}
+                        onChange={() => handlePresetSelect(color.value)}
                         className="sr-only"
                       />
                       <Squircle
@@ -136,6 +189,7 @@ export function ColorGrid() {
           >
             {shades.map((shade) => {
               const isSelected =
+                selected !== null &&
                 selected.toLowerCase() === shade.toLowerCase()
               return (
                 <Tooltip key={shade}>
@@ -144,7 +198,7 @@ export function ColorGrid() {
                       <button
                         {...props}
                         type="button"
-                        onClick={() => setSelected(shade)}
+                        onClick={() => handleShadeSelect(shade)}
                         className="relative flex-1 cursor-pointer outline-none"
                         style={{ backgroundColor: shade }}
                       >

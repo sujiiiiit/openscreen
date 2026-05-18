@@ -18,14 +18,14 @@ import { cn } from "@/lib/utils"
 import { CursorIcon, SubtitleIcon } from "@/components/ui/icons"
 import { BackgroundPanel } from "@/components/editor/background-panel"
 import { AssetsPanel } from "@/components/editor/assets-panel"
-import { useSidebarTabs } from "@/hooks/use-sidebar-tabs"
+import { useSidebarTabsContext } from "@/components/editor/sidebar/tabs-provider"
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 
-import { type TabItem, type TabId } from "@/types/editor-tabs"
+import { type TabItem } from "@/types/editor-tabs"
 
 function TabSection({
   title,
@@ -117,9 +117,7 @@ const TAB_ITEMS: TabItem[] = [
 
 export default function EditorSidebar() {
   const tabs = useMemo(() => TAB_ITEMS, [])
-  const { activeTab, selectTab, toggle, isOpen } = useSidebarTabs<TabId>(
-    tabs[0].id
-  )
+  const { activeTab, selectTab, toggle, isOpen } = useSidebarTabsContext()
   const activeIndex = tabs.findIndex((item) => item.id === activeTab)
   const safeActiveIndex = activeIndex === -1 ? 0 : activeIndex
 

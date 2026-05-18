@@ -8,35 +8,32 @@ import { ArrowDown01Icon } from "@hugeicons/core-free-icons"
 
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import {
+  useEditorCanvasActions,
+  useEditorCanvasArtboard,
+} from "@/components/editor/canvas/provider"
+import {
+  WALLPAPER_IDS,
+  getWallpaperThumbUrl,
+  isWallpaperId,
+  type WallpaperId,
+} from "@/lib/wallpapers"
 
 const COLLAPSED_HEIGHT = 130
 
-const WALLPAPERS = [
-  "ipad-17-dark",
-  "ipad-17-light",
-  "sequoia-blue-orange",
-  "sequoia-blue",
-  "sonoma-clouds",
-  "sonoma-dark",
-  "sonoma-evening",
-  "sonoma-from-above",
-  "sonoma-horizon",
-  "sonoma-light",
-  "sonoma-river",
-  "tahoe-dark",
-  "tahoe-light",
-  "ventura-dark",
-  "ventura-semi-dark",
-  "ventura",
-] as const
-
-type WallpaperId = (typeof WALLPAPERS)[number]
-
-const THUMB_PATH = (id: WallpaperId) => `/assets/placeholder/${id}.jpg`
-
 export function WallpaperGrid() {
   const groupId = useId()
-  const [selected, setSelected] = useState<WallpaperId | null>(null)
+  const { artboard } = useEditorCanvasArtboard()
+  const { setArtboardBackground } = useEditorCanvasActions()
+
+  const wallpaperBackground =
+    artboard.background?.type === "wallpaper" ? artboard.background : null
+  const selected: WallpaperId | null =
+    wallpaperBackground && isWallpaperId(wallpaperBackground.value)
+      ? wallpaperBackground.value
+      : null
+  const currentBlurRadius = wallpaperBackground?.blurRadius
+
   const [isOpen, setIsOpen] = useState(false)
   const [contentHeight, setContentHeight] = useState(COLLAPSED_HEIGHT)
   const contentRef = useRef<HTMLDivElement | null>(null)
@@ -46,6 +43,18 @@ export function WallpaperGrid() {
     if (!node) return
     setContentHeight(isOpen ? node.scrollHeight : COLLAPSED_HEIGHT)
   }, [isOpen])
+
+  const handleSelect = (id: WallpaperId) => {
+    if (selected === id) {
+      setArtboardBackground(null)
+      return
+    }
+    setArtboardBackground({
+      type: "wallpaper",
+      value: id,
+      blurRadius: currentBlurRadius,
+    })
+  }
 
   return (
     <div className="flex flex-col gap-3">
@@ -59,67 +68,67 @@ export function WallpaperGrid() {
           aria-label="Wallpaper"
           className="grid grid-cols-5 gap-2"
         >
-      {WALLPAPERS.map((id) => {
-        const isSelected = id === selected
-        const inputId = `${groupId}-${id}`
-        return (
-          <label
-            key={id}
-            htmlFor={inputId}
-            className="block cursor-pointer outline-none"
-          >
-            <input
-              id={inputId}
-              type="radio"
-              name={groupId}
-              value={id}
-              checked={isSelected}
-              onChange={() => setSelected(id)}
-              className="sr-only"
-            />
-            <Squircle
-              cornerRadius={15}
-              cornerSmoothing={2}
-              className="relative aspect-square w-full overflow-hidden"
-            >
-              <Image
-                src={THUMB_PATH(id)}
-                alt={id}
-                fill
-                sizes="80px"
-                className="object-cover"
-              />
-              <span
-                className={cn(
-                  "absolute inset-0 bg-black/30 transition-opacity",
-                  isSelected ? "opacity-100" : "opacity-0"
-                )}
-              />
-              <span
-                className={cn(
-                  "absolute inset-0 z-10 flex items-center justify-center transition-opacity",
-                  isSelected ? "opacity-100" : "opacity-0"
-                )}
+          {WALLPAPER_IDS.map((id) => {
+            const isSelected = id === selected
+            const inputId = `${groupId}-${id}`
+            return (
+              <label
+                key={id}
+                htmlFor={inputId}
+                className="block cursor-pointer outline-none"
               >
-                <span className="flex size-5 items-center justify-center rounded-full bg-white text-primary-active">
-                  <svg
-                    viewBox="0 0 20 20"
-                    fill="currentColor"
-                    className="size-3.5"
-                    aria-hidden="true"
+                <input
+                  id={inputId}
+                  type="radio"
+                  name={groupId}
+                  value={id}
+                  checked={isSelected}
+                  onChange={() => handleSelect(id)}
+                  className="sr-only"
+                />
+                <Squircle
+                  cornerRadius={15}
+                  cornerSmoothing={2}
+                  className="relative aspect-square w-full overflow-hidden"
+                >
+                  <Image
+                    src={getWallpaperThumbUrl(id)}
+                    alt={id}
+                    fill
+                    sizes="80px"
+                    className="object-cover"
+                  />
+                  <span
+                    className={cn(
+                      "absolute inset-0 bg-black/30 transition-opacity",
+                      isSelected ? "opacity-100" : "opacity-0"
+                    )}
+                  />
+                  <span
+                    className={cn(
+                      "absolute inset-0 z-10 flex items-center justify-center transition-opacity",
+                      isSelected ? "opacity-100" : "opacity-0"
+                    )}
                   >
-                    <path
-                      fillRule="evenodd"
-                      clipRule="evenodd"
-                      d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                    />
-                  </svg>
-                </span>
-              </span>
-            </Squircle>
-          </label>
-        )
-      })}
+                    <span className="flex size-5 items-center justify-center rounded-full bg-white text-primary-active">
+                      <svg
+                        viewBox="0 0 20 20"
+                        fill="currentColor"
+                        className="size-3.5"
+                        aria-hidden="true"
+                      >
+                        <path
+                          fillRule="evenodd"
+                          clipRule="evenodd"
+                          d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                        />
+                      </svg>
+                    </span>
+                  </span>
+                </Squircle>
+              </label>
+            )
+          })}
         </div>
         <div
           aria-hidden="true"

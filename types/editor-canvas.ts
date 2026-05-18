@@ -5,9 +5,17 @@ export type CanvasSize = {
   height: number
 }
 
+export type ArtboardBackground =
+  | { type: "wallpaper"; value: string; blurRadius?: number }
+  | { type: "color"; value: string }
+
 export type EditorArtboard = CanvasSize & {
   presetId: ArtboardPresetId
+  background: ArtboardBackground | null
+  grain: number
 }
+
+export const ARTBOARD_SELECTION_ID = "__artboard__"
 
 export type PixelGridSettings = {
   enabled: boolean

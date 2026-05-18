@@ -12,6 +12,8 @@ import {
 import Konva from "konva"
 import { Group, Layer, Rect, Stage } from "react-konva"
 
+import { ArtboardBackground } from "@/components/editor/canvas/artboard-background"
+import { ArtboardGrain } from "@/components/editor/canvas/artboard-grain"
 import { ArtboardPixelGrid } from "@/components/editor/canvas/artboard-pixel-grid"
 import { CanvasVideoNode } from "@/components/editor/canvas/canvas-video-node"
 import {
@@ -57,11 +59,13 @@ import {
   viewportArtboardAABB,
   type SnapCache,
 } from "@/lib/editor-canvas-snap"
-import type {
-  CanvasVideoItem,
-  EditorArtboard,
-  ViewTransform,
+import {
+  ARTBOARD_SELECTION_ID,
+  type CanvasVideoItem,
+  type EditorArtboard,
+  type ViewTransform,
 } from "@/types/editor-canvas"
+import { useSidebarTabsContext } from "@/components/editor/sidebar/tabs-provider"
 
 const SELECTION_TOOLBAR_GAP = 18
 const SELECTION_TOOLBAR_VIEWPORT_MARGIN = 12
@@ -171,8 +175,10 @@ export default function EditorWorkspace() {
   const stageRef = useRef<Konva.Stage | null>(null)
   const contentLayerRef = useRef<Konva.Layer | null>(null)
   const overlayLayerRef = useRef<Konva.Layer | null>(null)
+  const artboardBackdropRef = useRef<HTMLDivElement | null>(null)
   const selectionToolbarRef = useRef<HTMLDivElement | null>(null)
   const rotationReadoutRef = useRef<HTMLDivElement | null>(null)
+  const lastAppliedTransformRef = useRef<ViewTransform | null>(null)
   const viewTransformRef = useRef<ViewTransform>({ scale: 1, x: 0, y: 0 })
   const viewportSizeRef = useRef({ width: 0, height: 0 })
   const toolbarSizeRef = useRef(DEFAULT_SELECTION_TOOLBAR_SIZE)
@@ -220,6 +226,8 @@ export default function EditorWorkspace() {
     registerTimelineVideoElement,
     onTimelineVideoSeeked,
   } = useEditorCanvasTimelineActions()
+  const { selectTab: selectSidebarTab, open: openSidebar } =
+    useSidebarTabsContext()
   const selectedVideoIsTimelineVisible =
     selectedItemId !== null && timelineVisibleVideoIds.has(selectedItemId)
   const selectedTimelineVideo = selectedVideoIsTimelineVisible
@@ -391,6 +399,20 @@ export default function EditorWorkspace() {
     updateHoverOutline()
   }, [updateHoverOutline])
 
+  const selectArtboard = useCallback(() => {
+    clearHoverOutline()
+    hideRotationReadout()
+    selectItem(ARTBOARD_SELECTION_ID)
+    selectSidebarTab("background")
+    openSidebar()
+  }, [
+    clearHoverOutline,
+    hideRotationReadout,
+    openSidebar,
+    selectItem,
+    selectSidebarTab,
+  ])
+
   const updateHoverFromTarget = useCallback(
     (target: Konva.Node | null) => {
       if (isPanModeRef.current) {
@@ -428,6 +450,14 @@ export default function EditorWorkspace() {
         y: transform.y,
       })
       stage.batchDraw()
+
+      const backdrop = artboardBackdropRef.current
+      if (backdrop) {
+        backdrop.style.transform = `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})`
+      }
+
+      lastAppliedTransformRef.current = transform
+
       if (isRotatingSelectedNodeRef.current && rotatingNodeRef.current) {
         updateRotationReadout(rotatingNodeRef.current)
       } else {
@@ -437,8 +467,19 @@ export default function EditorWorkspace() {
     [updateRotationReadout, updateSelectionToolbarPosition]
   )
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     viewTransformRef.current = viewTransform
+
+    const last = lastAppliedTransformRef.current
+    if (
+      last &&
+      last.scale === viewTransform.scale &&
+      last.x === viewTransform.x &&
+      last.y === viewTransform.y
+    ) {
+      return
+    }
+
     applyStageViewTransform(viewTransform)
   }, [applyStageViewTransform, viewTransform])
 
@@ -531,6 +572,12 @@ export default function EditorWorkspace() {
   useEffect(() => {
     updateHoverOutline()
   }, [selectedItemId, updateHoverOutline])
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      Konva.pixelRatio = Math.min(window.devicePixelRatio || 1, 2)
+    }
+  }, [])
 
   useEffect(() => {
     const container = containerRef.current
@@ -1140,48 +1187,38 @@ export default function EditorWorkspace() {
       className={`relative h-full w-full overflow-hidden bg-editor-workspace ${cursorClassName}`}
     >
       {viewportSize.width > 0 && viewportSize.height > 0 ? (
-        <Stage
-          ref={stageRef}
-          width={viewportSize.width}
-          height={viewportSize.height}
-          scaleX={viewTransform.scale}
-          scaleY={viewTransform.scale}
-          x={viewTransform.x}
-          y={viewTransform.y}
-          onWheel={handleWheel}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={endPan}
-          onMouseLeave={handleStageMouseLeave}
-          onTap={handleTap}
-          onDragStart={handleDragStart}
-          onDragMove={handleDragMove}
-          onDragEnd={handleDragEnd}
-        >
+        <>
+          <div
+            ref={artboardBackdropRef}
+            aria-hidden="true"
+            className="pointer-events-none absolute top-0 left-0 z-0 bg-white shadow-[0_18px_40px_rgba(0,0,0,0.14)]"
+            style={{
+              width: artboard.width,
+              height: artboard.height,
+              transformOrigin: "0 0",
+              willChange: "transform",
+            }}
+          />
+          <Stage
+            ref={stageRef}
+            width={viewportSize.width}
+            height={viewportSize.height}
+            onWheel={handleWheel}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={endPan}
+            onMouseLeave={handleStageMouseLeave}
+            onTap={handleTap}
+            onDragStart={handleDragStart}
+            onDragMove={handleDragMove}
+            onDragEnd={handleDragEnd}
+            style={{ position: "relative", zIndex: 1 }}
+          >
           <Layer listening={false}>
             <Group>
-              <Rect
-                x={0}
-                y={0}
-                width={artboard.width}
-                height={artboard.height}
-                fill="white"
-                perfectDrawEnabled={false}
-                shadowForStrokeEnabled={false}
-                shadowColor="black"
-                shadowBlur={
-                  viewTransform.scale >= 2 ? 0 : 40 / viewTransform.scale
-                }
-                shadowOpacity={0.14}
-                shadowOffsetY={
-                  viewTransform.scale >= 2 ? 0 : 18 / viewTransform.scale
-                }
-              />
-              <ArtboardPixelGrid
-                artboard={artboard}
-                viewportSize={viewportSize}
-                viewTransform={viewTransform}
-              />
+              <ArtboardBackground artboard={artboard} />
+              <ArtboardGrain artboard={artboard} />
+              <ArtboardPixelGrid artboard={artboard} />
             </Group>
           </Layer>
           <Layer ref={contentLayerRef}>
@@ -1193,8 +1230,14 @@ export default function EditorWorkspace() {
                 height={artboard.height}
                 fill="rgba(255,255,255,0)"
                 perfectDrawEnabled={false}
-                onMouseDown={() => selectItem(null)}
-                onTap={() => selectItem(null)}
+                onMouseDown={(event) => {
+                  event.cancelBubble = true
+                  selectArtboard()
+                }}
+                onTap={(event) => {
+                  event.cancelBubble = true
+                  selectArtboard()
+                }}
               />
               <Group
                 clipX={0}
@@ -1221,7 +1264,8 @@ export default function EditorWorkspace() {
                 width={artboard.width}
                 height={artboard.height}
                 stroke="rgba(0,0,0,0.10)"
-                strokeWidth={1 / viewTransform.scale}
+                strokeWidth={1}
+                strokeScaleEnabled={false}
                 perfectDrawEnabled={false}
                 shadowForStrokeEnabled={false}
                 listening={false}
@@ -1236,6 +1280,19 @@ export default function EditorWorkspace() {
               ref={hoverOutlineRef}
               listening={false}
               visible={false}
+              stroke={HOVER_OUTLINE_STROKE}
+              strokeWidth={HOVER_OUTLINE_STROKE_WIDTH}
+              strokeScaleEnabled={false}
+              perfectDrawEnabled={false}
+              shadowForStrokeEnabled={false}
+            />
+            <Rect
+              x={0}
+              y={0}
+              width={artboard.width}
+              height={artboard.height}
+              listening={false}
+              visible={selectedItemId === ARTBOARD_SELECTION_ID}
               stroke={HOVER_OUTLINE_STROKE}
               strokeWidth={HOVER_OUTLINE_STROKE_WIDTH}
               strokeScaleEnabled={false}
@@ -1263,7 +1320,8 @@ export default function EditorWorkspace() {
               onRotationEnd={hideRotationReadout}
             />
           </Layer>
-        </Stage>
+          </Stage>
+        </>
       ) : null}
       <SelectionToolbar
         ref={selectionToolbarRef}

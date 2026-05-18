@@ -23,6 +23,7 @@ import {
 } from "@/lib/editor-canvas"
 import { useProject } from "@/components/editor/project/provider"
 import type {
+  ArtboardBackground,
   CanvasTimelineClip,
   CanvasSize,
   CanvasVideoCropShape,
@@ -40,6 +41,8 @@ const DEFAULT_ARTBOARD: EditorArtboard = {
   presetId: DEFAULT_ARTBOARD_PRESET.id,
   width: DEFAULT_ARTBOARD_PRESET.width,
   height: DEFAULT_ARTBOARD_PRESET.height,
+  background: null,
+  grain: 0,
 }
 const DEFAULT_VIEW_TRANSFORM = getFitViewTransform(
   DEFAULT_VIEWPORT_SIZE,
@@ -130,6 +133,8 @@ type EditorCanvasContextValue = {
   duplicateVideo: (id: string) => void
   deleteVideo: (id: string) => void
   setArtboardPreset: (id: ArtboardPresetId) => void
+  setArtboardBackground: (background: ArtboardBackground | null) => void
+  setArtboardGrain: (grain: number) => void
   setViewportSize: (size: CanvasSize) => void
   setViewTransform: (transform: ViewTransform) => void
   fitArtboardToViewport: () => void
@@ -202,6 +207,8 @@ type EditorCanvasActionsContextValue = Pick<
   | "duplicateVideo"
   | "deleteVideo"
   | "setArtboardPreset"
+  | "setArtboardBackground"
+  | "setArtboardGrain"
   | "setViewportSize"
   | "setViewTransform"
   | "fitArtboardToViewport"
@@ -1490,6 +1497,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
 
   const setArtboardPreset = useCallback(
     (id: ArtboardPresetId) => {
+      const prevBackground = artboardRef.current.background
+      const prevGrain = artboardRef.current.grain
       let nextArtboard: EditorArtboard
       if (id === AUTO_ARTBOARD_PRESET_ID) {
         const auto = resolveAutoArtboard(sourceVideoDimsRef.current)
@@ -1497,6 +1506,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           presetId: AUTO_ARTBOARD_PRESET_ID,
           width: auto.width,
           height: auto.height,
+          background: prevBackground,
+          grain: prevGrain,
         }
       } else {
         const preset = getArtboardPreset(id)
@@ -1504,6 +1515,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           presetId: preset.id,
           width: preset.width,
           height: preset.height,
+          background: prevBackground,
+          grain: prevGrain,
         }
       }
 
@@ -1822,6 +1835,37 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     setSelectedItemId((current) => (current === id ? current : id))
   }, [])
 
+  const setArtboardGrain = useCallback((grain: number) => {
+    const current = artboardRef.current
+    const clamped = Math.max(0, Math.min(100, Math.round(grain)))
+    if (current.grain === clamped) return
+    const nextArtboard: EditorArtboard = { ...current, grain: clamped }
+    artboardRef.current = nextArtboard
+    setArtboard(nextArtboard)
+  }, [])
+
+  const setArtboardBackground = useCallback(
+    (background: ArtboardBackground | null) => {
+      const current = artboardRef.current
+      const prev = current.background
+      const isSameBackground =
+        (prev === null && background === null) ||
+        (prev !== null &&
+          background !== null &&
+          prev.type === background.type &&
+          prev.value === background.value &&
+          (prev.type !== "wallpaper" ||
+            background.type !== "wallpaper" ||
+            (prev.blurRadius ?? 0) === (background.blurRadius ?? 0)))
+      if (isSameBackground) return
+
+      const nextArtboard: EditorArtboard = { ...current, background }
+      artboardRef.current = nextArtboard
+      setArtboard(nextArtboard)
+    },
+    []
+  )
+
   const updateVideoTransform = useCallback(
     (id: string, patch: CanvasVideoTransformPatch) => {
       setVideos((current) => {
@@ -2023,6 +2067,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       duplicateVideo,
       deleteVideo,
       setArtboardPreset,
+      setArtboardBackground,
+      setArtboardGrain,
       setViewportSize,
       setViewTransform,
       fitArtboardToViewport,
@@ -2036,6 +2082,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       duplicateVideo,
       deleteVideo,
       setArtboardPreset,
+      setArtboardBackground,
+      setArtboardGrain,
       setViewportSize,
       setViewTransform,
       fitArtboardToViewport,
@@ -2140,6 +2188,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       // those source shapes are arbitrary and would otherwise produce an
       // odd-shaped artboard.
       const useAuto = project.recordingType === "display"
+      const previousBackground = artboardRef.current.background
+      const previousGrain = artboardRef.current.grain
       const nextArtboard: EditorArtboard = useAuto
         ? (() => {
             const auto = resolveAutoArtboard(sourceVideoDimsRef.current)
@@ -2147,6 +2197,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               presetId: AUTO_ARTBOARD_PRESET_ID,
               width: auto.width,
               height: auto.height,
+              background: previousBackground,
+              grain: previousGrain,
             }
           })()
         : (() => {
@@ -2155,6 +2207,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               presetId: preset.id,
               width: preset.width,
               height: preset.height,
+              background: previousBackground,
+              grain: previousGrain,
             }
           })()
       artboardRef.current = nextArtboard
