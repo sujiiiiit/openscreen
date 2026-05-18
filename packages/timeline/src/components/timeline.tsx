@@ -35,6 +35,10 @@ export const Timeline = React.forwardRef<TimelineState, TimelineEditor>((props, 
   const engineRef = useRef<ITimelineEngine>(engine || new TimelineEngine());
   const domRef = useRef<HTMLDivElement>(null);
   const areaRef = useRef<HTMLDivElement>(null);
+  // Shared between Cursor (sets on drag) and TimeArea (reads to skip hover
+  // events). Keeps the package from re-emitting hover positions while the
+  // main playhead is being dragged.
+  const draggingCursorRef = useRef(false);
 
   const scrollSync = useRef<ScrollSync>(null);
 
@@ -196,6 +200,7 @@ export const Timeline = React.forwardRef<TimelineState, TimelineEditor>((props, 
               setScaleCount={handleSetScaleCount}
               onScroll={onScroll}
               scrollLeft={scrollLeft}
+              draggingCursorRef={draggingCursorRef}
             />
             <EditArea
               {...checkedProps}
@@ -231,6 +236,7 @@ export const Timeline = React.forwardRef<TimelineState, TimelineEditor>((props, 
                 areaRef={areaRef}
                 scrollSync={scrollSync}
                 deltaScrollLeft={autoScroll ? handleDeltaScrollLeft : undefined}
+                draggingCursorRef={draggingCursorRef}
               />
             )}
           </>

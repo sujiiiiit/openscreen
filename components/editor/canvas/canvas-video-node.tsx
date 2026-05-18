@@ -23,10 +23,7 @@ import type { CanvasVideoItem } from "@/types/editor-canvas"
 // inside an elliptical clip lets the camera render and hit-test as a circle
 // while remaining a Konva.Image instance — the transformer and event code
 // still recognize it.
-function drawEllipticalVideo(
-  context: Konva.Context,
-  shape: Konva.Shape
-): void {
+function drawEllipticalVideo(context: Konva.Context, shape: Konva.Shape): void {
   const image = (shape as Konva.Image).image()
   const width = shape.width()
   const height = shape.height()
@@ -78,10 +75,7 @@ function drawEllipticalVideo(
   context.restore()
 }
 
-function drawEllipticalHit(
-  context: Konva.Context,
-  shape: Konva.Shape
-): void {
+function drawEllipticalHit(context: Konva.Context, shape: Konva.Shape): void {
   const width = shape.width()
   const height = shape.height()
   if (width <= 0 || height <= 0) return
@@ -112,15 +106,25 @@ type VideoWithFrameCallback = HTMLVideoElement & {
 type CanvasVideoNodeProps = {
   video: CanvasVideoItem
   isPanMode: boolean
+  shouldPlayAudio: boolean
   contentLayerRef: RefObject<Konva.Layer | null>
   onNodeChange: (id: string, node: Konva.Image | null) => void
+  onVideoElementChange: (id: string, element: HTMLVideoElement | null) => void
+  onVideoSeeked: (
+    id: string,
+    element: HTMLVideoElement,
+    redrawLayer: () => void
+  ) => void
 }
 
 function CanvasVideoNodeComponent({
   video,
   isPanMode,
+  shouldPlayAudio,
   contentLayerRef,
   onNodeChange,
+  onVideoElementChange,
+  onVideoSeeked,
 }: CanvasVideoNodeProps) {
   const imageRef = useRef<Konva.Image | null>(null)
   const videoElementRef = useRef<VideoWithFrameCallback | null>(null)
@@ -131,127 +135,133 @@ function CanvasVideoNodeComponent({
   useEffect(() => {
     const element = document.createElement("video") as VideoWithFrameCallback
     element.muted = true
-    element.loop = true
+    element.loop = false
     element.playsInline = true
     element.preload = "auto"
     element.src = video.objectUrl
     videoElementRef.current = element
+    let isRegistered = false
 
     const markReady = () => {
       setRenderableVideo(element)
-      contentLayerRef.current?.batchDraw()
-    }
-
-    const playVideo = () => {
-      const playPromise = element.play()
-
-      if (playPromise) {
-        playPromise.catch(() => {
-          // Muted local file playback should be allowed from the upload gesture,
-          // but browser policy can still reject. Future timeline controls can retry.
-        })
+      if (!isRegistered) {
+        isRegistered = true
+        onVideoElementChange(video.id, element)
       }
+      contentLayerRef.current?.batchDraw()
     }
 
     element.addEventListener("loadedmetadata", markReady)
     element.addEventListener("loadeddata", markReady)
-    element.addEventListener("canplay", playVideo)
     element.load()
-    playVideo()
 
     return () => {
+      if (isRegistered) {
+        onVideoElementChange(video.id, null)
+      }
       videoElementRef.current = null
       element.pause()
       element.removeEventListener("loadedmetadata", markReady)
       element.removeEventListener("loadeddata", markReady)
-      element.removeEventListener("canplay", playVideo)
       element.removeAttribute("src")
       element.load()
     }
-  }, [contentLayerRef, video.objectUrl])
+  }, [contentLayerRef, onVideoElementChange, video.id, video.objectUrl])
+
+  useEffect(() => {
+    const element = videoElementRef.current
+    if (!element) return
+
+    element.muted = !shouldPlayAudio
+  }, [shouldPlayAudio])
 
   useEffect(() => {
     const layer = contentLayerRef.current
     const videoElement = videoElementRef.current
     if (!layer || !videoElement || !isVideoReady) return
 
-    let callbackId: number | null = null
-    let animation: Konva.Animation | null = null
+    const supportsFrameCallback = Boolean(videoElement.requestVideoFrameCallback)
+    let frameCallbackId: number | null = null
+    let animation: Konva.Animation | null = supportsFrameCallback
+      ? null
+      : new Konva.Animation(() => undefined, layer)
     let cancelled = false
 
-    if (videoElement.requestVideoFrameCallback) {
-      const scheduleFrame = () => {
-        if (
-          cancelled ||
-          callbackId !== null ||
-          videoElement.paused ||
-          videoElement.ended
-        ) {
-          return
-        }
-
-        callbackId =
-          videoElement.requestVideoFrameCallback?.(() => {
-            callbackId = null
-            if (cancelled) return
-
-            layer.batchDraw()
-            scheduleFrame()
-          }) ?? null
+    const stopRedrawLoop = () => {
+      if (frameCallbackId !== null) {
+        videoElement.cancelVideoFrameCallback?.(frameCallbackId)
+        frameCallbackId = null
       }
-
-      const cancelFrame = () => {
-        if (callbackId === null) return
-
-        videoElement.cancelVideoFrameCallback?.(callbackId)
-        callbackId = null
-      }
-
-      const drawCurrentFrame = () => layer.batchDraw()
-
-      videoElement.addEventListener("play", scheduleFrame)
-      videoElement.addEventListener("playing", scheduleFrame)
-      videoElement.addEventListener("pause", cancelFrame)
-      videoElement.addEventListener("seeked", drawCurrentFrame)
-      scheduleFrame()
-
-      return () => {
-        cancelled = true
-        cancelFrame()
-        videoElement.removeEventListener("play", scheduleFrame)
-        videoElement.removeEventListener("playing", scheduleFrame)
-        videoElement.removeEventListener("pause", cancelFrame)
-        videoElement.removeEventListener("seeked", drawCurrentFrame)
-      }
+      animation?.stop()
     }
 
-    animation = new Konva.Animation(() => undefined, layer)
-
-    const syncAnimation = () => {
-      if (videoElement.paused || videoElement.ended) {
-        animation?.stop()
-        layer.batchDraw()
+    const scheduleFrameCallback = () => {
+      if (
+        cancelled ||
+        frameCallbackId !== null ||
+        videoElement.paused ||
+        videoElement.ended
+      ) {
         return
       }
 
-      animation?.start()
+      frameCallbackId =
+        videoElement.requestVideoFrameCallback?.(() => {
+          frameCallbackId = null
+          if (cancelled) return
+
+          layer.batchDraw()
+          scheduleFrameCallback()
+        }) ?? null
     }
 
-    videoElement.addEventListener("play", syncAnimation)
-    videoElement.addEventListener("playing", syncAnimation)
-    videoElement.addEventListener("pause", syncAnimation)
-    videoElement.addEventListener("ended", syncAnimation)
-    syncAnimation()
+    // Hand every paused-state `seeked` event back to the provider; it owns
+    // the decision between "this frame matches the committed playhead"
+    // (drop or paint), "this frame matches a hover target" (paint), or
+    // "stale seek — drop". The provider triggers the layer redraw via the
+    // callback so this component stays unaware of hover vs committed.
+    const redrawLayer = () => {
+      layer.batchDraw()
+    }
+    const drawGatedFrame = () => {
+      onVideoSeeked(video.id, videoElement, redrawLayer)
+    }
+
+    const startRedrawLoop = () => {
+      if (cancelled) return
+      if (supportsFrameCallback) {
+        scheduleFrameCallback()
+      } else {
+        animation?.start()
+      }
+    }
+
+    const handlePauseOrEnd = () => {
+      stopRedrawLoop()
+      drawGatedFrame()
+    }
+
+    videoElement.addEventListener("play", startRedrawLoop)
+    videoElement.addEventListener("playing", startRedrawLoop)
+    videoElement.addEventListener("pause", handlePauseOrEnd)
+    videoElement.addEventListener("ended", handlePauseOrEnd)
+    videoElement.addEventListener("seeked", drawGatedFrame)
+
+    if (!videoElement.paused && !videoElement.ended) {
+      startRedrawLoop()
+    }
 
     return () => {
       cancelled = true
-      animation?.stop()
-      videoElement.removeEventListener("play", syncAnimation)
-      videoElement.removeEventListener("playing", syncAnimation)
-      videoElement.removeEventListener("pause", syncAnimation)
-      videoElement.removeEventListener("ended", syncAnimation)
+      stopRedrawLoop()
+      animation = null
+      videoElement.removeEventListener("play", startRedrawLoop)
+      videoElement.removeEventListener("playing", startRedrawLoop)
+      videoElement.removeEventListener("pause", handlePauseOrEnd)
+      videoElement.removeEventListener("ended", handlePauseOrEnd)
+      videoElement.removeEventListener("seeked", drawGatedFrame)
     }
-  }, [contentLayerRef, isVideoReady])
+  }, [contentLayerRef, isVideoReady, onVideoSeeked, video.id])
 
   const setImageNode = useCallback(
     (node: Konva.Image | null) => {

@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ComponentProps,
@@ -31,6 +32,8 @@ import {
   useEditorCanvasActions,
   useEditorCanvasArtboard,
   useEditorCanvasMedia,
+  useEditorCanvasTimeline,
+  useEditorCanvasTimelineActions,
   useEditorCanvasView,
 } from "@/components/editor/canvas/provider"
 import {
@@ -62,6 +65,7 @@ import type {
 
 const SELECTION_TOOLBAR_GAP = 18
 const SELECTION_TOOLBAR_VIEWPORT_MARGIN = 12
+const SELECTION_TOOLBAR_INSIDE_PADDING = 12
 const DEFAULT_SELECTION_TOOLBAR_SIZE = {
   width: 120,
   height: 52,
@@ -174,6 +178,7 @@ export default function EditorWorkspace() {
   const toolbarSizeRef = useRef(DEFAULT_SELECTION_TOOLBAR_SIZE)
   const selectedItemIdRef = useRef<string | null>(null)
   const selectedVideoRef = useRef<CanvasVideoItem | null>(null)
+  const timelineVisibleVideoIdsRef = useRef<ReadonlySet<string>>(new Set())
   const videoNodeMapRef = useRef(new Map<string, Konva.Image>())
   const isSpacePressedRef = useRef(false)
   const isPanningRef = useRef(false)
@@ -196,6 +201,8 @@ export default function EditorWorkspace() {
   const artboardRef = useRef<EditorArtboard | null>(null)
   const nudgeGuideClearTimerRef = useRef<number | null>(null)
   const { videos, selectedItemId, selectedVideo } = useEditorCanvasMedia()
+  const { primaryAudioVideoId, timelineVisibleVideoIds } =
+    useEditorCanvasTimeline()
   const { artboard } = useEditorCanvasArtboard()
   const { viewportSize, viewTransform } = useEditorCanvasView()
   const {
@@ -208,6 +215,20 @@ export default function EditorWorkspace() {
     setViewTransform,
     updateVideoTransform,
   } = useEditorCanvasActions()
+  const {
+    registerTimelineCanvasNode,
+    registerTimelineVideoElement,
+    onTimelineVideoSeeked,
+  } = useEditorCanvasTimelineActions()
+  const selectedVideoIsTimelineVisible =
+    selectedItemId !== null && timelineVisibleVideoIds.has(selectedItemId)
+  const selectedTimelineVideo = selectedVideoIsTimelineVisible
+    ? selectedVideo
+    : null
+  const visibleVideos = useMemo(
+    () => videos.filter((video) => timelineVisibleVideoIds.has(video.id)),
+    [timelineVisibleVideoIds, videos]
+  )
 
   const updateSelectionToolbarPosition = useCallback(() => {
     const toolbar = selectionToolbarRef.current
@@ -225,6 +246,14 @@ export default function EditorWorkspace() {
       ? videoNodeMapRef.current.get(selectedItemId)
       : null
     const viewport = viewportSizeRef.current
+
+    if (
+      selectedItemId &&
+      !timelineVisibleVideoIdsRef.current.has(selectedItemId)
+    ) {
+      toolbar.style.visibility = "hidden"
+      return
+    }
 
     if (viewport.width <= 0 || viewport.height <= 0) {
       toolbar.style.visibility = "hidden"
@@ -251,7 +280,12 @@ export default function EditorWorkspace() {
     let y = screenRect.y - toolbarHeight - SELECTION_TOOLBAR_GAP
 
     if (y < margin) {
-      y = screenRect.y + screenRect.height + SELECTION_TOOLBAR_GAP
+      const belowY = screenRect.y + screenRect.height + SELECTION_TOOLBAR_GAP
+      if (belowY + toolbarHeight <= viewport.height - margin) {
+        y = belowY
+      } else {
+        y = screenRect.y + SELECTION_TOOLBAR_INSIDE_PADDING
+      }
     }
 
     x = clampToolbarPosition(x, margin, viewport.width - toolbarWidth - margin)
@@ -323,7 +357,12 @@ export default function EditorWorkspace() {
       }
     }
 
-    if (!id || id === selected || isPanModeRef.current) {
+    if (
+      !id ||
+      id === selected ||
+      isPanModeRef.current ||
+      !timelineVisibleVideoIdsRef.current.has(id)
+    ) {
       hide()
       return
     }
@@ -454,7 +493,11 @@ export default function EditorWorkspace() {
     resizeObserver.observe(toolbar)
 
     return () => resizeObserver.disconnect()
-  }, [selectedVideo?.id, selectedVideo?.locked, updateSelectionToolbarPosition])
+  }, [
+    selectedTimelineVideo?.id,
+    selectedTimelineVideo?.locked,
+    updateSelectionToolbarPosition,
+  ])
 
   useEffect(() => {
     isPanModeRef.current = isSpacePressed || isPanning
@@ -463,6 +506,27 @@ export default function EditorWorkspace() {
     }
     updateHoverOutline()
   }, [clearHoverOutline, isPanning, isSpacePressed, updateHoverOutline])
+
+  useEffect(() => {
+    timelineVisibleVideoIdsRef.current = timelineVisibleVideoIds
+
+    if (
+      selectedItemIdRef.current &&
+      !timelineVisibleVideoIds.has(selectedItemIdRef.current)
+    ) {
+      guideOverlayRef.current?.clear()
+      hideRotationReadout()
+    } else {
+      scheduleSelectionToolbarPosition()
+    }
+
+    updateHoverOutline()
+  }, [
+    hideRotationReadout,
+    scheduleSelectionToolbarPosition,
+    timelineVisibleVideoIds,
+    updateHoverOutline,
+  ])
 
   useEffect(() => {
     updateHoverOutline()
@@ -567,8 +631,9 @@ export default function EditorWorkspace() {
   const buildDragSnapCache = useCallback(
     (excludeId: string | null) => {
       const currentArtboard = artboardRef.current ?? artboard
+      const visibleIds = timelineVisibleVideoIdsRef.current
       const others = (videosRef.current ?? videos).filter(
-        (video) => video.id !== excludeId
+        (video) => video.id !== excludeId && visibleIds.has(video.id)
       )
       const currentView = viewTransformRef.current
       const currentViewport = viewportSizeRef.current
@@ -647,7 +712,8 @@ export default function EditorWorkspace() {
             event.code === "ArrowLeft" ||
             event.code === "ArrowRight") &&
           selectedVideo &&
-          !selectedVideo.locked
+          !selectedVideo.locked &&
+          timelineVisibleVideoIdsRef.current.has(selectedVideo.id)
         ) {
           event.preventDefault()
           const step = event.shiftKey
@@ -1037,6 +1103,7 @@ export default function EditorWorkspace() {
       } else {
         videoNodeMapRef.current.delete(id)
       }
+      registerTimelineCanvasNode(id, node)
 
       if (id === selectedItemIdRef.current) {
         setNodeVersion((version) => version + 1)
@@ -1046,7 +1113,7 @@ export default function EditorWorkspace() {
         updateHoverOutline()
       }
     },
-    [updateHoverOutline]
+    [registerTimelineCanvasNode, updateHoverOutline]
   )
 
   const handleContextMenu = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -1140,8 +1207,11 @@ export default function EditorWorkspace() {
                     key={video.id}
                     video={video}
                     isPanMode={isSpacePressed || isPanning}
+                    shouldPlayAudio={video.id === primaryAudioVideoId}
                     contentLayerRef={contentLayerRef}
                     onNodeChange={registerVideoNode}
+                    onVideoElementChange={registerTimelineVideoElement}
+                    onVideoSeeked={onTimelineVideoSeeked}
                   />
                 ))}
               </Group>
@@ -1173,15 +1243,17 @@ export default function EditorWorkspace() {
               shadowForStrokeEnabled={false}
             />
             <SelectedVideoTransformer
-              selectedItemId={selectedItemId}
-              selectedVideo={selectedVideo}
-              isLocked={selectedVideo?.locked ?? false}
+              selectedItemId={
+                selectedVideoIsTimelineVisible ? selectedItemId : null
+              }
+              selectedVideo={selectedTimelineVideo}
+              isLocked={selectedTimelineVideo?.locked ?? false}
               nodeVersion={nodeVersion}
               nodeMapRef={videoNodeMapRef}
               onTransformFrame={updateSelectionToolbarPosition}
               onTransformEnd={updateVideoTransform}
               artboard={artboard}
-              videos={videos}
+              videos={visibleVideos}
               viewTransform={viewTransform}
               viewportSize={viewportSize}
               isSnapDisabledRef={isSnapDisabledRef}
@@ -1195,7 +1267,7 @@ export default function EditorWorkspace() {
       ) : null}
       <SelectionToolbar
         ref={selectionToolbarRef}
-        selectedVideo={selectedVideo}
+        selectedVideo={selectedTimelineVideo}
         onToggleLock={setVideoLocked}
         onDuplicate={duplicateVideo}
         onDelete={deleteVideo}

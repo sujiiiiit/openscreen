@@ -30,6 +30,15 @@ export interface EditData {
    */
   maxScaleCount?: number;
   /**
+   * @description Maximum playhead time in seconds. Caps cursor drag and time-area clicks at this time even when the ruler extends past it via minScaleCount.
+   * @default Infinity
+   */
+  maxCursorTime?: number;
+  /**
+   * @description Fired with the timeline time under the pointer while it moves over the time-area, and with `null` when it leaves. Suppressed while the main cursor is being dragged.
+   */
+  onTimeAreaHover?: (time: number | null) => void;
+  /**
    * @description Number of subdivisions per scale tick (positive integer)
    * @default 10
    */
@@ -299,6 +308,6 @@ export interface TimelineEditor extends EditData {
 // Utility type that marks selected properties as required
 export type RequiredPick<T, K extends keyof T> = T & { [P in K]-?: T[P] };
 
-export type RequiredEditData = RequiredPick<EditData, 'editorData' | 'effects' | 'scale' | 'scaleSplitCount' | 'scaleWidth' | 'startLeft' | 'minScaleCount' | 'maxScaleCount' | 'rowHeight'>;
+export type RequiredEditData = RequiredPick<EditData, 'editorData' | 'effects' | 'scale' | 'scaleSplitCount' | 'scaleWidth' | 'startLeft' | 'minScaleCount' | 'maxScaleCount' | 'maxCursorTime' | 'rowHeight'>;
 
 export type RequiredTimelineEditor = RequiredPick<TimelineEditor, 'scrollTop'> & RequiredEditData;

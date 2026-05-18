@@ -14,6 +14,7 @@ export function checkProps(props: TimelineEditor): RequiredTimelineEditor {
     startLeft = DEFAULT_START_LEFT,
     minScaleCount = MIN_SCALE_COUNT,
     maxScaleCount = Infinity,
+    maxCursorTime = Infinity,
     rowHeight = DEFAULT_ROW_HEIGHT,
   } = props;
 
@@ -54,6 +55,10 @@ export function checkProps(props: TimelineEditor): RequiredTimelineEditor {
   }
   maxScaleCount = maxScaleCount === Infinity ? Infinity : parseInt(maxScaleCount + '');
 
+  if (!Number.isFinite(maxCursorTime) || maxCursorTime < 0) {
+    maxCursorTime = Infinity;
+  }
+
   if (rowHeight <= 0) {
     logger.warn('Warning: rowHeight must be greater than 0!');
     rowHeight = DEFAULT_ROW_HEIGHT;
@@ -72,6 +77,7 @@ export function checkProps(props: TimelineEditor): RequiredTimelineEditor {
     startLeft,
     minScaleCount,
     maxScaleCount,
+    maxCursorTime,
     rowHeight,
   };
 }

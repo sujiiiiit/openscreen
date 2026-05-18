@@ -6,22 +6,36 @@ This document records the current video-canvas editor architecture, the terms we
 
 Use these names in code review, docs, comments, and new implementation plans. The shorter translation table lives in `docs/normal-term.md`.
 
-| Common phrase used in discussion | Preferred industry term           | Meaning in this app                                                                                                     |
-| -------------------------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Outer canvas                     | Workspace or pasteboard           | The bounded editor surface around the artboard. Implemented by the Konva `Stage` viewport and the workspace background. |
-| Inner canvas                     | Artboard or frame                 | The export-sized editable area, e.g. 1920 x 1080 for 16:9.                                                              |
-| Canvas section                   | Workspace section                 | Top editor section containing the fixed/collapsible sidebar and Konva workspace.                                        |
-| Timeline section                 | Timeline panel                    | Resizable bottom editor panel reserved for timeline/playback UI.                                                        |
-| Sidebar section                  | Editor sidebar                    | Fixed-width left editor panel with its own collapse animation; it is not resizable.                                     |
-| Canvas zoom                      | Viewport transform                | The `scale`, `x`, and `y` camera transform applied to the stage.                                                        |
-| Elements                         | Canvas nodes or layer items       | Videos now; future text, shapes, subtitles, images, etc.                                                                |
-| Hover bounds                     | Hover outline                     | A non-selecting visual outline shown around the canvas node under the pointer.                                          |
-| Rotation degree                  | Rotation readout                  | A transient degree label shown while rotating the selected node.                                                        |
-| Resize handles                   | Transformer                       | The Konva `Transformer` attached to the selected canvas node.                                                           |
-| Pixel grid                       | Artboard pixel grid               | A 1 artboard pixel grid visible at high zoom inside the artboard.                                                       |
-| Outer grid                       | Workspace grid or pasteboard grid | A future visual grid for the dark workspace outside the artboard. Not implemented yet.                                  |
-| Background tab add video         | Media import action               | Local `video/*` file picker that adds a video node to the artboard.                                                     |
-| Timeline area zoom value         | Canvas zoom control               | Footer dropdown showing and controlling current workspace zoom.                                                         |
+| Common phrase used in discussion | Preferred industry term           | Meaning in this app                                                                                                                   |
+| -------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Outer canvas                     | Workspace or pasteboard           | The bounded editor surface around the artboard. Implemented by the Konva `Stage` viewport and the workspace background.               |
+| Inner canvas                     | Artboard or frame                 | The export-sized editable area, e.g. 1920 x 1080 for 16:9.                                                                            |
+| Canvas section                   | Workspace section                 | Top editor section containing the fixed/collapsible sidebar and Konva workspace.                                                      |
+| Timeline section                 | Timeline panel                    | Resizable bottom editor panel reserved for timeline/playback UI.                                                                      |
+| Sidebar section                  | Editor sidebar                    | Fixed-width left editor panel with its own collapse animation; it is not resizable.                                                   |
+| Canvas zoom                      | Viewport transform                | The `scale`, `x`, and `y` camera transform applied to the stage.                                                                      |
+| Elements                         | Canvas nodes or layer items       | Videos now; future text, shapes, subtitles, images, etc.                                                                              |
+| Hover bounds                     | Hover outline                     | A non-selecting visual outline shown around the canvas node under the pointer.                                                        |
+| Rotation degree                  | Rotation readout                  | A transient degree label shown while rotating the selected node.                                                                      |
+| Resize handles                   | Transformer                       | The Konva `Transformer` attached to the selected canvas node.                                                                         |
+| Pixel grid                       | Artboard pixel grid               | A 1 artboard pixel grid visible at high zoom inside the artboard.                                                                     |
+| Outer grid                       | Workspace grid or pasteboard grid | A future visual grid for the dark workspace outside the artboard. Not implemented yet.                                                |
+| Background tab add video         | Media import action               | Local `video/*` file picker that adds a video node to the artboard.                                                                   |
+| Timeline area zoom value         | Canvas zoom control               | Footer dropdown showing and controlling current workspace zoom.                                                                       |
+| Timeline block                   | Timeline clip                     | A non-destructive time range that references one canvas video and stores timeline in/out plus source in/out.                          |
+| Left labels in timeline          | Track label rail                  | A fixed row-name column beside timeline lanes; currently omitted. The unlabeled timeline keeps a 30 px start inset.                   |
+| Grid snap in timeline            | Timeline grid snap                | Clip move/resize snapping to the ruler subdivision grid.                                                                              |
+| Auxiliary line snap              | Timeline guide-line snap          | Clip edge snapping to other clip edges and the playhead, with temporary vertical guide lines.                                         |
+| Timeline auto scroll             | Timeline edge auto-scroll         | Horizontal scrolling while dragging a clip near the visible timeline edge.                                                            |
+| Ruler time style                 | Ruler tick label format           | Clock-style timeline labels, e.g. `0:15`, `1:00`, and `1:05:00`; compact major dot ticks remain visible while labels keep a wide gap. |
+| Controls on top                  | Timeline transport controls       | Theme-colored skip, play/pause, and playback time controls in the footer's top toolbar, above the ruler and lanes.                    |
+| Timeline zoom                    | Timeline zoom                     | Horizontal timeline scale controls that increase or decrease pixels per second.                                                       |
+| Fit timeline                     | Fit longest clip to width         | Default timeline view mode that scales the widest clip block to the visible timeline width and scrolls to that clip.                  |
+| Play cursor                      | Playhead                          | Current committed timeline time used to sample every canvas video.                                                                    |
+| Secondary hover seek             | Hover preview                     | Paused-only ghost cursor that previews the frame under the pointer without writing the committed playhead. Hover seeks are coalesced by rAF, gated per-element, and cancelled by any committed write. |
+| Frames going forth and back      | Stale seek redraw                 | An older completed media seek repainting the canvas after a newer committed playhead seek; guarded by committed-time redraw checks.   |
+| Cut video edge                   | Source trim                       | Non-destructive `sourceIn` / `sourceOut` adjustment created by resizing a timeline clip.                                              |
+| Frozen clip frame                | Inactive clip visibility          | Playback sync rule that hides a canvas media node outside its active clip range instead of holding an edge frame.                     |
 
 ## Current Scope
 
@@ -32,6 +46,9 @@ Implemented:
 - Artboard presets: Wide 16:9, Vertical 9:16, Portrait 4:5, Standard 4:3, Square 1:1.
 - Local video import from the Background tab.
 - Live video playback inside the artboard.
+- Timeline panel with top transport controls, playhead scrubbing, unlabeled neutral media lanes, and editable clips.
+- Non-destructive source trims for timeline clips.
+- Playhead-driven playback sync for screen, camera, and imported media.
 - Selection, dragging, resizing, and rotation through Konva `Transformer`.
 - Hover outline for unselected video nodes.
 - Fixed bottom-center rotation readout while a selected node is rotating.
@@ -42,8 +59,6 @@ Implemented:
 
 Not implemented yet:
 
-- Timeline editing.
-- Player controls.
 - Export/render pipeline.
 - Audio controls.
 - Cropping/masking.
@@ -64,7 +79,8 @@ Not implemented yet:
 | `app/page.tsx`                                            | Top-level editor layout. Wraps the editor in `EditorCanvasProvider`, tooltip provider, one vertical resizable group, top workspace section, and timeline panel. |
 | `components/editor/main.tsx`                              | Client-only dynamic import for `EditorWorkspace` and full-size workspace panel wrapper.                                                                         |
 | `components/editor/background-panel.tsx`                  | Background tab upload UI for adding local video files.                                                                                                          |
-| `components/editor/footer.tsx`                            | Timeline panel placeholder, artboard preset dropdown, and canvas zoom dropdown.                                                                                 |
+| `components/editor/footer.tsx`                            | Footer shell containing the artboard preset dropdown, top timeline transport controls, audio status, canvas zoom dropdown, and timeline panel.                  |
+| `components/editor/timeline-panel.tsx`                    | Timeline UI, playback controls, playhead scrubbing, clip rendering, and move/resize handlers.                                                                   |
 | `components/editor/sidebar.tsx`                           | Left editor sidebar, tab rail, tab content panel, and fixed-width collapse/expand animation.                                                                    |
 | `components/editor/canvas/provider.tsx`                   | Editor canvas state, video import metadata, artboard state, viewport size, view transform, and actions.                                                         |
 | `components/editor/canvas/editor-workspace.tsx`           | Konva stage shell, layer composition, viewport sizing, zoom, pan, and keyboard shortcuts.                                                                       |
@@ -115,8 +131,12 @@ Editor layout
           DOM rotation readout
       Timeline ResizablePanel
         ArtboardPresetDropdown
+        EditorTimelineControls
+        EditorTimelineAudioStatus
         CanvasZoomMenu
-        Timeline placeholder
+        EditorTimelinePanel
+          @openscreen/timeline ruler/playhead
+          Unlabeled neutral media lanes with timeline clips
 ```
 
 Layer split:
@@ -133,7 +153,8 @@ Layer split:
 
 Important types:
 
-- `CanvasVideoItem`: `id`, `fileName`, `objectUrl`, `intrinsicWidth`, `intrinsicHeight`, `x`, `y`, `width`, `height`, `rotation`, `locked`.
+- `CanvasVideoItem`: `id`, `fileName`, `objectUrl`, `intrinsicWidth`, `intrinsicHeight`, `durationMs`, `x`, `y`, `width`, `height`, `rotation`, `locked`.
+- `CanvasTimelineClip`: `id`, `videoId`, `start`, `end`, `sourceIn`, `sourceOut`.
 - `EditorArtboard`: `presetId`, `width`, `height`.
 - `ViewTransform`: `scale`, `x`, `y`.
 - `PixelGridSettings`: `enabled`, `unit`, `majorUnit`, `visibleFromScale`, `opacity`, `color`, `majorOpacity`, `majorColor`, `role`.
@@ -150,13 +171,23 @@ Important actions:
 - `setViewportSize(size)`
 - `setViewTransform(transform)`
 - `fitArtboardToViewport()`
+- `registerTimelineVideoElement(id, element | null)`
+- `registerTimelineCanvasNode(id, node | null)`
+- `setTimelineTime(time)`
+- `playTimeline()`, `pauseTimeline()`, `toggleTimelinePlayback()`
+- `zoomTimelineIn()`, `zoomTimelineOut()`, `fitTimelineToWidth()`
+- `moveTimelineClip(id, start, end)`
+- `resizeTimelineClip(id, start, end, direction)`
+- `subscribeTimelineTicks(callback)`
 
 Context hooks:
 
 - `useEditorCanvasMedia()`: videos, selection, selected video, import error.
 - `useEditorCanvasArtboard()`: current artboard.
 - `useEditorCanvasView()`: viewport size and viewport transform.
+- `useEditorCanvasTimeline()`: clips, selected clip, playhead time, duration, timeline zoom, fit mode, playback state, primary audio video id.
 - `useEditorCanvasActions()`: stable canvas actions.
+- `useEditorCanvasTimelineActions()`: stable timeline playback, clip-editing, and media-registration actions.
 - `useEditorCanvas()`: compatibility hook that merges every context and should be avoided in hot or narrow components.
 
 `ResizeObserver` updates the viewport size from the workspace area, so the Konva stage follows timeline resizing and sidebar collapse/expand.
@@ -214,13 +245,20 @@ On import:
 For rendering:
 
 - Each `CanvasVideoNode` creates one hidden `HTMLVideoElement`.
-- Video element settings: `muted = true`, `loop = true`, `playsInline = true`, `preload = "auto"`.
+- Video element settings: `loop = false`, `playsInline = true`, `preload = "auto"`.
 - The actual `HTMLVideoElement` is passed directly to `Konva.Image` through the `image` prop.
 - Video nodes use Konva `Image` crop props to emulate CSS `object-fit: cover`. Resizing the frame changes the visible box while the source video keeps its original pixel aspect ratio and is center-cropped instead of stretched.
 - No video transcoding, canvas caching, intermediate bitmap resizing, or export resampling is done.
-- `requestVideoFrameCallback()` is preferred for frame redraws.
-- `Konva.Animation` is used as a fallback when video frame callbacks are unavailable.
+- One redraw lifecycle effect picks the right primitive at mount: `requestVideoFrameCallback` chains a redraw per decoded frame when supported, otherwise a single `Konva.Animation` ticks the content layer while the element is playing. Both paths share the same play/pause/seek handlers and stop cleanly on unmount.
 - `CanvasVideoNode` is memoized and receives stable item-id callbacks, so viewport zoom/pan state does not re-render every mounted video node.
+- `CanvasVideoNode` does not autoplay. It registers its `HTMLVideoElement` with the timeline controller once metadata/data is ready, and the controller seeks/plays/pauses it from the shared playhead.
+- Screen audio is enabled only for the first screen video — the `shouldPlayAudio` prop sets `element.muted` in one place. Camera and media nodes stay muted so preview audio does not duplicate.
+
+Project recording metadata:
+
+- Electron project loading prefers each asset's manifest `durationMs` when present.
+- Some screen recordings expose width, height, and codec in the manifest but omit screen `durationMs`. In that case the project loader falls back to the longest known output duration from the same recording, and the renderer can still probe the file with a temporary `HTMLVideoElement` before creating the timeline clip.
+- Timeline clips should not be created from remote project assets until a positive duration is available when one can be read; otherwise they fall back to the minimum clip duration as a last resort.
 
 Quality notes:
 
@@ -229,6 +267,68 @@ Quality notes:
 - We do not cache video nodes, because caching would freeze or resample moving video.
 - We keep image smoothing behavior natural for regular video. Turning smoothing off is more appropriate for pixel art, not normal video.
 - Zoom can reveal source detail, but no renderer can invent detail beyond the video file's actual pixels.
+
+## Timeline And Playback
+
+The bottom editor panel now contains the `EditorTimelinePanel`, built on the workspace `@openscreen/timeline` package.
+
+Timeline model:
+
+- Every canvas video receives one `CanvasTimelineClip`.
+- `start` and `end` are timeline seconds.
+- `sourceIn` and `sourceOut` are non-destructive source seconds.
+- Minimum clip duration is `1 / 30` seconds.
+- The project timeline duration is the larger of the longest source asset and the furthest edited clip end.
+- Timeline transport controls live in the footer's top toolbar, above the ruler and lanes. They use the shared `Button` component, theme foreground/muted colors, `text-xs` proportional timer text in `0:01` / `1:05:00` format, and skip-back/play/skip-forward icon controls. Play/pause uses the same `PlayIcon` / `PauseIcon` pair as the recorder controls.
+- The ruler may extend past the longest clip for breathing room, but the playhead is capped at `timelineDuration`: `EditorTimelinePanel` passes `maxCursorTime={timelineDuration}` to the `Timeline` component, which clamps cursor drag and time-area clicks so the user cannot scrub into the empty trailing area.
+- Timeline zoom controls live in the footer's top toolbar. Fit is the default timeline view. Zoom in/out changes horizontal density and exits Fit; Fit computes a scale from the visible timeline width so the widest timeline clip block fits the viewport, then scrolls to that clip's start if it begins later in the timeline.
+- The footer owns the timeline surface background; the nested top toolbar and timeline panel use transparent backgrounds.
+- The timeline uses unlabeled neutral lanes with a 30 px start inset. There is no fixed track label rail or role-colored track background; clip role is communicated through the clip icon, color, and file name.
+- The lane area disables the full-height per-second grid background and avoids row divider borders; compact major ruler dots remain available for time orientation.
+- The ruler uses clock-style tick labels such as `0:10`, `1:00`, and `1:05:00`. Minor subdivision dots are hidden; compact major dot marks remain visible for orientation, while label rendering uses a wide measured-density stride to skip crowded numbers. Zooming in lowers that stride and reveals more detailed labels; fit mode may show coarser labels for long hour-scale videos.
+
+Editing behavior:
+
+- Moving a clip changes `start` / `end` while preserving its current source trim.
+- Resizing the left edge changes `sourceIn`.
+- Resizing the right edge changes `sourceOut`.
+- Clip move and resize interactions use timeline grid snap, timeline guide-line snap, and timeline edge auto-scroll.
+- Screen, camera, and media clips are independent. Moving or trimming one clip does not alter the others.
+- Clicking a timeline clip selects the matching canvas video node; selecting a canvas node highlights its clip.
+
+Playback sync behavior:
+
+- The committed playhead is the source of truth for media time and the transport readout.
+- Timeline hover preview seeking has been removed. Pointer movement over the timeline no longer samples canvas media, changes the transport readout, or writes `HTMLVideoElement.currentTime`.
+- Scrubbing the ruler, clicking the time area, pressing skip controls, or dragging the playhead seeks every registered video element to the sampled source frame.
+- `CanvasVideoNode` gates its paused `seeked` redraws through the timeline controller. A decoded frame is allowed to repaint the Konva content layer only when the media element's `currentTime` still matches the committed playhead target. This prevents stale seek redraws where an older completed seek briefly flashes after a newer playhead seek.
+- During playback the active clip whose range covers the playhead acts as the master clock: the controller reads its native `currentTime` and projects the timeline time from `clip.start + (element.currentTime - clip.sourceIn)`. The primary audio video is preferred; otherwise any visible clip works. This keeps the cursor lockstep with the frames being painted and prevents the rAF/decoder tug-of-war that used to manifest as frames jumping back and forth. The rAF estimate is only used when no master is available, or as a safety bound when the master jumps wildly (e.g., after tab-visibility gaps).
+- The master video is never seeked during natural playback; the controller only ensures it is playing. Secondary visible videos play at their native rate and are only re-aligned when drift grows past `TIMELINE_PLAYBACK_DRIFT_SECONDS` (250 ms). Clips that just became active are precisely seeked into place on the same frame they become visible.
+- When the playhead is before a clip starts or after it ends, the canvas hides that clip's Konva node and disables its hit testing.
+- When the playhead lands on the very end of the timeline, the longest clip(s) stay visible and sample `sourceOut - 1 ms` so the canvas holds their last frame instead of going blank. Clips that end earlier in the timeline still hide at their own boundary; the hold only applies to clips whose `end` is within `TIMELINE_END_HOLD_EPSILON_SECONDS` of `timelineDuration`.
+- A hidden inactive clip remains in editor state and in the timeline; scrub back into the clip range to show and edit the canvas node again.
+- Mute is owned by `CanvasVideoNode` via the `shouldPlayAudio` prop derived from `primaryAudioVideoId`. The timeline controller no longer writes `element.muted` so there is one source of truth for the audible track.
+- Video frame redraws still target the content layer only, so timeline playback does not repaint the background/grid or selection overlay layers.
+
+Hover preview behavior:
+
+- Hover-preview seek is **paused-only**. While the timeline is playing, `onTimeAreaHover` calls into `updateHoverPreviewTime` are dropped silently; the ghost cursor is not mounted; playback continues uninterrupted.
+- The `@openscreen/timeline` package fires `onTimeAreaHover(time | null)` from `TimeArea`'s overlay div. The package suppresses these events while the main playhead is being dragged via an internal `draggingCursorRef` shared with the `Cursor` component, so cursor drag never produces a competing hover stream.
+- The provider keeps the live hover position in `hoverPreviewTimeRef` (no React state per mouse move) and exposes `subscribeHoverTime` for the ghost cursor to follow. The only mounted-vs-unmounted decision is the `isHoverPreviewActive` boolean.
+- Hover seeks are coalesced via `requestAnimationFrame` and dispatched at most one in-flight per video element. Each in-flight write records its target source time in `hoverSeekStateRef`; the canvas-video-node hands every `seeked` event back to the provider, which compares `element.currentTime` to that target. Mismatched completions are dropped; matched completions trigger `layer.batchDraw()` and, if the live hover ref has moved past the target, immediately reissue without waiting for another rAF.
+- Every committed write (`syncTimelineMedia`) calls `cancelInFlightHoverSeeks()` first, so `setTimelineTime`, `pauseTimeline`, `playTimeline`'s end-of-tick pause, clip move/resize, and duration clamp all kill the hover pipeline before they issue committed seeks. Hover never writes committed state — the coupling is strictly one-way.
+- A 250 ms per-entry safety timeout guards against rare browser coalescing where a new `currentTime` write lands on the same decoded frame and no `seeked` ever fires.
+- A `document.visibilitychange = hidden` listener tears down all hover state so a tab-away mid-hover can't deliver stale `seeked` frames after the user returns.
+- Hover leave (pointer exits the time area, the user clicks, the user presses play, or the user starts a cursor drag) calls `syncTimelineMedia(timelineTime, …)` which snaps every visible video back to the committed frame within a single seek.
+
+Performance notes:
+
+- Timeline playback uses refs, media elements, and imperative subscribers for hot-path sync.
+- React state for the public playhead value is committed on a short interval during playback, not on every decoded video frame.
+- Timeline visibility is derived from the active clip set. The controller only toggles Konva `visible` / `listening` on ids whose active state changed, and media sync applies playback work to the active set plus newly inactive ids.
+- The active clip-set scan is cached by the nearest timeline clip boundary, so playback does not loop across every clip on every animation frame. A full scan happens after clip/video changes, node registration, or crossing the next clip start/end boundary.
+- Hover preview shares the same visibility cache and committed seek primitives (`safeSeekElement`, `getSeekableTimelineSourceTime`, `resolveTimelineFrame`, `syncTimelineVisibility`); only the in-flight bookkeeping and the gate decision are hover-specific.
+- The implementation keeps the existing constant Konva layer count and does not add DOM overlays per canvas node.
 
 ## Interaction Model
 
@@ -417,6 +517,13 @@ Decision:
 - The selection toolbar is regular DOM over the stage, not part of any Konva layer, so video frame redraws never repaint toolbar buttons.
 - Toolbar position is written imperatively through a ref. Drag and transform updates use the selected node's current `x`, `y`, `width`, `height`, `scale`, and `rotation` directly, avoiding hot-path `getClientRect()` and DOM size reads so the toolbar can follow the node immediately.
 - Video nodes stay mostly passive: stage-level delegated drag/select handlers and Transformer-level transform handlers avoid thousands of per-node interaction callbacks in large scenes.
+- Timeline playback keeps media control in provider refs. Registered `HTMLVideoElement`s are sampled from the playhead without per-frame React state writes for each canvas node.
+- Timeline active-clip visibility uses a cached boundary window, so steady playback between clip starts/ends reuses the current visible id set instead of rescanning every timeline clip on each `requestAnimationFrame`.
+- Timeline hover preview is back, paused-only, and gated. Every `seeked` event flows through the provider's single `onTimelineVideoSeeked(id, element, redrawLayer)` decision: if the element has a live hover entry whose target matches `currentTime`, redraw and (if the hover ref moved) reissue; otherwise fall back to the committed-time gate. Hover never writes committed state and every committed write cancels the hover pipeline first.
+- Paused video `seeked` events are not blindly redrawn. The video node asks the timeline controller whether the decoded frame still matches the committed playhead target before calling `contentLayer.batchDraw()`, so out-of-order seek completions do not create a forward/back frame flash.
+- During playback the master active clip drives the cursor from its native `currentTime`; the controller never re-seeks the master and only nudges secondary videos when drift exceeds `TIMELINE_PLAYBACK_DRIFT_SECONDS`. This replaces the older per-frame drift-correction that could trigger small back-and-forth seeks when rAF jitter pushed the rAF-accumulated time above the 80 ms threshold.
+- Explicit user actions (scrub, click, skip, clip move/resize, play start, clip activation) still go through a single forced sync that snaps every visible video to the target source frame within `TIMELINE_FORCE_SEEK_EPSILON_SECONDS`.
+- Inactive clip visibility is implemented by toggling the existing Konva media node's `visible` and `listening` attrs from the timeline controller; it does not add thumbnail canvases, extra Konva nodes, or DOM overlays.
 - Transformer anchors avoid canvas shadows in the hot path; strokes and fills provide the Canva-style control shape with much lower redraw cost.
 - Hover bounds use one reusable non-listening overlay rect. The hover path does not create React state updates, per-node mouse handlers, per-node DOM overlays, or `getClientRect()` scans across the scene.
 - The rotation readout is one fixed-position DOM node inside the workspace. Rotation frames update `textContent` and `visibility` only; they do not create React state updates, compute handle geometry, or add per-node overlays.
@@ -534,6 +641,7 @@ Result:
 - Konva video on canvas: https://new.konvajs.org/docs/sandbox/Video_On_Canvas.html
 - Konva Transformer API: https://konvajs.org/api/Konva.Transformer.html
 - Konva performance tips: https://konvajs.org/docs/performance/All_Performance_Tips.html
+- Konva listening false performance tip: https://konvajs.org/docs/performance/Listening_False.html
 - Konva Stage API, pointer position: https://konvajs.org/api/Konva.Stage.html
 - shadcn `Resizable` component: https://ui.shadcn.com/docs/components/base/resizable
 - `react-resizable-panels` API: https://github.com/bvaughn/react-resizable-panels
@@ -559,6 +667,7 @@ Browser smoke tests have been run with local Chrome against `http://localhost:35
 - High zoom reaches 25,000%.
 - Pixel grid appears at high zoom.
 - Footer zoom dropdown opens and lists expected actions.
+- Timeline panel renders in the footer, shows the empty-state timeline, disables play with no media, and logs no browser console errors.
 
 Known unrelated project issue:
 

@@ -33,7 +33,9 @@ export const Cursor: FC<CursorProps> = ({
   scrollSync,
   areaRef,
   maxScaleCount,
+  maxCursorTime,
   deltaScrollLeft,
+  draggingCursorRef,
   onCursorDragStart,
   onCursorDrag,
   onCursorDragEnd,
@@ -41,6 +43,19 @@ export const Cursor: FC<CursorProps> = ({
   const rowRnd = useRef<RowRndApi>(null);
   const draggingLeft = useRef<undefined | number>(undefined);
   const slots = useTimelineClassNames();
+
+  /**
+   * Right-edge bound for the cursor in viewport pixels. Capped by the visible
+   * timeline width, the maxScaleCount-derived ruler edge, and (when finite)
+   * the maxCursorTime-derived end-of-content edge — whichever is smallest.
+   */
+  const getMaxRightInViewport = (scroll: number) => {
+    const scaleRight = maxScaleCount * scaleWidth + startLeft - scroll;
+    const cursorTimeRight = Number.isFinite(maxCursorTime)
+      ? parserTimeToPixel(maxCursorTime, { startLeft, scaleWidth, scale }) - scroll
+      : Number.POSITIVE_INFINITY;
+    return Math.min(timelineWidth, scaleRight, cursorTimeRight);
+  };
 
   useEffect(() => {
     if (typeof draggingLeft.current === 'undefined') {
@@ -56,21 +71,24 @@ export const Cursor: FC<CursorProps> = ({
       parentRef={areaRef}
       bounds={{
         left: 0,
-        right: Math.min(timelineWidth, maxScaleCount * scaleWidth + startLeft - scrollLeft),
+        right: getMaxRightInViewport(scrollLeft),
       }}
       deltaScrollLeft={deltaScrollLeft}
       enableDragging={!disableDrag}
       enableResizing={false}
       onDragStart={() => {
+        if (draggingCursorRef) draggingCursorRef.current = true;
         onCursorDragStart && onCursorDragStart(cursorTime);
         draggingLeft.current = parserTimeToPixel(cursorTime, { startLeft, scaleWidth, scale }) - scrollLeft;
         rowRnd.current?.updateLeft(draggingLeft.current);
       }}
       onDragEnd={() => {
         const time = parserPixelToTime((draggingLeft.current || 0) + scrollLeft, { startLeft, scale, scaleWidth });
-        setCursor({ time });
-        onCursorDragEnd && onCursorDragEnd(time);
+        const clampedTime = Number.isFinite(maxCursorTime) ? Math.min(time, maxCursorTime) : time;
+        setCursor({ time: clampedTime });
+        onCursorDragEnd && onCursorDragEnd(clampedTime);
         draggingLeft.current = undefined;
+        if (draggingCursorRef) draggingCursorRef.current = false;
       }}
       onDrag={({ left }, scroll = 0) => {
         const scrollLeft = scrollSync.current?.state.scrollLeft || 0;
@@ -83,6 +101,17 @@ export const Cursor: FC<CursorProps> = ({
           // While auto-scrolling, clamp left to its minimum value
           if ((draggingLeft.current || 0) < startLeft - scrollLeft - scroll) {
             draggingLeft.current = startLeft - scrollLeft - scroll;
+          }
+        }
+        // Also clamp on the right so the playhead cannot pass the configured
+        // maxCursorTime (set by callers to the longest clip's end). Without
+        // this the internal drag state would silently advance past the cap
+        // even if the consumer pulled the cursor back via setTime.
+        if (Number.isFinite(maxCursorTime)) {
+          const maxRight =
+            parserTimeToPixel(maxCursorTime, { startLeft, scaleWidth, scale }) - scrollLeft;
+          if ((draggingLeft.current || 0) > maxRight) {
+            draggingLeft.current = maxRight;
           }
         }
         rowRnd.current?.updateLeft(draggingLeft.current || 0);

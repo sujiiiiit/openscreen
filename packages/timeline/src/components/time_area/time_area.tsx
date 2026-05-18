@@ -16,7 +16,7 @@ export type TimeAreaProps = CommonProp & {
 };
 
 /** Animation timeline component */
-export const TimeArea: FC<TimeAreaProps> = ({ setCursor, maxScaleCount, hideCursor, scale, scaleWidth, scaleCount, scaleSplitCount, startLeft, scrollLeft, onClickTimeArea, getScaleRender }) => {
+export const TimeArea: FC<TimeAreaProps> = ({ setCursor, maxScaleCount, maxCursorTime, hideCursor, scale, scaleWidth, scaleCount, scaleSplitCount, startLeft, scrollLeft, onClickTimeArea, onTimeAreaHover, draggingCursorRef, getScaleRender }) => {
   const gridRef = useRef<Grid>(null);
   const slots = useTimelineClassNames();
   /** Whether to render subdivision ticks */
@@ -94,10 +94,30 @@ export const TimeArea: FC<TimeAreaProps> = ({ setCursor, maxScaleCount, hideCurs
                   const left = Math.max(position + scrollLeft, startLeft);
                   if (left > maxScaleCount * scaleWidth + startLeft - scrollLeft) return;
 
-                  const time = parserPixelToTime(left, { startLeft, scale, scaleWidth });
+                  const rawTime = parserPixelToTime(left, { startLeft, scale, scaleWidth });
+                  const time = Number.isFinite(maxCursorTime) ? Math.min(rawTime, maxCursorTime) : rawTime;
                   const result = onClickTimeArea && onClickTimeArea(time, e);
                   if (result === false) return; // Returning false prevents the time from being set
                   setCursor({ time });
+                }}
+                onMouseMove={(e) => {
+                  if (hideCursor || !onTimeAreaHover) return;
+                  // Skip while the main cursor is being dragged so we don't
+                  // emit two competing time-cursors (the drag handler already
+                  // owns the cursor position for the duration of the drag).
+                  if (draggingCursorRef?.current) return;
+                  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                  const position = e.clientX - rect.x;
+                  const left = Math.max(position + scrollLeft, startLeft);
+                  if (left > maxScaleCount * scaleWidth + startLeft - scrollLeft) return;
+
+                  const rawTime = parserPixelToTime(left, { startLeft, scale, scaleWidth });
+                  const time = Number.isFinite(maxCursorTime) ? Math.min(rawTime, maxCursorTime) : rawTime;
+                  onTimeAreaHover(time);
+                }}
+                onMouseLeave={() => {
+                  if (hideCursor || !onTimeAreaHover) return;
+                  onTimeAreaHover(null);
                 }}
                 className={cn('absolute left-0 top-0 cursor-pointer', slots.timeAreaInteract)}
               ></div>
