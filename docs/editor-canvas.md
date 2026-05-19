@@ -58,7 +58,7 @@ Implemented:
 - High-zoom artboard pixel grid.
 - Snapping with Figma-style alignment guides during drag and resize, plus keyboard arrow nudging with grid snap.
 - Workspace theme color token: `editor-workspace` = `#1e1e1e`.
-- Per-node video appearance via the Video sidebar tab: squircle corner radius + smoothing.
+- Per-node video appearance via the Video sidebar tab: squircle corner radius + smoothing, a squircle-following border (width, color, alignment, offset), and a squircle-following drop shadow (color with baked alpha, X / Y, blur, spread).
 - Auto-routing of canvas / timeline selection to the Video tab via a `SidebarSelectionBridge`.
 
 Not implemented yet:
@@ -89,8 +89,9 @@ Not implemented yet:
 | `components/editor/canvas/provider.tsx`                   | Editor canvas state, video import metadata, artboard state, viewport size, view transform, and actions.                                                         |
 | `components/editor/canvas/editor-workspace.tsx`           | Konva stage shell, layer composition, viewport sizing, zoom, pan, and keyboard shortcuts.                                                                       |
 | `components/editor/canvas/artboard-pixel-grid.tsx`        | Custom non-listening pixel grid renderer for high zoom inside the artboard.                                                                                     |
-| `components/editor/canvas/canvas-video-node.tsx`          | Live video node rendering, frame callbacks, object URL playback, cover crop attrs, squircle sceneFunc, and Konva node registration.                             |
-| `components/editor/video-panel.tsx`                       | Video tab UI: file-card list of every video on the canvas, with the appearance controls (corner radius + smoothing) shown when a card is selected.              |
+| `components/editor/canvas/canvas-video-node.tsx`          | Live video node rendering, frame callbacks, object URL playback, cover crop attrs, squircle sceneFunc with passes for drop shadow (off-canvas-cast technique) and per-node border, hitFunc kept at the node body, and Konva node registration.   |
+| `components/editor/video-panel.tsx`                       | Video tab UI: file-card list of every video on the canvas, with the appearance controls (Corners — radius + smoothing; Border — width, color, alignment, offset; Shadow — color with baked alpha, X, Y, blur, spread) shown when a card is selected.              |
+| `lib/rgba-color.ts`                                       | Minimal rgba parser / formatter shared by `CanvasVideoNode` and the Shadow color picker. Accepts `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb(...)`, `rgba(...)`, and `transparent`; emits a normalised `rgba(R, G, B, A)` string.                                                                |
 | `components/editor/sidebar/selection-bridge.tsx`          | Subscribes to canvas selection and switches the sidebar to the Video tab + opens the sidebar whenever a video is selected.                                      |
 | `lib/squircle.ts`                                         | Figma-style continuous-corner math. `computeSquircleCornerParams(radius, smoothing)` and `traceSquirclePath(ctx, w, h, params)` for allocation-free hot path.   |
 | `components/editor/canvas/selected-video-transformer.tsx` | Selected node transformer wiring, handle sizing, rotation snaps, and transform constraints.                                                                     |
@@ -160,7 +161,7 @@ Layer split:
 
 Important types:
 
-- `CanvasVideoItem`: `id`, `fileName`, `objectUrl`, `fileSize`, `intrinsicWidth`, `intrinsicHeight`, `durationMs`, `x`, `y`, `width`, `height`, `rotation`, `locked`, `role`, plus per-node appearance fields `cornerRadius`, `cornerSmoothing`.
+- `CanvasVideoItem`: `id`, `fileName`, `objectUrl`, `fileSize`, `intrinsicWidth`, `intrinsicHeight`, `durationMs`, `x`, `y`, `width`, `height`, `rotation`, `locked`, `role`, plus per-node appearance fields `cornerRadius`, `cornerSmoothing`, `borderWidth`, `borderColor`, `borderOffset`, `borderAlignment` (`"inside" | "center" | "outside"`), `shadowColor` (rgba string with baked alpha), `shadowBlur`, `shadowOffsetX`, `shadowOffsetY`, `shadowSpread`.
 - `CanvasTimelineClip`: `id`, `videoId`, `start`, `end`, `sourceIn`, `sourceOut`.
 - `EditorArtboard`: `presetId`, `width`, `height`.
 - `ViewTransform`: `scale`, `x`, `y`.
@@ -171,7 +172,7 @@ Important actions:
 - `addVideoFile(file)`
 - `selectItem(id | null)`
 - `updateVideoTransform(id, patch)`
-- `updateVideoAppearance(id, patch)` — partial update covering `cornerRadius` and `cornerSmoothing`. Bypasses the `locked` gate (locking only blocks geometry).
+- `updateVideoAppearance(id, patch)` — partial update covering `cornerRadius`, `cornerSmoothing`, `borderWidth`, `borderColor`, `borderOffset`, `borderAlignment`, `shadowColor`, `shadowBlur`, `shadowOffsetX`, `shadowOffsetY`, `shadowSpread`. Bypasses the `locked` gate (locking only blocks geometry); the no-op bail-out compares all eleven fields so a slider parked at its current value never triggers a redraw.
 - `setVideoLocked(id, locked)`
 - `duplicateVideo(id)`
 - `deleteVideo(id)`
@@ -303,11 +304,21 @@ State, per video:
 
 - `cornerRadius` — artboard pixels. `0` means a sharp rectangle.
 - `cornerSmoothing` — `0..1`. `0` = circular arc (CSS `border-radius`). `0.6` = macOS look. `1` = fully continuous-curvature squircle.
+- `borderWidth` — artboard pixels. `0` skips the border render path entirely.
+- `borderColor` — CSS color string used as the stroke style.
+- `borderOffset` — signed artboard pixels added to the stroke centerline (positive pushes outward, negative pulls inward).
+- `borderAlignment` — `"inside" | "center" | "outside"`. Adds ±`borderWidth / 2` (or `0` for center) to `borderOffset` to produce the final centerline, matching Figma's stroke-alignment semantics. `outside` at offset 0 sits flush outside the node.
+- `shadowColor` — CSS rgba string. Alpha is baked in (`rgba(R, G, B, A)`); there is no separate `shadowOpacity` field. The shadow pass short-circuits when alpha = 0.
+- `shadowBlur` — gaussian blur radius. `0` is a sharp duplicate cast.
+- `shadowOffsetX`, `shadowOffsetY` — signed displacement of the shadow relative to the silhouette.
+- `shadowSpread` — Figma-style spread: positive grows the caster silhouette outward before blur is applied (corner radius scales by the same delta), negative shrinks it. The shadow pass also short-circuits when blur, both offsets, and spread are all 0 (the cast would land exactly under the silhouette and be hidden by the image).
 
 Defaults per role at creation:
 
 - `screen`, `media`: `cornerRadius = 0`, `cornerSmoothing = 0.6`.
 - `camera`: `cornerRadius = floor(min(intrinsicW, intrinsicH) / 2)`, `cornerSmoothing = 1`. Renders as a perfect circle by default.
+- All roles: `borderWidth = 0`, `borderColor = "#000000"`, `borderOffset = 0`, `borderAlignment = "inside"`. The border is invisible until the user nudges the width slider.
+- All roles: `shadowColor = "rgba(0, 0, 0, 0.25)"`, `shadowBlur = 0`, `shadowOffsetX = 0`, `shadowOffsetY = 0`, `shadowSpread = 0`. The default rgba is opaque enough to look right on the first slider drag, but the all-zero spatial defaults keep the shadow invisible until the user nudges it.
 
 Squircle math (`lib/squircle.ts`):
 
@@ -316,17 +327,25 @@ Squircle math (`lib/squircle.ts`):
 - `clampSquircleRadius(width, height, radius)` clamps to `min(width, height) / 2` so the path can never self-intersect.
 - `tracePathOrRect(ctx, width, height, params | null)` collapses to a single `ctx.rect()` call when `params === null` (radius = 0), keeping the radius-0 case effectively free.
 
-`CanvasVideoNode` sceneFunc:
+`CanvasVideoNode` sceneFunc, in render order so layering matches Figma (shadow underneath, video in the middle, border on top):
 
-1. If `squircleParams !== null`: trace the silhouette and call `context.clip()`. When `cornerRadius === 0` the trace collapses to a single `ctx.rect()` call and clipping is skipped entirely.
-2. `drawImage` the live `HTMLVideoElement` with the existing object-fit-cover crop attrs.
+1. If `shadowParams !== null`: two-pass shadow with a `destination-out` mask, all at the silhouette's real position inside the artboard clip group.
+   - **Pass 1** — translate to `(originX, originY)`, set `shadowColor` / `shadowBlur` / `shadowOffsetX` / `shadowOffsetY`, trace the spread-enlarged squircle, fill with `#000`. Canvas2D paints both the silhouette and its blurred drop shadow.
+   - **Pass 2** — translate again, set `globalCompositeOperation = "destination-out"`, retrace the same path, fill. The silhouette pixels we just laid down get erased so only the shadow remains.
+   - We tried the classic off-canvas-cast trick first (path at `-1e6`, compensated `shadowOffset*`). Browsers cull draw operations whose path bbox doesn't intersect the current clip — and our videos live inside an artboard `clipX/Y/Width/Height` group on the workspace's content layer — so the whole op (including its shadow) got dropped except for tiny precision-spill slivers right at the clip edge. The in-place draw + mask approach has no cull risk. The artboard background lives on a separate Konva layer, so `destination-out` only touches the videos layer canvas. Overlapping videos on the same layer can see their pixels chipped out in the spread region — rare in practice and accepted for v1.
+2. If `squircleParams !== null`: trace the silhouette and call `context.clip()`. When `cornerRadius === 0` the trace collapses to a single `ctx.rect()` call and clipping is skipped entirely.
+3. `drawImage` the live `HTMLVideoElement` with the existing object-fit-cover crop attrs.
+4. If `borderParams !== null`: translate to the border-box origin, trace a separate squircle at `width + 2·signedDistance` × `height + 2·signedDistance` with `cornerRadius + signedDistance`, and stroke it. The translate handles outside-aligned and positive-offset borders, which draw past the node bounds; the artboard-level clip group keeps strokes contained.
 
-The `hitFunc` uses the same squircle path so clicks in the rounded-off corners pass through to whatever sits underneath — what the user sees is what they can click.
+`borderParams` is memoized on `(borderWidth, borderColor, borderOffset, borderAlignment, cornerRadius, cornerSmoothing, width, height)` and returns `null` for `width = 0` or when the inset collapses the border box past its own bounds. The trace reuses `clampSquircleRadius` + `computeSquircleCornerParams` so the same allocation-free hot path applies.
+
+The `hitFunc` uses the same squircle path **at the node's own size** so clicks in the rounded-off corners pass through to whatever sits underneath. The border is purely visual; clicks past the node bounds (outside-aligned border, positive offset) fall through to whatever sits underneath, keeping the selectable region stable as the user tunes width / offset.
 
 Tab routing:
 
 - `SidebarSelectionBridge` mounts inside both `EditorCanvasProvider` and `SidebarTabsProvider`. It is render-less and reacts only to `selectedItemId` changes.
 - On selection transition `null → id` or `idA → idB`, it routes to the Video tab and opens the sidebar.
+- Artboard selections (`selectedItemId === ARTBOARD_SELECTION_ID`) are skipped on purpose. The workspace's artboard-rect click handler already calls `selectSidebarTab("background")` synchronously after `selectItem(ARTBOARD_SELECTION_ID)`; without the skip, the bridge effect would fire on the same render and override the Background tab back to Video — visible whenever the previous selection was a video on the timeline (so the transition counts as `idA → idB`).
 - The `useSidebarTabs` reducer toggles `isOpen` when `selectTab` is called with the already-active tab; the bridge calls `open()` instead when `activeTab === "video"` to avoid an accidental collapse.
 - Deselection (`id → null`) is deliberately ignored — the user keeps whatever panel they were last working in.
 
@@ -334,14 +353,17 @@ Panel layout:
 
 - The Video panel has two mutually-exclusive views driven entirely by `selectedItemId`. It uses `Tabs` from `@/components/ui/tabs` as a controlled motion container only — there is no visible tab bar; the active value is fully derived from selection, with no `onValueChange` so nothing inside the Tabs subtree can toggle the view on its own:
   - **List view** (no selection): heading + one-line description + a single-column stack of `Squircle` file cards, one per video on the canvas. Each card shows the `FileEmpty02` icon on the left and the file name + file size stacked on the right (formatted via a local `formatFileSize` helper — no monospace digit treatment). Tapping a card calls `selectItem(id)`, which is the single source of truth: canvas Transformer, timeline clip highlight, and the panel itself all derive from it.
-  - **Settings view** (video selected): replaces the heading with a `Button variant="link"` "← Videos" affordance at the same `text-sm font-semibold` slot, with its own one-line description below. Clicking it calls `selectItem(null)`, returning the user to list view and clearing the canvas / timeline selection in the same hop. Beneath the heading sit the appearance controls (Corners — radius + smoothing).
+  - **Settings view** (video selected): replaces the heading with a `Button variant="link"` "← Videos" affordance at the same `text-sm font-semibold` slot, with its own one-line description below. Clicking it calls `selectItem(null)`, returning the user to list view and clearing the canvas / timeline selection in the same hop. Beneath the heading sit three appearance groups:
+    - **Corners** — radius + smoothing.
+    - **Border** — width slider, color swatch with native `<input type="color">`, alignment radiogroup of `inside | center | outside`, and offset slider in `[-64, +64]` artboard px. All Border controls except Width are disabled while `borderWidth === 0`, mirroring Figma's "no stroke when width is 0" behaviour.
+    - **Shadow** — inline color row (`ColorAlphaSwatch`: a checker-backed native `<input type="color">` swatch with a directly-editable hex text input beside it — no popover), Opacity slider (0–100% — edits the alpha channel of `shadowColor`, default 25%), and X / Y / Blur / Spread sliders. Opacity lives on its own row beside the spatial sliders, but `shadowColor` remains the single source of truth and stores alpha as part of the rgba string.
 - When no videos exist yet, list view shows an inline `Squircle` hint pointing at the Background tab.
 - The settings-view subtree is keyed on the video id so internal refs reset cleanly across selections.
 - `CanvasVideoItem.fileSize` is populated from `File.size` on local uploads and `ProjectAsset.fileSize` on hydration, and falls back to `0` ("Unknown size") for remote streams without a known byte count.
 
 Performance posture:
 
-- Squircle params are memoized in `CanvasVideoNode` on `(cornerRadius, cornerSmoothing, width, height)`. Steady-state playback and pan/zoom never recompute trig.
+- Squircle params are memoized in `CanvasVideoNode` on `(cornerRadius, cornerSmoothing, width, height)`. Border params are a separate memo on `(borderWidth, borderColor, borderOffset, borderAlignment, cornerRadius, cornerSmoothing, width, height)` and short-circuit to `null` when `borderWidth = 0`, skipping the stroke pass entirely. Shadow params memo on `(shadowColor, shadowBlur, shadowOffsetX, shadowOffsetY, shadowSpread, cornerRadius, cornerSmoothing, width, height)` and short-circuit when the parsed alpha is 0 or every spatial field (`blur`, `offsetX`, `offsetY`, `spread`) is 0. Steady-state playback and pan/zoom never recompute trig for any path.
 - The hot-path trace is allocation-free and issues a constant ~17 canvas calls per node per draw (4 lineTo + 8 bezierCurveTo + 4 arc + 1 moveTo). The non-rounded fast-path is one `ctx.rect()` call.
 - Rounded clipping is only enabled when `cornerRadius > 0`; otherwise the sceneFunc skips `context.clip()` entirely, saving a canvas state push per node per frame.
 - The `updateVideoAppearance` action bails out when every patched field equals the current value, so a slider dragged at its committed position never triggers a downstream React re-render or Konva redraw.
@@ -468,8 +490,9 @@ Zooming:
 - `Cmd/Ctrl + +` zooms in.
 - `Cmd/Ctrl + -` zooms out.
 - `Cmd/Ctrl + 0` zooms to 100%.
-- `Shift + 1` fits the artboard.
-- Footer zoom dropdown supports zoom in, zoom out, zoom to fit, 50%, 100%, and 200%.
+- `Shift + 2` zooms to 200%.
+- `Shift + F` fits the artboard.
+- Footer zoom dropdown supports zoom in (⌘+), zoom out (⌘−), zoom to 100% (⌘0), zoom to 200% (⇧2), and zoom to fit (⇧F). All entries are plain menu items with `onClick`; the dropdown no longer uses radio/check items.
 
 Current constants:
 

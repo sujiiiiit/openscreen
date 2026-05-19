@@ -9,12 +9,35 @@ import { Slider } from "@/components/ui/slider"
 import { Tabs, TabsContent, TabsContents } from "@/components/ui/tabs"
 import { cn } from "@/lib/utils"
 import {
+  formatRgba,
+  parseRgba,
+  rgbaToHex,
+  type Rgba,
+} from "@/lib/rgba-color"
+import {
   useEditorCanvasActions,
   useEditorCanvasMedia,
 } from "@/components/editor/canvas/provider"
-import type { CanvasVideoItem } from "@/types/editor-canvas"
+import type {
+  CanvasBorderAlignment,
+  CanvasVideoItem,
+} from "@/types/editor-canvas"
 
 const SMOOTHING_DEFAULT_PERCENT = 60
+const BORDER_WIDTH_MAX = 64
+const BORDER_OFFSET_RANGE = 64
+const BORDER_DEFAULT_COLOR = "#000000"
+const BORDER_ALIGNMENT_OPTIONS: Array<{
+  value: CanvasBorderAlignment
+  label: string
+}> = [
+  { value: "inside", label: "Inside" },
+  { value: "center", label: "Center" },
+  { value: "outside", label: "Outside" },
+]
+const SHADOW_OFFSET_RANGE = 128
+const SHADOW_BLUR_MAX = 128
+const SHADOW_SPREAD_RANGE = 64
 
 const CARD_CORNER_RADIUS = 16
 const CARD_CORNER_SMOOTHING = 1
@@ -199,6 +222,378 @@ function VideoFileGrid({
 }
 
 
+function BorderControls({ video }: { video: CanvasVideoItem }) {
+  const { updateVideoAppearance } = useEditorCanvasActions()
+
+  const borderWidth = Math.max(0, Math.min(BORDER_WIDTH_MAX, Math.round(video.borderWidth)))
+  const borderOffset = Math.max(
+    -BORDER_OFFSET_RANGE,
+    Math.min(BORDER_OFFSET_RANGE, Math.round(video.borderOffset))
+  )
+  const borderColor = video.borderColor || BORDER_DEFAULT_COLOR
+  const borderDisabled = borderWidth <= 0
+
+  const setBorderWidth = (next: number) => {
+    const clamped = Math.max(0, Math.min(BORDER_WIDTH_MAX, Math.round(next)))
+    if (clamped === video.borderWidth) return
+    updateVideoAppearance(video.id, { borderWidth: clamped })
+  }
+
+  const setBorderColor = (next: string) => {
+    if (next === video.borderColor) return
+    updateVideoAppearance(video.id, { borderColor: next })
+  }
+
+  const setBorderOffset = (next: number) => {
+    const clamped = Math.max(
+      -BORDER_OFFSET_RANGE,
+      Math.min(BORDER_OFFSET_RANGE, Math.round(next))
+    )
+    if (clamped === video.borderOffset) return
+    updateVideoAppearance(video.id, { borderOffset: clamped })
+  }
+
+  const setBorderAlignment = (next: CanvasBorderAlignment) => {
+    if (next === video.borderAlignment) return
+    updateVideoAppearance(video.id, { borderAlignment: next })
+  }
+
+  return (
+    <div className="flex w-full flex-col gap-5">
+      <h4 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase select-none">
+        Border
+      </h4>
+      <AdjustmentRow
+        label="Width"
+        value={borderWidth}
+        onValueChange={setBorderWidth}
+        onReset={() => setBorderWidth(0)}
+        min={0}
+        max={BORDER_WIDTH_MAX}
+        showValueTooltip
+        formatValue={(v) => `${Math.round(v)}px`}
+      />
+      <div className="flex w-full items-center justify-between gap-3">
+        <h4
+          className={cn(
+            "text-xs font-semibold transition-opacity select-none",
+            borderDisabled && "opacity-50"
+          )}
+        >
+          Color
+        </h4>
+        <div className="flex items-center gap-2">
+          <label
+            className={cn(
+              "relative inline-flex size-6 cursor-pointer items-center justify-center overflow-hidden rounded-md border border-border ring-offset-background transition-shadow hover:ring-2 hover:ring-ring/40 focus-within:ring-2 focus-within:ring-ring/40",
+              borderDisabled && "pointer-events-none opacity-50"
+            )}
+            style={{ backgroundColor: borderColor }}
+            title={borderColor}
+          >
+            <input
+              type="color"
+              value={borderColor}
+              onChange={(event) => setBorderColor(event.target.value)}
+              disabled={borderDisabled}
+              className="absolute inset-0 size-full cursor-pointer opacity-0"
+              aria-label="Border color"
+            />
+          </label>
+          <span className="font-mono text-xs text-muted-foreground uppercase tabular-nums select-none">
+            {borderColor.replace(/^#/, "").toUpperCase()}
+          </span>
+        </div>
+      </div>
+      <div className="flex w-full flex-col gap-2">
+        <h4
+          className={cn(
+            "text-xs font-semibold transition-opacity select-none",
+            borderDisabled && "opacity-50"
+          )}
+        >
+          Alignment
+        </h4>
+        <div
+          role="radiogroup"
+          aria-label="Border alignment"
+          className={cn(
+            "inline-flex w-full overflow-hidden rounded-md border border-border bg-muted/40 p-0.5",
+            borderDisabled && "pointer-events-none opacity-50"
+          )}
+        >
+          {BORDER_ALIGNMENT_OPTIONS.map((option) => {
+            const checked = video.borderAlignment === option.value
+            return (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={checked}
+                onClick={() => setBorderAlignment(option.value)}
+                disabled={borderDisabled}
+                className={cn(
+                  "flex-1 rounded-sm px-2 py-1 text-xs font-medium transition-colors outline-none select-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                  checked
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                {option.label}
+              </button>
+            )
+          })}
+        </div>
+      </div>
+      <AdjustmentRow
+        label="Offset"
+        value={borderOffset}
+        onValueChange={setBorderOffset}
+        onReset={() => setBorderOffset(0)}
+        min={-BORDER_OFFSET_RANGE}
+        max={BORDER_OFFSET_RANGE}
+        disabled={borderDisabled}
+        showValueTooltip
+        formatValue={(v) => `${Math.round(v)}px`}
+        resetDisabled={borderOffset === 0}
+      />
+    </div>
+  )
+}
+
+// Inline rgba color picker. The swatch is a native `<input type="color">`
+// (RGB), and the hex sits beside it as a directly-editable text input.
+// Alpha lives on a sibling Opacity slider in the parent panel — keeping
+// the swatch focused on RGB means no popover and no extra click.
+function ColorAlphaSwatch({
+  value,
+  onChange,
+  disabled,
+  ariaLabel,
+}: {
+  value: string
+  onChange: (next: string) => void
+  disabled?: boolean
+  ariaLabel: string
+}) {
+  const parsed = parseRgba(value) ?? { r: 0, g: 0, b: 0, a: 0 }
+  const hex = rgbaToHex(parsed)
+
+  const emit = (next: Partial<Rgba>) => {
+    const merged: Rgba = {
+      r: next.r ?? parsed.r,
+      g: next.g ?? parsed.g,
+      b: next.b ?? parsed.b,
+      a: next.a ?? parsed.a,
+    }
+    onChange(formatRgba(merged))
+  }
+
+  const handleHex = (hexInput: string) => {
+    const candidate = parseRgba(hexInput)
+    if (!candidate) return
+    emit({ r: candidate.r, g: candidate.g, b: candidate.b })
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <label
+        aria-label={ariaLabel}
+        // Checker behind the color so alpha < 1 reads at a glance — the
+        // same affordance Figma uses.
+        className={cn(
+          "relative inline-flex size-6 cursor-pointer items-center justify-center overflow-hidden rounded-md border border-border ring-offset-background transition-shadow outline-none hover:ring-2 hover:ring-ring/40 focus-within:ring-2 focus-within:ring-ring/40",
+          disabled && "pointer-events-none opacity-50"
+        )}
+        style={{
+          backgroundImage:
+            "linear-gradient(45deg, #c0c0c0 25%, transparent 25%), linear-gradient(-45deg, #c0c0c0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #c0c0c0 75%), linear-gradient(-45deg, transparent 75%, #c0c0c0 75%)",
+          backgroundSize: "8px 8px",
+          backgroundPosition: "0 0, 0 4px, 4px -4px, -4px 0",
+        }}
+      >
+        <span
+          aria-hidden
+          className="absolute inset-0 size-full"
+          style={{ backgroundColor: value }}
+        />
+        <input
+          type="color"
+          value={hex}
+          onChange={(event) => handleHex(event.target.value)}
+          disabled={disabled}
+          className="absolute inset-0 size-full cursor-pointer opacity-0"
+        />
+      </label>
+      <input
+        type="text"
+        value={hex.replace(/^#/, "").toUpperCase()}
+        onChange={(event) => handleHex(`#${event.target.value}`)}
+        disabled={disabled}
+        spellCheck={false}
+        // Width tuned for six hex characters + a touch of breathing room.
+        // The caret-monospace look matches the Border row's read-only hex
+        // chip for visual continuity across the panel.
+        className={cn(
+          "w-16 rounded-md border border-border bg-background px-1.5 py-1 font-mono text-xs tracking-wider tabular-nums uppercase outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30",
+          disabled && "pointer-events-none opacity-50"
+        )}
+      />
+    </div>
+  )
+}
+
+function ShadowControls({ video }: { video: CanvasVideoItem }) {
+  const { updateVideoAppearance } = useEditorCanvasActions()
+
+  const blur = Math.max(0, Math.min(SHADOW_BLUR_MAX, Math.round(video.shadowBlur)))
+  const offsetX = Math.max(
+    -SHADOW_OFFSET_RANGE,
+    Math.min(SHADOW_OFFSET_RANGE, Math.round(video.shadowOffsetX))
+  )
+  const offsetY = Math.max(
+    -SHADOW_OFFSET_RANGE,
+    Math.min(SHADOW_OFFSET_RANGE, Math.round(video.shadowOffsetY))
+  )
+  const spread = Math.max(
+    -SHADOW_SPREAD_RANGE,
+    Math.min(SHADOW_SPREAD_RANGE, Math.round(video.shadowSpread))
+  )
+  // Alpha is still stored on `shadowColor` (single source of truth, rgba
+  // string). The Opacity slider just edits that field's alpha channel.
+  const parsedShadow = parseRgba(video.shadowColor) ?? {
+    r: 0,
+    g: 0,
+    b: 0,
+    a: 0,
+  }
+  const opacityPercent = Math.round(parsedShadow.a * 100)
+
+  const setShadowField = (
+    key:
+      | "shadowBlur"
+      | "shadowOffsetX"
+      | "shadowOffsetY"
+      | "shadowSpread",
+    next: number,
+    min: number,
+    max: number
+  ) => {
+    const clamped = Math.max(min, Math.min(max, Math.round(next)))
+    if (clamped === video[key]) return
+    updateVideoAppearance(video.id, { [key]: clamped })
+  }
+
+  const setShadowColor = (next: string) => {
+    if (next === video.shadowColor) return
+    updateVideoAppearance(video.id, { shadowColor: next })
+  }
+
+  const setShadowOpacity = (percent: number) => {
+    const clamped = Math.max(0, Math.min(100, Math.round(percent))) / 100
+    if (clamped === parsedShadow.a) return
+    setShadowColor(formatRgba({ ...parsedShadow, a: clamped }))
+  }
+
+  return (
+    <div className="flex w-full flex-col gap-5">
+      <h4 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase select-none">
+        Shadow
+      </h4>
+      <div className="flex w-full items-center justify-between gap-3">
+        <h4 className="text-xs font-semibold select-none">Color</h4>
+        <ColorAlphaSwatch
+          value={video.shadowColor}
+          onChange={setShadowColor}
+          ariaLabel="Shadow color"
+        />
+      </div>
+      <AdjustmentRow
+        label="Opacity"
+        value={opacityPercent}
+        onValueChange={setShadowOpacity}
+        onReset={() => setShadowOpacity(25)}
+        min={0}
+        max={100}
+        showValueTooltip
+        formatValue={(v) => `${Math.round(v)}%`}
+        resetDisabled={opacityPercent === 25}
+      />
+      <AdjustmentRow
+        label="X"
+        value={offsetX}
+        onValueChange={(v) =>
+          setShadowField(
+            "shadowOffsetX",
+            v,
+            -SHADOW_OFFSET_RANGE,
+            SHADOW_OFFSET_RANGE
+          )
+        }
+        onReset={() =>
+          setShadowField("shadowOffsetX", 0, -SHADOW_OFFSET_RANGE, SHADOW_OFFSET_RANGE)
+        }
+        min={-SHADOW_OFFSET_RANGE}
+        max={SHADOW_OFFSET_RANGE}
+        showValueTooltip
+        formatValue={(v) => `${Math.round(v)}px`}
+        resetDisabled={offsetX === 0}
+      />
+      <AdjustmentRow
+        label="Y"
+        value={offsetY}
+        onValueChange={(v) =>
+          setShadowField(
+            "shadowOffsetY",
+            v,
+            -SHADOW_OFFSET_RANGE,
+            SHADOW_OFFSET_RANGE
+          )
+        }
+        onReset={() =>
+          setShadowField("shadowOffsetY", 0, -SHADOW_OFFSET_RANGE, SHADOW_OFFSET_RANGE)
+        }
+        min={-SHADOW_OFFSET_RANGE}
+        max={SHADOW_OFFSET_RANGE}
+        showValueTooltip
+        formatValue={(v) => `${Math.round(v)}px`}
+        resetDisabled={offsetY === 0}
+      />
+      <AdjustmentRow
+        label="Blur"
+        value={blur}
+        onValueChange={(v) => setShadowField("shadowBlur", v, 0, SHADOW_BLUR_MAX)}
+        onReset={() => setShadowField("shadowBlur", 0, 0, SHADOW_BLUR_MAX)}
+        min={0}
+        max={SHADOW_BLUR_MAX}
+        showValueTooltip
+        formatValue={(v) => `${Math.round(v)}px`}
+        resetDisabled={blur === 0}
+      />
+      <AdjustmentRow
+        label="Spread"
+        value={spread}
+        onValueChange={(v) =>
+          setShadowField(
+            "shadowSpread",
+            v,
+            -SHADOW_SPREAD_RANGE,
+            SHADOW_SPREAD_RANGE
+          )
+        }
+        onReset={() =>
+          setShadowField("shadowSpread", 0, -SHADOW_SPREAD_RANGE, SHADOW_SPREAD_RANGE)
+        }
+        min={-SHADOW_SPREAD_RANGE}
+        max={SHADOW_SPREAD_RANGE}
+        showValueTooltip
+        formatValue={(v) => `${Math.round(v)}px`}
+        resetDisabled={spread === 0}
+      />
+    </div>
+  )
+}
+
 function VideoAppearanceControls({ video }: { video: CanvasVideoItem }) {
   const { updateVideoAppearance } = useEditorCanvasActions()
 
@@ -228,32 +623,36 @@ function VideoAppearanceControls({ video }: { video: CanvasVideoItem }) {
   }
 
   return (
-    <div className="flex w-full flex-col gap-5">
-      <h4 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase select-none">
-        Corners
-      </h4>
-      <AdjustmentRow
-        label="Radius"
-        value={radius}
-        onValueChange={setRadius}
-        onReset={() => setRadius(0)}
-        min={0}
-        max={radiusMax}
-        disabled={radiusMax <= 0}
-        showValueTooltip
-        formatValue={(v) => `${Math.round(v)}px`}
-      />
-      <AdjustmentRow
-        label="Smoothing"
-        value={smoothingPercent}
-        onValueChange={setSmoothingPercent}
-        onReset={() => setSmoothingPercent(SMOOTHING_DEFAULT_PERCENT)}
-        min={0}
-        max={100}
-        showValueTooltip
-        formatValue={(v) => `${Math.round(v)}%`}
-        resetDisabled={smoothingPercent === SMOOTHING_DEFAULT_PERCENT}
-      />
+    <div className="flex w-full flex-col gap-8">
+      <div className="flex w-full flex-col gap-5">
+        <h4 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase select-none">
+          Corners
+        </h4>
+        <AdjustmentRow
+          label="Radius"
+          value={radius}
+          onValueChange={setRadius}
+          onReset={() => setRadius(0)}
+          min={0}
+          max={radiusMax}
+          disabled={radiusMax <= 0}
+          showValueTooltip
+          formatValue={(v) => `${Math.round(v)}px`}
+        />
+        <AdjustmentRow
+          label="Smoothing"
+          value={smoothingPercent}
+          onValueChange={setSmoothingPercent}
+          onReset={() => setSmoothingPercent(SMOOTHING_DEFAULT_PERCENT)}
+          min={0}
+          max={100}
+          showValueTooltip
+          formatValue={(v) => `${Math.round(v)}%`}
+          resetDisabled={smoothingPercent === SMOOTHING_DEFAULT_PERCENT}
+        />
+      </div>
+      <BorderControls video={video} />
+      <ShadowControls video={video} />
     </div>
   )
 }

@@ -23,6 +23,7 @@ import {
   tracePathOrRect,
   type SquircleCornerParams,
 } from "@/lib/squircle"
+import { parseRgba } from "@/lib/rgba-color"
 import type { CanvasVideoItem } from "@/types/editor-canvas"
 
 // Videos stay as live HTMLVideoElement sources: no canvas cache, no transcoding,
@@ -224,6 +225,125 @@ function CanvasVideoNodeComponent({
     video.height,
   ])
 
+  // `signedDistance` is the gap from the node edge to the stroke centerline.
+  // Alignment contributes ±width/2 (Figma semantics: `outside` at offset 0
+  // sits flush outside the node); the corner radius shifts by the same
+  // delta so the border bends with the node and never overhangs corners.
+  const borderParams = useMemo(() => {
+    const strokeWidth = Math.max(0, video.borderWidth)
+    if (strokeWidth <= 0) return null
+    const alignmentDelta =
+      video.borderAlignment === "outside"
+        ? strokeWidth / 2
+        : video.borderAlignment === "inside"
+          ? -strokeWidth / 2
+          : 0
+    const signedDistance = video.borderOffset + alignmentDelta
+    const borderBoxWidth = video.width + 2 * signedDistance
+    const borderBoxHeight = video.height + 2 * signedDistance
+    // Degenerate inset — the border path crosses itself; drop it.
+    if (borderBoxWidth <= 0 || borderBoxHeight <= 0) return null
+
+    // Sharp corners stay sharp: offsetting a 0-radius rectangle just yields
+    // another rectangle. For rounded nodes, the parallel-offset radius is
+    // `r + signedDistance` (geometrically exact for circular arcs and a good
+    // visual fit for squircles).
+    const requestedRadius =
+      video.cornerRadius > 0
+        ? Math.max(0, video.cornerRadius + signedDistance)
+        : 0
+    const safeRadius = clampSquircleRadius(
+      borderBoxWidth,
+      borderBoxHeight,
+      requestedRadius
+    )
+    const params =
+      safeRadius > 0
+        ? computeSquircleCornerParams(safeRadius, video.cornerSmoothing)
+        : null
+
+    return {
+      strokeWidth,
+      color: video.borderColor,
+      originX: -signedDistance,
+      originY: -signedDistance,
+      width: borderBoxWidth,
+      height: borderBoxHeight,
+      params,
+    }
+  }, [
+    video.borderWidth,
+    video.borderColor,
+    video.borderOffset,
+    video.borderAlignment,
+    video.cornerRadius,
+    video.cornerSmoothing,
+    video.width,
+    video.height,
+  ])
+
+  // Drop shadow. We bypass Konva's built-in `shadow*` attrs and render the
+  // shadow ourselves so it follows the squircle silhouette (not the
+  // bounding box) and supports a Figma-style `spread` field. Spread grows
+  // the silhouette by `spread` and shifts the corner radius by the same
+  // delta — same offset path the border uses.
+  const shadowParams = useMemo(() => {
+    const parsedColor = parseRgba(video.shadowColor)
+    if (parsedColor === null || parsedColor.a <= 0) return null
+
+    const blur = Math.max(0, video.shadowBlur)
+    const offsetX = video.shadowOffsetX
+    const offsetY = video.shadowOffsetY
+    const spread = video.shadowSpread
+
+    // Pure no-op: a 0/0/0/0 cast lives exactly under the silhouette and is
+    // fully masked by the drawn image. Skip the entire pass.
+    if (blur === 0 && offsetX === 0 && offsetY === 0 && spread === 0) {
+      return null
+    }
+
+    const casterWidth = video.width + 2 * spread
+    const casterHeight = video.height + 2 * spread
+    if (casterWidth <= 0 || casterHeight <= 0) return null
+
+    const requestedRadius =
+      video.cornerRadius > 0
+        ? Math.max(0, video.cornerRadius + spread)
+        : 0
+    const safeRadius = clampSquircleRadius(
+      casterWidth,
+      casterHeight,
+      requestedRadius
+    )
+    const params =
+      safeRadius > 0
+        ? computeSquircleCornerParams(safeRadius, video.cornerSmoothing)
+        : null
+
+    return {
+      color: video.shadowColor,
+      blur,
+      offsetX,
+      offsetY,
+      // Caster origin in node-local coords (spread-enlarged silhouette).
+      originX: -spread,
+      originY: -spread,
+      width: casterWidth,
+      height: casterHeight,
+      params,
+    }
+  }, [
+    video.shadowColor,
+    video.shadowBlur,
+    video.shadowOffsetX,
+    video.shadowOffsetY,
+    video.shadowSpread,
+    video.cornerRadius,
+    video.cornerSmoothing,
+    video.width,
+    video.height,
+  ])
+
   // The custom sceneFunc clips the video bitmap to the squircle so the
   // rounded corners disappear. When `cornerRadius === 0` the trace collapses
   // to `ctx.rect(0,0,w,h)` and clipping is skipped entirely — the entire
@@ -234,6 +354,53 @@ function CanvasVideoNodeComponent({
       const width = shape.width()
       const height = shape.height()
       if (!image || width <= 0 || height <= 0) return
+
+      if (shadowParams !== null) {
+        // Pass 1: paint the silhouette at its real position with shadow
+        // attrs on. The previous off-canvas-cast trick (path at -1e6)
+        // failed inside the artboard clip group at editor-workspace —
+        // browsers cull draw ops whose path bbox doesn't intersect the
+        // clip, taking the shadow with them. Drawing in-place avoids the
+        // cull; we then mask the silhouette in pass 2.
+        context.save()
+        context.shadowColor = shadowParams.color
+        context.shadowBlur = shadowParams.blur
+        context.shadowOffsetX = shadowParams.offsetX
+        context.shadowOffsetY = shadowParams.offsetY
+        context.translate(shadowParams.originX, shadowParams.originY)
+        context.beginPath()
+        tracePathOrRect(
+          context,
+          shadowParams.width,
+          shadowParams.height,
+          shadowParams.params
+        )
+        context.closePath()
+        context.fillStyle = "#000"
+        context.fill()
+        context.restore()
+
+        // Pass 2: erase the silhouette pixels we just painted, leaving
+        // only the blurred shadow behind. The artboard background lives
+        // on a separate Konva layer, so this destination-out only touches
+        // the videos layer canvas. Overlapping videos on the same layer
+        // can see their pixels chipped out in the spread region — rare in
+        // practice; acceptable for v1.
+        context.save()
+        context.globalCompositeOperation = "destination-out"
+        context.translate(shadowParams.originX, shadowParams.originY)
+        context.beginPath()
+        tracePathOrRect(
+          context,
+          shadowParams.width,
+          shadowParams.height,
+          shadowParams.params
+        )
+        context.closePath()
+        context.fillStyle = "#000"
+        context.fill()
+        context.restore()
+      }
 
       context.save()
       context.beginPath()
@@ -264,8 +431,29 @@ function CanvasVideoNodeComponent({
         context.drawImage(image as CanvasImageSource, 0, 0, width, height)
       }
       context.restore()
+
+      if (borderParams !== null) {
+        context.save()
+        // Translate so the border path origin lands at (0,0); negative when
+        // the border is outside/positively offset. Konva only clips at the
+        // layer or group level, so the stroke renders past the node bounds.
+        context.translate(borderParams.originX, borderParams.originY)
+        context.beginPath()
+        tracePathOrRect(
+          context,
+          borderParams.width,
+          borderParams.height,
+          borderParams.params
+        )
+        context.closePath()
+        context.lineWidth = borderParams.strokeWidth
+        context.strokeStyle = borderParams.color
+        context.lineJoin = "round"
+        context.stroke()
+        context.restore()
+      }
     },
-    [squircleParams]
+    [squircleParams, borderParams, shadowParams]
   )
 
   const drawSquircleHit = useCallback(
@@ -274,6 +462,10 @@ function CanvasVideoNodeComponent({
       const height = shape.height()
       if (width <= 0 || height <= 0) return
 
+      // Hit area follows the node body — the same squircle Konva uses for the
+      // fill path. The border is purely visual; clicks past the node bounds
+      // still fall through to whatever sits underneath. Keeps the node's
+      // selectable region stable as the user tunes border width / offset.
       context.beginPath()
       tracePathOrRect(context, width, height, squircleParams)
       context.closePath()

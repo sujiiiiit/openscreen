@@ -57,4 +57,14 @@ Use this table when discussion language and implementation language differ. Pref
 | Border radius / rounded corners | Corner radius                  | The squircle corner radius applied to a video node, stored in artboard pixels.                              |
 | Smooth corners / iOS corners | Corner smoothing (squircle)    | Per-node 0–1 smoothing factor; 0 = circular arc, 0.6 = macOS look, 1 = fully continuous-curvature squircle. |
 | Round camera                | Camera squircle (max radius)    | Default camera appearance: corner radius = ½·min(w,h), smoothing = 1. Renders identically to the prior elliptical sceneFunc but goes through the unified squircle pipeline. |
+| Outline / stroke / frame    | Node border                     | Per-node squircle-following stroke. Width 0 hides it; offset (signed) and alignment (inside/center/outside) control where it sits relative to the node edge. |
+| Border thickness            | Border width                    | Stroke width in artboard pixels. `0` disables the border for the whole render path. |
+| Border outline color        | Border color                    | CSS color for the stroke; defaults to `#000000`.                                            |
+| Stroke alignment / inside-outside stroke | Border alignment   | Where the stroke sits relative to the (already-offset) centerline: `inside`, `center`, or `outside`. Matches Figma stroke alignment. |
+| Border gap                  | Border offset                   | Signed gap in artboard px between the node edge and the stroke centerline; positive pushes outward, negative pulls inward. |
+| Drop shadow / box shadow    | Node drop shadow                | Per-node squircle-following drop shadow rendered behind the video via an off-canvas-cast trick. Skipped entirely when alpha is 0 or every spatial field is 0. |
+| Shadow distance / X & Y     | Shadow offset                   | Signed displacement of the cast shadow from the silhouette, in artboard px. |
+| Shadow softness             | Shadow blur                     | Gaussian blur radius of the shadow, in artboard px. `0` means a sharp duplicate cast. |
+| Shadow expand / inflate     | Shadow spread                   | Figma-style spread. Positive grows the shadow caster silhouette outward (corner radius grows with it); negative shrinks. |
+| Shadow color with opacity / hex 8 | Shadow color (rgba)       | The shadow color string, with alpha baked into the value (`rgba(R, G, B, A)`). Hex is tuned via the swatch popover; the alpha channel is exposed as a sibling Opacity slider so the user can tune transparency without re-opening the swatch. |
 | Click-to-open panel         | Sidebar selection bridge        | Mounting that auto-routes any video selection (canvas or timeline) to the Video tab and opens the sidebar.  |

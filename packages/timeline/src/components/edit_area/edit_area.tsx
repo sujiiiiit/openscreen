@@ -514,9 +514,16 @@ export const EditArea = React.forwardRef<EditAreaState, EditAreaProps>((props, r
     scrollToPositionRef.current = { scrollTop, scrollLeft };
   }, [scrollTop, scrollLeft]);
 
+  // Keyed on row layout (count + heights), not editorData identity —
+  // a consumer rebuilding the rows array just to toggle a `selected`
+  // flag must not retrigger Grid forceUpdate, which can stack into a
+  // Maximum-update-depth loop with Strict Mode's double-invoked effects.
+  const rowSizeSignature = editorData
+    .map((row) => `${row.id}:${row.rowHeight ?? rowHeight}`)
+    .join('|');
   useEffect(() => {
     gridRef.current?.recomputeGridSize();
-  }, [editorData]);
+  }, [rowSizeSignature]);
 
   return (
     <div ref={editAreaRef} className={cn('timeline-editor-edit-area relative mt-2.5 flex-1 overflow-hidden', slots.editArea)}>

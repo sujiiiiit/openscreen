@@ -424,18 +424,63 @@ function createCanvasId() {
 function createVideoAppearanceDefaults(
   role: CanvasVideoRole,
   size: CanvasSize
-): Pick<CanvasVideoItem, "cornerRadius" | "cornerSmoothing"> {
+): Pick<
+  CanvasVideoItem,
+  | "cornerRadius"
+  | "cornerSmoothing"
+  | "borderWidth"
+  | "borderColor"
+  | "borderOffset"
+  | "borderAlignment"
+  | "shadowColor"
+  | "shadowBlur"
+  | "shadowOffsetX"
+  | "shadowOffsetY"
+  | "shadowSpread"
+> {
+  const borderDefaults: Pick<
+    CanvasVideoItem,
+    "borderWidth" | "borderColor" | "borderOffset" | "borderAlignment"
+  > = {
+    borderWidth: 0,
+    borderColor: "#000000",
+    borderOffset: 0,
+    borderAlignment: "inside",
+  }
+
+  // Shadow is rgba so the user can tune alpha alongside the color picker.
+  // All spatial fields start at 0 so the shadow pass short-circuits until
+  // the user moves a slider — no visible shadow on creation.
+  const shadowDefaults: Pick<
+    CanvasVideoItem,
+    | "shadowColor"
+    | "shadowBlur"
+    | "shadowOffsetX"
+    | "shadowOffsetY"
+    | "shadowSpread"
+  > = {
+    shadowColor: "rgba(0, 0, 0, 0.25)",
+    shadowBlur: 0,
+    shadowOffsetX: 0,
+    shadowOffsetY: 0,
+    shadowSpread: 0,
+  }
+
   if (role === "camera") {
     const radius = Math.max(0, Math.floor(Math.min(size.width, size.height) / 2))
     return {
       cornerRadius: radius,
       cornerSmoothing: 1,
+      ...borderDefaults,
+      ...shadowDefaults,
     }
   }
 
   return {
     cornerRadius: 0,
     cornerSmoothing: 0.6,
+    ...borderDefaults,
+    ...shadowDefaults,
   }
 }
 
@@ -2041,7 +2086,16 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           const nextVideo: CanvasVideoItem = { ...video, ...patch }
           if (
             nextVideo.cornerRadius === video.cornerRadius &&
-            nextVideo.cornerSmoothing === video.cornerSmoothing
+            nextVideo.cornerSmoothing === video.cornerSmoothing &&
+            nextVideo.borderWidth === video.borderWidth &&
+            nextVideo.borderColor === video.borderColor &&
+            nextVideo.borderOffset === video.borderOffset &&
+            nextVideo.borderAlignment === video.borderAlignment &&
+            nextVideo.shadowColor === video.shadowColor &&
+            nextVideo.shadowBlur === video.shadowBlur &&
+            nextVideo.shadowOffsetX === video.shadowOffsetX &&
+            nextVideo.shadowOffsetY === video.shadowOffsetY &&
+            nextVideo.shadowSpread === video.shadowSpread
           ) {
             return video
           }

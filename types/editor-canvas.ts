@@ -38,6 +38,8 @@ export type ViewTransform = {
 
 export type CanvasVideoRole = "screen" | "camera" | "media"
 
+export type CanvasBorderAlignment = "inside" | "center" | "outside"
+
 export type CanvasVideoItem = {
   id: string
   fileName: string
@@ -56,6 +58,38 @@ export type CanvasVideoItem = {
   role: CanvasVideoRole
   cornerRadius: number
   cornerSmoothing: number
+  /** Border stroke width in artboard px. `0` hides the border entirely. */
+  borderWidth: number
+  /** Border stroke color (CSS color string). */
+  borderColor: string
+  /**
+   * Signed gap in artboard px between the node edge and the border centerline.
+   * Positive pushes the border outward; negative pulls it inward. The final
+   * centerline is `offset` plus the alignment delta (±width/2 for outside /
+   * inside, 0 for center).
+   */
+  borderOffset: number
+  /** Where the stroke sits relative to its (already offset) centerline. */
+  borderAlignment: CanvasBorderAlignment
+  /**
+   * Drop-shadow color as a CSS string. Alpha is baked into the color (rgba)
+   * — there is no separate `shadowOpacity` field. The shadow pass is skipped
+   * entirely when the parsed alpha is 0 or when every spatial field
+   * (`blur`, `offsetX`, `offsetY`, `spread`) is 0.
+   */
+  shadowColor: string
+  /** Gaussian blur radius in artboard px. `0` is a sharp cast (no falloff). */
+  shadowBlur: number
+  /** Horizontal shadow displacement in artboard px. Signed; positive = right. */
+  shadowOffsetX: number
+  /** Vertical shadow displacement in artboard px. Signed; positive = down. */
+  shadowOffsetY: number
+  /**
+   * Silhouette spread in artboard px (Figma "spread"). Positive grows the
+   * shadow caster outward before blur; negative shrinks it. The corner
+   * radius shifts by the same delta so the shadow stays squircle-aligned.
+   */
+  shadowSpread: number
 }
 
 export type CanvasVideoTransformPatch = Partial<
@@ -63,7 +97,20 @@ export type CanvasVideoTransformPatch = Partial<
 >
 
 export type CanvasVideoAppearancePatch = Partial<
-  Pick<CanvasVideoItem, "cornerRadius" | "cornerSmoothing">
+  Pick<
+    CanvasVideoItem,
+    | "cornerRadius"
+    | "cornerSmoothing"
+    | "borderWidth"
+    | "borderColor"
+    | "borderOffset"
+    | "borderAlignment"
+    | "shadowColor"
+    | "shadowBlur"
+    | "shadowOffsetX"
+    | "shadowOffsetY"
+    | "shadowSpread"
+  >
 >
 
 export type CanvasTimelineClip = {
