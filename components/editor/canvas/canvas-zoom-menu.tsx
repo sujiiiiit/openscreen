@@ -3,6 +3,7 @@
 import { HugeiconsIcon } from "@hugeicons/react"
 import {
   ArrowDown01Icon,
+  EyeIcon,
   FitToScreenIcon,
   ZoomInAreaIcon,
   ZoomOutAreaIcon,
@@ -17,8 +18,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
@@ -26,12 +25,6 @@ import {
   getZoomedViewTransform,
   WORKSPACE_ZOOM_STEP,
 } from "@/lib/editor-canvas"
-
-const ZOOM_PRESETS = [
-  { label: "Zoom to 50%", scale: 0.5 },
-  { label: "Zoom to 100%", scale: 1, shortcut: "⌘0" },
-  { label: "Zoom to 200%", scale: 2 },
-]
 
 function formatZoomPercent(scale: number) {
   const percent = scale * 100
@@ -66,10 +59,6 @@ export function CanvasZoomMenu() {
     zoomToScale(viewTransform.scale * factor)
   }
 
-  const activePreset = ZOOM_PRESETS.find(
-    (preset) => Math.abs(viewTransform.scale - preset.scale) < 0.005
-  )
-
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
@@ -98,28 +87,29 @@ export function CanvasZoomMenu() {
           text="Zoom out"
           shortcut="⌘−"
         />
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          closeOnClick
+          onClick={() => zoomToScale(1)}
+          icon={<HugeiconsIcon icon={EyeIcon} />}
+          text="Zoom to 100%"
+          shortcut="⌘0"
+        />
+        <DropdownMenuItem
+          closeOnClick
+          onClick={() => zoomToScale(2)}
+          icon={<HugeiconsIcon icon={ZoomInAreaIcon} />}
+          text="Zoom to 200%"
+          shortcut="⇧2"
+        />
+        <DropdownMenuSeparator />
         <DropdownMenuItem
           closeOnClick
           onClick={fitArtboardToViewport}
           icon={<HugeiconsIcon icon={FitToScreenIcon} />}
-          text="Zoom to fit"
-          shortcut="⇧1"
+          text="Zoom to Fit"
+          shortcut="⇧F"
         />
-        <DropdownMenuSeparator />
-        <DropdownMenuRadioGroup
-          value={activePreset ? String(activePreset.scale) : ""}
-          onValueChange={(value) => zoomToScale(Number(value))}
-        >
-          {ZOOM_PRESETS.map((preset) => (
-            <DropdownMenuRadioItem
-              key={preset.scale}
-              value={String(preset.scale)}
-              closeOnClick
-              text={preset.label}
-              shortcut={preset.shortcut}
-            />
-          ))}
-        </DropdownMenuRadioGroup>
       </DropdownMenuContent>
     </DropdownMenu>
   )

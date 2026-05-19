@@ -866,15 +866,24 @@ export default function EditorWorkspace() {
         }
       }
 
-      if (
-        event.shiftKey &&
-        !event.metaKey &&
-        !event.ctrlKey &&
-        (event.code === "Digit1" || event.code === "Numpad1")
-      ) {
-        event.preventDefault()
-        fitArtboardToViewport()
-        return
+      if (event.shiftKey && !event.metaKey && !event.ctrlKey) {
+        if (event.code === "KeyF") {
+          event.preventDefault()
+          fitArtboardToViewport()
+          return
+        }
+
+        if (event.code === "Digit2" || event.code === "Numpad2") {
+          event.preventDefault()
+          zoomAroundPoint(
+            {
+              x: viewportSize.width / 2,
+              y: viewportSize.height / 2,
+            },
+            2
+          )
+          return
+        }
       }
 
       if (hasZoomModifier(event)) {
