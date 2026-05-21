@@ -27,6 +27,12 @@
 // Output destination.
 - (void)setOutputURL:(NSURL *)url;
 
+// The container's file extension after option coercion ("mov" or "mp4"). Used
+// by RecorderSession to assemble the screen file name. Resolved during
+// -initWithOptions:sessionId: so it's safe to call before
+// -streamConfigurationForContent:.
+- (NSString *)fileExtension;
+
 // SCKit setup.
 //
 // `getShareableContent:` is the legacy single-arg variant: always fresh, used

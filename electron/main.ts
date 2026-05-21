@@ -44,6 +44,7 @@ let recorderBarWin: BrowserWindow | null = null
 let recordingControlsWin: BrowserWindow | null = null
 let cameraWin: BrowserWindow | null = null
 let permissionWin: BrowserWindow | null = null
+let recordingSettingsWin: BrowserWindow | null = null
 let activeCameraDeviceId: string | null = null
 const fixedWindowSizeEnforcers = new WeakMap<BrowserWindow, () => void>()
 const zoomLockedWindows = new WeakSet<BrowserWindow>()
@@ -586,6 +587,46 @@ function closePermissionWindow(): void {
   stopPermissionPolling()
 }
 
+function createRecordingSettingsWindow(): void {
+  if (recordingSettingsWin && !recordingSettingsWin.isDestroyed()) {
+    if (recordingSettingsWin.isMinimized()) recordingSettingsWin.restore()
+    recordingSettingsWin.show()
+    recordingSettingsWin.focus()
+    return
+  }
+
+  // Center over the workspace, slightly above the recorder bar so the
+  // settings panel feels anchored to its trigger.
+  const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize
+  const winW = windowConfigs.recordingSettingsWin.width ?? 480
+  const winH = windowConfigs.recordingSettingsWin.height ?? 640
+  const x = Math.round((screenW - winW) / 2)
+  const y = Math.round((screenH - winH) / 2)
+
+  recordingSettingsWin = new BrowserWindow({
+    x,
+    y,
+    ...windowConfigs.recordingSettingsWin,
+    webPreferences: SHARED_WEB_PREFERENCES,
+  })
+  if (process.platform === 'darwin') {
+    recordingSettingsWin.setWindowButtonVisibility(false)
+  }
+  hardenWebContents(recordingSettingsWin)
+  // Keep on top across Spaces; recording-quality is a transient utility window
+  // and shouldn't get lost behind the recorder bar / picker.
+  keepWindowOnEveryWorkspace(recordingSettingsWin, { level: 'modal-panel' })
+
+  recordingSettingsWin.once('ready-to-show', () => {
+    if (recordingSettingsWin) focusWindow(recordingSettingsWin)
+  })
+  recordingSettingsWin.on('closed', () => {
+    recordingSettingsWin = null
+  })
+
+  loadAppRoute(recordingSettingsWin, '/recording-settings/')
+}
+
 function showPermissionGate(reason: string): void {
   const snapshot = refreshPermissions(reason, true)
   if (isDev) {
@@ -757,6 +798,7 @@ app.whenReady().then(() => {
     },
     startPicker: startWindowPicker,
     cancelPicker: cancelWindowPicker,
+    openRecordingSettingsWindow: createRecordingSettingsWindow,
     onStatusChanged: (status, snapshot) => {
       if (status === 'recording' || status === 'paused') {
         hideRecorderBarWindow()

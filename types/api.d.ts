@@ -8,10 +8,24 @@
 import type {
   CameraPreviewFrame,
   CaptureTarget,
+  ContainerFormat,
+  FrameRate,
   RecordingFiles,
   RecordingResult,
+  ResolutionMode,
   Unsubscribe,
+  VideoCodec,
+  VideoQuality,
 } from '@openscreen/mac-addon'
+
+/** Mirror of RecordingQualitySettings from electron/ipc/recorder.ts. */
+export interface RecordingQualitySettings {
+  videoCodec: VideoCodec
+  videoQuality: VideoQuality
+  container: ContainerFormat
+  resolutionMode: ResolutionMode
+  frameRate: FrameRate
+}
 
 export type MacPermissionKind =
   | 'screen'
@@ -70,6 +84,7 @@ export interface RecorderSettings {
   // Sticky across recordings; the user manages the list manually via the
   // system audio menu.
   systemAudioApplications: string[]
+  recordingQuality: RecordingQualitySettings
 }
 
 export type RecorderStatus =
@@ -187,6 +202,11 @@ export interface Api {
     delete: () => Promise<RecorderState>
     close: () => Promise<void>
     onChanged: (callback: (state: RecorderState) => void) => Unsubscribe
+    getRecordingSettings: () => Promise<RecordingQualitySettings>
+    setRecordingSettings: (
+      patch: Partial<RecordingQualitySettings>,
+    ) => Promise<RecordingQualitySettings>
+    openRecordingSettings: () => Promise<void>
   }
   permissions: {
     getStatus: () => Promise<PermissionSnapshot>

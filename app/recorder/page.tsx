@@ -41,6 +41,15 @@ const EMPTY_STATE: RecorderState = {
     hideCursor: false,
     systemAudioScope: "all",
     systemAudioApplications: [],
+    // Initial placeholder for renderer hydration. The real values are
+    // streamed in by recorder:changed once the main process loads them.
+    recordingQuality: {
+      videoCodec: "hevc",
+      videoQuality: "high",
+      container: "mov",
+      resolutionMode: "native",
+      frameRate: 60,
+    },
   },
   sessionId: null,
   outputDir: null,

@@ -6,6 +6,7 @@ import type {
   RecorderMenuAnchor,
   RecorderPickerMode,
   RecorderState,
+  RecordingQualitySettings,
 } from './ipc/recorder'
 import type {
   PickerOverlayTarget,
@@ -44,6 +45,14 @@ const api = {
     close: (): Promise<void> => ipcRenderer.invoke('recorder:close'),
     onChanged: (callback: (state: RecorderState) => void) =>
       subscribe<RecorderState>('recorder:changed', callback),
+    getRecordingSettings: (): Promise<RecordingQualitySettings> =>
+      ipcRenderer.invoke('recorder:getRecordingSettings'),
+    setRecordingSettings: (
+      patch: Partial<RecordingQualitySettings>,
+    ): Promise<RecordingQualitySettings> =>
+      ipcRenderer.invoke('recorder:setRecordingSettings', patch),
+    openRecordingSettings: (): Promise<void> =>
+      ipcRenderer.invoke('recorder:openRecordingSettings'),
   },
   permissions: {
     getStatus: () => ipcRenderer.invoke('permissions:getStatus'),

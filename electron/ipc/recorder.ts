@@ -8,15 +8,20 @@ import {
   type IpcMainInvokeEvent,
   type MenuItemConstructorOptions,
 } from 'electron'
-import { mkdirSync, rmSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import * as path from 'node:path'
 import addon, {
   type AudioDevice,
   type CameraDevice,
   type CaptureTarget,
+  type ContainerFormat,
+  type FrameRate,
   type RecordingFiles,
   type RecordingResult,
+  type ResolutionMode,
   type StartRecordingOptions,
+  type VideoCodec,
+  type VideoQuality,
   type WindowSource,
 } from '@openscreen/mac-addon'
 
@@ -30,6 +35,22 @@ export type RecorderPickerMode = 'display' | 'window' | 'region'
 export interface RecorderMenuAnchor {
   x: number
   y: number
+}
+
+/**
+ * Screen-recording quality settings exposed through the Recording Quality
+ * window. The main process is the source of truth for validation — unknown
+ * enum values get replaced with defaults before the IPC reply is returned
+ * to the UI.
+ *
+ * Defaults: HEVC, High quality, MOV container, native resolution, 60 fps.
+ */
+export interface RecordingQualitySettings {
+  videoCodec: VideoCodec
+  videoQuality: VideoQuality
+  container: ContainerFormat
+  resolutionMode: ResolutionMode
+  frameRate: FrameRate
 }
 
 export interface RecorderSettings {
@@ -52,6 +73,10 @@ export interface RecorderSettings {
   // Sticky across recordings; the user manages the list manually via the
   // system audio menu.
   systemAudioApplications: string[]
+  // Screen-recording quality (codec / container / resolution / etc.).
+  // Persisted to a JSON file in userData so settings survive app restarts.
+  // See RecordingQualitySettings for field meanings.
+  recordingQuality: RecordingQualitySettings
 }
 
 export type RecorderStatus =
@@ -88,11 +113,16 @@ interface RegisterRecorderHandlersOptions {
   // recorder bar (idle) and the compact recording controls window
   // (recording / paused).
   onStatusChanged?: (status: RecorderStatus, snapshot: RecorderState) => void
+  // Opens the Recording Quality settings window. Wired from main.ts so the
+  // BrowserWindow factory can use SHARED_WEB_PREFERENCES / loadAppRoute
+  // without re-implementing them here.
+  openRecordingSettingsWindow?: () => void
 }
 
 let cameraPreviewListener: ((deviceId: string | null) => void) | null = null
 let getRecorderWindowRef: (() => BrowserWindow | null) | null = null
 let getControlsWindowRef: (() => BrowserWindow | null) | null = null
+let openRecordingSettingsWindowRef: (() => void) | null = null
 let statusChangedListener:
   | ((status: RecorderStatus, snapshot: RecorderState) => void)
   | null = null
@@ -116,6 +146,101 @@ const NO_MICROPHONE_MENU_LABEL = "Don't record microphone"
 const NO_CAMERA_MENU_LABEL = "Don't record camera"
 const NO_SYSTEM_AUDIO_MENU_LABEL = "Don't record system audio"
 
+const RECORDING_QUALITY_FILE = 'recording-quality.json'
+
+function defaultRecordingQualitySettings(): RecordingQualitySettings {
+  return {
+    videoCodec: 'hevc',
+    videoQuality: 'high',
+    container: 'mov',
+    resolutionMode: 'native',
+    frameRate: 60,
+  }
+}
+
+function recordingQualityFilePath(): string {
+  return path.join(app.getPath('userData'), RECORDING_QUALITY_FILE)
+}
+
+function readPersistedRecordingQuality(): Partial<RecordingQualitySettings> {
+  try {
+    const raw = readFileSync(recordingQualityFilePath(), 'utf-8')
+    const parsed = JSON.parse(raw) as Partial<RecordingQualitySettings>
+    if (parsed && typeof parsed === 'object') return parsed
+  } catch {
+    // File missing or unreadable on first launch — fall back to defaults.
+  }
+  return {}
+}
+
+function loadRecordingQualitySettings(): RecordingQualitySettings {
+  // Persisted values feed into the same coercion path the IPC handler uses,
+  // so any unknown enum value (e.g. an older build that wrote `proRes422`
+  // or `hevcWithAlpha`) gets normalized back to defaults on load.
+  return coerceRecordingQualitySettings({
+    ...defaultRecordingQualitySettings(),
+    ...readPersistedRecordingQuality(),
+  })
+}
+
+function persistRecordingQualitySettings(value: RecordingQualitySettings): void {
+  try {
+    writeFileSync(recordingQualityFilePath(), JSON.stringify(value, null, 2))
+  } catch (error) {
+    // Settings persistence is best-effort. The next change will retry; a
+    // failed write doesn't block recording.
+    if (process.env.NODE_ENV === 'development') {
+      console.warn('[recorder] failed to persist recording quality', error)
+    }
+  }
+}
+
+/**
+ * Coerce a partial settings update onto a valid set. Unknown enum values are
+ * replaced with defaults so the form can never wedge.
+ */
+function coerceRecordingQualitySettings(
+  patch: Partial<RecordingQualitySettings>,
+): RecordingQualitySettings {
+  const defaults = defaultRecordingQualitySettings()
+  const validCodecs: VideoCodec[] = ['hevc', 'h264']
+  const codec: VideoCodec =
+    patch.videoCodec && validCodecs.includes(patch.videoCodec)
+      ? patch.videoCodec
+      : defaults.videoCodec
+
+  const container: ContainerFormat =
+    patch.container === 'mp4' || patch.container === 'mov'
+      ? patch.container
+      : defaults.container
+
+  const validQualities: VideoQuality[] = ['low', 'medium', 'high', 'xhigh', 'max']
+  const videoQuality: VideoQuality =
+    patch.videoQuality && validQualities.includes(patch.videoQuality)
+      ? patch.videoQuality
+      : defaults.videoQuality
+
+  const resolutionMode: ResolutionMode =
+    patch.resolutionMode === 'native' || patch.resolutionMode === 'logical'
+      ? patch.resolutionMode
+      : defaults.resolutionMode
+
+  const validFrameRates: FrameRate[] = [0, 24, 30, 60]
+  const frameRate: FrameRate =
+    patch.frameRate !== undefined &&
+    validFrameRates.includes(patch.frameRate as FrameRate)
+      ? (patch.frameRate as FrameRate)
+      : defaults.frameRate
+
+  return {
+    videoCodec: codec,
+    videoQuality,
+    container,
+    resolutionMode,
+    frameRate,
+  }
+}
+
 const state: RecorderState = {
   status: 'idle',
   settings: {
@@ -128,6 +253,7 @@ const state: RecorderState = {
     hideCursor: false,
     systemAudioScope: 'all',
     systemAudioApplications: [],
+    recordingQuality: loadRecordingQualitySettings(),
   },
   sessionId: null,
   outputDir: null,
@@ -545,6 +671,12 @@ function recorderSettingsMenuTemplate(): MenuItemConstructorOptions[] {
       enabled: canChangeSettings(),
       click: () => setHideCursor(!state.settings.hideCursor),
     },
+    { type: 'separator' },
+    {
+      label: 'Recording quality…',
+      enabled: canChangeSettings(),
+      click: () => openRecordingSettingsWindowRef?.(),
+    },
   ]
 }
 
@@ -683,10 +815,16 @@ export async function startRecording(targetOverride?: CaptureTarget): Promise<Re
         state.settings.systemAudioApplications.length === 0
       )
 
+    // Coerce one last time so any persisted-but-now-impossible combination
+    // (settings file pre-dates a macOS downgrade, etc.) is normalized before
+    // the native addon sees it. The native side coerces too, but doing it
+    // here keeps the manifest and the renderer view in sync.
+    const quality = coerceRecordingQualitySettings(state.settings.recordingQuality)
+    state.settings.recordingQuality = quality
+
     const options: StartRecordingOptions = {
       outputDir,
       target,
-      fps: 60,
       includeCursor: !state.settings.hideCursor,
       excludeOwnApp: true,
       recordSystemAudio: systemAudioEnabled,
@@ -694,6 +832,12 @@ export async function startRecording(targetOverride?: CaptureTarget): Promise<Re
       microphoneDeviceId: state.settings.microphoneDeviceId ?? undefined,
       recordCamera: state.settings.cameraDeviceId !== null,
       cameraDeviceId: state.settings.cameraDeviceId ?? undefined,
+      // Screen video quality.
+      videoCodec: quality.videoCodec,
+      videoQuality: quality.videoQuality,
+      container: quality.container,
+      resolutionMode: quality.resolutionMode,
+      frameRate: quality.frameRate,
     }
     // System audio scoping: when the user picks the 'selected' mode, send the
     // bundle IDs they've checked. 'all' mode and 'off' state both leave
@@ -998,7 +1142,31 @@ export function registerRecorderHandlers(options: RegisterRecorderHandlersOption
   getRecorderWindowRef = options.getRecorderWindow
   getControlsWindowRef = options.getControlsWindow ?? null
   statusChangedListener = options.onStatusChanged ?? null
+  openRecordingSettingsWindowRef = options.openRecordingSettingsWindow ?? null
   ipcMain.handle('recorder:getState', () => publicState())
+  ipcMain.handle(
+    'recorder:getRecordingSettings',
+    (): RecordingQualitySettings => state.settings.recordingQuality,
+  )
+  ipcMain.handle(
+    'recorder:setRecordingSettings',
+    (_event, patch: Partial<RecordingQualitySettings>): RecordingQualitySettings => {
+      // Coercion is the source of truth — the renderer's optimistic UI may
+      // send any partial; we return the canonical resolved set so the form
+      // reflects any value normalization.
+      const next = coerceRecordingQualitySettings({
+        ...state.settings.recordingQuality,
+        ...patch,
+      })
+      state.settings.recordingQuality = next
+      persistRecordingQualitySettings(next)
+      emitState()
+      return next
+    },
+  )
+  ipcMain.handle('recorder:openRecordingSettings', () => {
+    openRecordingSettingsWindowRef?.()
+  })
   ipcMain.handle(
     'recorder:showInputMenu',
     (event, kind: RecorderInputKind, anchor: RecorderMenuAnchor) => {

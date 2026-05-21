@@ -25,6 +25,13 @@ const EMPTY_STATE: RecorderState = {
     hideCursor: false,
     systemAudioScope: "all",
     systemAudioApplications: [],
+    recordingQuality: {
+      videoCodec: "hevc",
+      videoQuality: "high",
+      container: "mov",
+      resolutionMode: "native",
+      frameRate: 60,
+    },
   },
   sessionId: null,
   outputDir: null,

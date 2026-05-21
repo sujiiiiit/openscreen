@@ -86,6 +86,28 @@ const permissionBase: WindowConfig = {
   acceptFirstMouse: true,
 }
 
+// Recording Quality settings window. Triggered from the recorder bar's
+// settings menu ("Recording quality…"). Modal-ish floating panel large
+// enough for codec / quality / container / HDR / alpha controls + a live
+// bitrate preview.
+const recordingSettingsBase: WindowConfig = {
+  title: 'Recording Quality',
+  width: 480,
+  height: 640,
+  show: false,
+  backgroundColor: '#00000000',
+  alwaysOnTop: true,
+  hasShadow: true,
+  roundedCorners: true,
+  fullscreen: false,
+  fullscreenable: false,
+  resizable: false,
+  maximizable: false,
+  minimizable: false,
+  movable: true,
+  acceptFirstMouse: true,
+}
+
 const windowPickerBase: WindowConfig = {
   title: 'OpenScreen Picker',
   width: 1,
@@ -142,6 +164,9 @@ if (process.platform === 'darwin') {
   cameraBase.titleBarStyle = 'hidden'
   cameraBase.vibrancy = 'under-window'
   cameraBase.visualEffectState = 'active'
+  recordingSettingsBase.titleBarStyle = 'hidden'
+  recordingSettingsBase.vibrancy = 'under-window'
+  recordingSettingsBase.visualEffectState = 'active'
 } else {
   // Windows / Linux: no NSWindow chrome to inherit — go fully frameless and
   // transparent. backgroundMaterial 'acrylic' provides the native blur on
@@ -154,11 +179,14 @@ if (process.platform === 'darwin') {
   permissionBase.transparent = true
   cameraBase.frame = false
   cameraBase.transparent = true
+  recordingSettingsBase.frame = false
+  recordingSettingsBase.transparent = true
   if (process.platform === 'win32') {
     recorderBarBase.backgroundMaterial = 'acrylic'
     recordingControlsBase.backgroundMaterial = 'acrylic'
     permissionBase.backgroundMaterial = 'acrylic'
     cameraBase.backgroundMaterial = 'acrylic'
+    recordingSettingsBase.backgroundMaterial = 'acrylic'
   }
 }
 
@@ -168,4 +196,5 @@ export const windowConfigs = {
   permissionWin: permissionBase,
   cameraWin: cameraBase,
   windowPickerWin: windowPickerBase,
+  recordingSettingsWin: recordingSettingsBase,
 }

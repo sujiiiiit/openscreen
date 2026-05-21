@@ -80,7 +80,7 @@
   }
 
   [_screen setOutputURL:[_outputDirectory URLByAppendingPathComponent:
-      [self fileNameForSource:@"screen" extension:@"mov"]]];
+      [self fileNameForSource:@"screen" extension:[_screen fileExtension]]]];
   [_camera setOutputURL:[_outputDirectory URLByAppendingPathComponent:
       [self fileNameForSource:@"camera" extension:@"mov"]]];
   _manifestURL = [_outputDirectory URLByAppendingPathComponent:
