@@ -403,6 +403,21 @@ function CanvasVideoNodeComponent({
       }
 
       context.save()
+      // High-quality image smoothing for the video draw. The default
+      // canvas2d `imageSmoothingQuality` is "low" (bilinear, fast, blurry
+      // when upscaling). At any non-1x zoom the video is being upscaled
+      // from the source resolution — "high" (browser-defined bicubic /
+      // Lanczos) is dramatically sharper for the same CPU cost. Konva's
+      // public `Context` doesn't expose `imageSmoothingQuality` as a
+      // forwarded property, so we reach into the underlying 2D context
+      // directly. Wrapped in save/restore via the surrounding context so
+      // it doesn't leak to subsequent shapes on the same layer.
+      const ctx2d = (
+        context as unknown as { _context: CanvasRenderingContext2D }
+      )._context
+      ctx2d.imageSmoothingEnabled = true
+      ctx2d.imageSmoothingQuality = "high"
+
       context.beginPath()
       tracePathOrRect(context, width, height, squircleParams)
       context.closePath()

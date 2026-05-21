@@ -291,10 +291,10 @@ Project recording metadata:
 Quality notes:
 
 - Keeping the source as a live `HTMLVideoElement` avoids compromising the original video before drawing.
-- We do not set `Konva.pixelRatio = 1`; Konva keeps its normal device-pixel-ratio behavior.
+- `Konva.pixelRatio = Math.min(window.devicePixelRatio || 1, 3)`. The cap was raised from 2 to 3 so 5K/6K displays (Pro Display XDR / Studio Display at native scaling) get a backing store that actually matches the panel — at the previous cap of 2, those displays rendered the canvas at 2/3 of their pixel density, which read as a ~33% sharpness loss before any zoom. We keep an upper cap of 3 because no realistic source resolution benefits from a larger backing store, and removing the cap entirely risks memory blow-ups on extreme multi-monitor setups.
+- The video `sceneFunc` (`drawSquircleVideo` in `canvas-video-node.tsx`) explicitly sets `imageSmoothingEnabled = true` and `imageSmoothingQuality = "high"` on the underlying 2D context before `drawImage`. The default canvas2d smoothing quality is `"low"` (fast bilinear), which is visibly blurry whenever the video is upscaled past its source resolution. `"high"` uses the browser's best interpolation (typically bicubic or Lanczos) — much sharper at moderate zoom for the same CPU cost. Konva's public `Context` proxy doesn't expose `imageSmoothingQuality` as a forwarded property, so we reach into `_context` directly.
 - We do not cache video nodes, because caching would freeze or resample moving video.
-- We keep image smoothing behavior natural for regular video. Turning smoothing off is more appropriate for pixel art, not normal video.
-- Zoom can reveal source detail, but no renderer can invent detail beyond the video file's actual pixels.
+- Zoom can reveal source detail, but no renderer can invent detail beyond the video file's actual pixels. At extreme zoom (5×+ above the source resolution) the limit is the recording, not the canvas — record at native Retina (e.g. 3024×1964) for the most zoom headroom.
 
 ## Video Appearance
 

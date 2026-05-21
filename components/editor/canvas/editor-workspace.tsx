@@ -575,7 +575,14 @@ export default function EditorWorkspace() {
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      Konva.pixelRatio = Math.min(window.devicePixelRatio || 1, 2)
+      // Use the display's actual devicePixelRatio so the canvas backing
+      // store matches the panel — without this, the video looks soft on
+      // 5K/6K displays where dPR reports 3. Cap at 3 to keep memory
+      // bounded on extreme multi-monitor setups; values above 3 give no
+      // additional sharpness for any source video we'd realistically
+      // record (3024×1964 native at dPR 3 fills a 9072×5892 backing
+      // store already).
+      Konva.pixelRatio = Math.min(window.devicePixelRatio || 1, 3)
     }
   }, [])
 
