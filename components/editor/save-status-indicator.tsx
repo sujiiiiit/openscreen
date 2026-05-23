@@ -39,7 +39,7 @@ export function SaveStatusIndicator({ className }: { className?: string }) {
           <Button
             {...props}
             variant="ghost"
-            size="icon"
+            size="icon-sm"
             className={cn("rounded-md", className)}
           >
             <HugeiconsIcon

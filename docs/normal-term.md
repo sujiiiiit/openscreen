@@ -73,3 +73,8 @@ Use this table when discussion language and implementation language differ. Pref
 | Dragged-in video / external file | Imported asset             | A user-supplied video file copied into `<project>/assets/videos/<id>/`. Recorded screen/camera tracks are NOT imported assets — they stay where the recorder put them. |
 | Background image preset     | Wallpaper                       | A stock background image shipped with the app and referenced by stable `WallpaperId`; not copied per project. |
 | Auto-save / save-on-edit    | Autosave                        | The 500 ms debounced write of the current editor state into `project.json`, with extra flushes on window blur and `beforeunload`. |
+| Step back / take back       | Undo                            | Restore the previous document snapshot from the in-memory `historyRef` (Cmd/Ctrl+Z). Restores `{ artboard, videos, timelineClips }` only. |
+| Redo / replay               | Redo                            | Re-apply the next snapshot after one or more undos (Cmd/Ctrl+Shift+Z). |
+| Undo step                   | History snapshot                | One `{ artboard, videos, timelineClips }` `ProjectStateV1` entry held in the in-memory undo stack. Pushed by the autosave-aligned push site. |
+| Action category             | Commit tag                      | Action-category label (`transform`, `appearance`, `nudge`, `lock`, `add`, `delete`, `duplicate`, `preset`, `background`, `padding`, `grain`, `clip-move`, `clip-resize`) stamped by each action; read by the push site to decide between coalesce and new entry. |
+| Bundle window               | Coalesce window                 | The 2 s window during which same-tag pushes replace the top entry instead of appending. |

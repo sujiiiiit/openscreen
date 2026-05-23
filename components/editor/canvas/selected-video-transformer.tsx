@@ -176,6 +176,10 @@ type SelectedVideoTransformerProps = {
   onRotationStart: (node: Konva.Image) => void
   onRotationFrame: (node: Konva.Image) => void
   onRotationEnd: () => void
+  // Set to true while a Transformer drag (corner/side handle or rotation)
+  // is in progress, cleared on commit. Read by the editor-workspace
+  // keyboard handler to block Cmd+Z mid-gesture.
+  isTransformingRef: RefObject<boolean>
 }
 
 export function SelectedVideoTransformer({
@@ -195,6 +199,7 @@ export function SelectedVideoTransformer({
   onRotationStart,
   onRotationFrame,
   onRotationEnd,
+  isTransformingRef,
 }: SelectedVideoTransformerProps) {
   const transformerRef = useRef<Konva.Transformer | null>(null)
   const resizeSnapCacheRef = useRef<SnapCache | null>(null)
@@ -273,6 +278,7 @@ export function SelectedVideoTransformer({
     const wasRotating = isRotationTransform()
     resizeSnapCacheRef.current = null
     guideOverlayRef.current?.clear()
+    isTransformingRef.current = false
     if (!selectedItemId || !node) {
       if (wasRotating) {
         onRotationEnd()
@@ -307,6 +313,7 @@ export function SelectedVideoTransformer({
 
   const handleTransformStart = () => {
     if (!selectedItemId) return
+    isTransformingRef.current = true
     const node = getSelectedTransformNode()
     if (isRotationTransform()) {
       resizeSnapCacheRef.current = null

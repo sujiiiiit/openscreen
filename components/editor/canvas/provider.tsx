@@ -35,7 +35,8 @@ import type {
   EditorSaveStatus,
   ViewTransform,
 } from "@/types/editor-canvas"
-import type { ProjectAsset, ProjectSummary } from "@/types/api"
+import { ARTBOARD_SELECTION_ID } from "@/types/editor-canvas"
+import type { ProjectAsset, ProjectStateV1, ProjectSummary } from "@/types/api"
 import {
   PROJECT_STATE_AUTOSAVE_DEBOUNCE_MS,
   PROJECT_STATE_AUTOSAVE_RETRY_MS,
@@ -44,6 +45,16 @@ import {
   projectVideoToCanvasVideo,
   serializeProjectState,
 } from "@/components/editor/canvas/persistence"
+import {
+  applyHistoryCommit,
+  canRedoHistory,
+  canUndoHistory,
+  createEmptyHistory,
+  getRedoTargetEntry,
+  getUndoTargetEntry,
+  type EditorHistory,
+  type HistoryCommitTag,
+} from "@/components/editor/canvas/history"
 
 const DEFAULT_VIEWPORT_SIZE: CanvasSize = { width: 0, height: 0 }
 const DEFAULT_ARTBOARD_PRESET = getArtboardPreset(DEFAULT_ARTBOARD_PRESET_ID)
@@ -255,6 +266,13 @@ type EditorCanvasSaveStatusContextValue = {
   error: string | null
 }
 
+type EditorCanvasHistoryContextValue = {
+  canUndo: boolean
+  canRedo: boolean
+  undo: () => void
+  redo: () => void
+}
+
 const EditorCanvasMediaContext =
   createContext<EditorCanvasMediaContextValue | null>(null)
 const EditorCanvasArtboardContext =
@@ -269,6 +287,8 @@ const EditorCanvasTimelineActionsContext =
   createContext<EditorCanvasTimelineActionsContextValue | null>(null)
 const EditorCanvasSaveStatusContext =
   createContext<EditorCanvasSaveStatusContextValue | null>(null)
+const EditorCanvasHistoryContext =
+  createContext<EditorCanvasHistoryContextValue | null>(null)
 
 function readVideoMetadata(objectUrl: string): Promise<VideoMetadata> {
   return new Promise((resolve, reject) => {
@@ -571,6 +591,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const [isHoverPreviewActive, setIsHoverPreviewActive] = useState(false)
   const [saveStatus, setSaveStatus] = useState<EditorSaveStatus>("idle")
   const [saveError, setSaveError] = useState<string | null>(null)
+  // Reactive mirrors of `historyRef` so the future toolbar / Edit menu can
+  // render disabled state. The keyboard handler reads `historyRef.current`
+  // directly so a double-tap of Cmd+Z walks the cursor without waiting for
+  // setState to commit.
+  const [canUndo, setCanUndo] = useState(false)
+  const [canRedo, setCanRedo] = useState(false)
 
   const objectUrlsRef = useRef(new Set<string>())
   const videosRef = useRef(videos)
@@ -642,6 +668,69 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const flushAutosaveRef = useRef<((projectPath: string) => Promise<void>) | null>(
     null
   )
+  // Undo / redo history. The push site lives inside the autosave drain so a
+  // single 500ms debounce window collapses many rapid mutations into one
+  // history entry, naturally giving us "drag a slider = one undo step"
+  // without per-surface wiring. `historyCommitTagRef` is set by each
+  // mutating action before it touches state; the push site reads + clears it
+  // and feeds it to `applyHistoryCommit`. `restoringFromHistoryRef` gates
+  // the push site so undo / redo do not corrupt the cursor with a duplicate
+  // snapshot of the restored state.
+  const historyRef = useRef<EditorHistory>(createEmptyHistory())
+  const historyCommitTagRef = useRef<HistoryCommitTag | null>(null)
+  const restoringFromHistoryRef = useRef(false)
+  // Maps imported video ids to their `file://` URLs returned by main on
+  // import. Used to re-attach the URL when undo restores a previously
+  // deleted imported video whose id is no longer in `videos` or in
+  // `project.assetUrlsByVideoId` (which is computed at project open).
+  // Holds only strings — no blob memory pinned by undo.
+  const sessionImportedUrlsRef = useRef(new Map<string, string>())
+
+  // `capturedTag` must be captured at the same instant as `snapshot` and
+  // passed in — never re-read from `historyCommitTagRef.current` here.
+  // Reading the ref at push time races with a user action that lands its
+  // tag during the IPC await between capture and push, mis-attributing the
+  // racing action's tag to this snapshot.
+  const pushHistoryFromAutosave = useCallback(
+    (
+      snapshot: ProjectStateV1,
+      fingerprint: string | null,
+      capturedTag: HistoryCommitTag | null
+    ) => {
+      if (restoringFromHistoryRef.current && capturedTag === null) {
+        // No user action since restore — this autosave is just the post-
+        // restore disk sync. Skip the push so we don't corrupt the cursor
+        // with a duplicate snapshot of the just-restored state.
+        return
+      }
+      // A user action raced the restore: clear the guard so this edit (and
+      // any subsequent ones) push normally. The edit's snapshot lands as
+      // a new history entry on top of the restored cursor.
+      if (restoringFromHistoryRef.current) {
+        restoringFromHistoryRef.current = false
+      }
+      const tag: HistoryCommitTag = capturedTag ?? "unknown"
+      const { next, didPush } = applyHistoryCommit(
+        historyRef.current,
+        snapshot,
+        fingerprint,
+        tag,
+        Date.now()
+      )
+      historyRef.current = next
+      if (didPush) {
+        const nextCanUndo = canUndoHistory(next)
+        const nextCanRedo = canRedoHistory(next)
+        setCanUndo((current) =>
+          current === nextCanUndo ? current : nextCanUndo
+        )
+        setCanRedo((current) =>
+          current === nextCanRedo ? current : nextCanRedo
+        )
+      }
+    },
+    []
+  )
 
   const flushAutosave = useCallback(async (projectPath: string) => {
     if (autosaveInFlightRef.current) {
@@ -676,6 +765,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           timelineClipsRef.current
         )
         const fingerprint = fingerprintProjectState(snapshot)
+        // Snapshot the tag at the same instant as the state so a user
+        // action that lands during the IPC await cannot attribute its tag
+        // to this snapshot. The next drain pass will pick up the new tag.
+        const capturedTag = historyCommitTagRef.current
+        historyCommitTagRef.current = null
         if (
           fingerprint !== null &&
           fingerprint === lastWrittenSerializedRef.current
@@ -684,6 +778,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           // a successful no-op. Avoids a redundant write right after fast-
           // path hydration and any other "schedule-but-no-real-change" path.
           lastError = null
+          // Still advance the history clock on no-op flushes so a
+          // destructive-flush call after a stale debounce can coalesce
+          // correctly — the snapshot didn't change, so this branch never
+          // pushes a new entry, only refreshes the top's timestamp.
+          pushHistoryFromAutosave(snapshot, fingerprint, capturedTag)
           continue
         }
         try {
@@ -704,6 +803,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           lastError = cause instanceof Error ? cause.message : String(cause)
           console.error("[provider] autosave failed:", cause)
         }
+        // Push to history regardless of disk-write outcome. History is
+        // in-memory only; a transient IPC error must not silently drop a
+        // ledger entry, and a successful retry will reconcile the disk side.
+        pushHistoryFromAutosave(snapshot, fingerprint, capturedTag)
       } while (autosavePendingRef.current)
     } finally {
       autosaveInFlightRef.current = false
@@ -729,8 +832,41 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           }, PROJECT_STATE_AUTOSAVE_RETRY_MS)
         }
       }
+      // Clear the restore guard now that the post-restore autosave has
+      // completed its drain. The guard is set by `undo` / `redo` and lives
+      // until the next autosave finishes so multiple back-to-back drain
+      // passes (e.g., a new edit immediately after restore) all skip the
+      // push site for the restored state.
+      restoringFromHistoryRef.current = false
     }
-  }, [])
+  }, [pushHistoryFromAutosave])
+
+  // Synchronous flush helper used by destructive actions (delete, duplicate,
+  // add, preset). Pushes the *pre-destructive* snapshot into history right
+  // now (so the prior edit window becomes its own undo entry regardless of
+  // whether another save is already in flight — `flushAutosave` would just
+  // queue itself in that case and the boundary would be lost), then kicks
+  // the drain so the snapshot lands on disk too. The destructive change
+  // that follows lands as a separate entry on the next autosave fire.
+  const flushAutosaveNow = useCallback(() => {
+    const currentProject = projectRef.current
+    if (!currentProject) return
+    if (hydratedProjectIdRef.current !== currentProject.id) return
+    if (autosaveTimerRef.current !== null) {
+      clearTimeout(autosaveTimerRef.current)
+      autosaveTimerRef.current = null
+    }
+    const snapshot = serializeProjectState(
+      artboardRef.current,
+      videosRef.current,
+      timelineClipsRef.current
+    )
+    const fingerprint = fingerprintProjectState(snapshot)
+    const capturedTag = historyCommitTagRef.current
+    historyCommitTagRef.current = null
+    pushHistoryFromAutosave(snapshot, fingerprint, capturedTag)
+    void flushAutosave(currentProject.path)
+  }, [flushAutosave, pushHistoryFromAutosave])
 
   useEffect(() => {
     flushAutosaveRef.current = flushAutosave
@@ -1758,6 +1894,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
 
   const setArtboardPreset = useCallback(
     (id: ArtboardPresetId) => {
+      // Preset is a destructive layout reshape (videos relayout under it) so
+      // commit any prior pending debounce as its own history entry before
+      // we mutate.
+      flushAutosaveNow()
+      historyCommitTagRef.current = "preset"
       const prevBackground = artboardRef.current.background
       const prevGrain = artboardRef.current.grain
       const prevPadding = artboardRef.current.padding
@@ -1818,11 +1959,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         return nextVideos
       })
     },
-    [commitVideosRef]
+    [commitVideosRef, flushAutosaveNow]
   )
 
   const moveTimelineClip = useCallback(
     (id: string, start: number) => {
+      historyCommitTagRef.current = "clip-move"
       let didChange = false
       setTimelineClips((current) => {
         const nextClips = current.map((clip) => {
@@ -1867,6 +2009,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       end: number,
       direction: TimelineResizeDirection
     ) => {
+      historyCommitTagRef.current = "clip-resize"
       let didChange = false
       setTimelineClips((current) => {
         const nextClips = current.map((clip) => {
@@ -2033,6 +2176,14 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         ...createVideoAppearanceDefaults("media", placement),
       }
 
+      // Remember the file:// URL so a later undo of a delete can re-attach
+      // it without a new IPC round-trip. The map only ever holds strings.
+      sessionImportedUrlsRef.current.set(id, importResult.fileUrl)
+      // Add is destructive — flush any pending non-destructive edits as
+      // their own history entry first, then tag this mutation so the next
+      // autosave creates a separate entry for the add itself.
+      flushAutosaveNow()
+      historyCommitTagRef.current = "add"
       setVideos((current) => {
         const nextVideos = [...current, item]
         commitVideosRef(nextVideos)
@@ -2048,7 +2199,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setSelectedItemId(id)
       setImportError(null)
     },
-    [commitTimelineClipsRef, commitVideosRef]
+    [commitTimelineClipsRef, commitVideosRef, flushAutosaveNow]
   )
 
   const addRemoteVideo = useCallback(
@@ -2152,6 +2303,15 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         ...createVideoAppearanceDefaults(role, placement),
       }
 
+      // Same treatment as `addVideoFile`: cache the URL for future undo of
+      // a delete (recording sources come from `assetUrlsByVideoId`; imported
+      // sources from session state), and bracket the mutation with a
+      // destructive flush + tag.
+      if (input.source.kind === "imported") {
+        sessionImportedUrlsRef.current.set(desiredId, input.url)
+      }
+      flushAutosaveNow()
+      historyCommitTagRef.current = "add"
       setVideos((current) => {
         if (current.some((video) => video.id === desiredId)) return current
         const nextVideos = [...current, item]
@@ -2166,7 +2326,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       })
       return desiredId
     },
-    [commitTimelineClipsRef, commitVideosRef]
+    [commitTimelineClipsRef, commitVideosRef, flushAutosaveNow]
   )
 
   const selectItem = useCallback((id: string | null) => {
@@ -2178,6 +2338,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     const current = artboardRef.current
     const clamped = Math.max(0, Math.min(100, Math.round(grain)))
     if (current.grain === clamped) return
+    historyCommitTagRef.current = "grain"
     const nextArtboard: EditorArtboard = { ...current, grain: clamped }
     artboardRef.current = nextArtboard
     setArtboard(nextArtboard)
@@ -2191,6 +2352,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         Math.min(ARTBOARD_PADDING_MAX, Math.round(padding))
       )
       if (current.padding === clamped) return
+      historyCommitTagRef.current = "padding"
       const nextArtboard: EditorArtboard = { ...current, padding: clamped }
       artboardRef.current = nextArtboard
       setArtboard(nextArtboard)
@@ -2243,6 +2405,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
             (prev.blurRadius ?? 0) === (background.blurRadius ?? 0)))
       if (isSameBackground) return
 
+      historyCommitTagRef.current = "background"
       const nextArtboard: EditorArtboard = { ...current, background }
       artboardRef.current = nextArtboard
       setArtboard(nextArtboard)
@@ -2252,6 +2415,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
 
   const updateVideoTransform = useCallback(
     (id: string, patch: CanvasVideoTransformPatch) => {
+      historyCommitTagRef.current = "transform"
       setVideos((current) => {
         let didChange = false
         const nextVideos = current.map((video) => {
@@ -2284,6 +2448,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   // never triggers a downstream redraw.
   const updateVideoAppearance = useCallback(
     (id: string, patch: CanvasVideoAppearancePatch) => {
+      historyCommitTagRef.current = "appearance"
       setVideos((current) => {
         let didChange = false
         const nextVideos = current.map((video) => {
@@ -2321,6 +2486,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
 
   const setVideoLocked = useCallback(
     (id: string, locked: boolean) => {
+      historyCommitTagRef.current = "lock"
       setVideos((current) => {
         let didChange = false
         const nextVideos = current.map((video) => {
@@ -2349,6 +2515,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const selectedVideo = currentVideos[selectedIndex]
       if (!selectedVideo) return
 
+      flushAutosaveNow()
+      historyCommitTagRef.current = "duplicate"
       const duplicate: CanvasVideoItem = {
         ...selectedVideo,
         id: createCanvasId(),
@@ -2379,7 +2547,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setTimelineClips(nextClips)
       setSelectedItemId(duplicate.id)
     },
-    [commitTimelineClipsRef, commitVideosRef]
+    [commitTimelineClipsRef, commitVideosRef, flushAutosaveNow]
   )
 
   const deleteVideo = useCallback(
@@ -2388,6 +2556,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const deletedVideo = currentVideos.find((video) => video.id === id)
       if (!deletedVideo) return
 
+      flushAutosaveNow()
+      historyCommitTagRef.current = "delete"
       const nextVideos = currentVideos.filter((video) => video.id !== id)
       const objectUrlStillUsed = nextVideos.some(
         (video) => video.objectUrl === deletedVideo.objectUrl
@@ -2418,8 +2588,130 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         setSelectedItemId(null)
       }
     },
-    [commitTimelineClipsRef, commitVideosRef]
+    [commitTimelineClipsRef, commitVideosRef, flushAutosaveNow]
   )
+
+  // Pure helper: pick the URL for a restored video. Recording sources come
+  // from main's per-project asset map; imported sources fall back to a
+  // session cache populated when the file was first imported. Returns ""
+  // for missing files — the renderer keeps the broken node visible so the
+  // user can see what's wrong, identical to hydration semantics.
+  const resolveObjectUrlForRestore = useCallback(
+    (video: ProjectStateV1["videos"][number]): string => {
+      const currentProject = projectRef.current
+      const existing = videoByIdRef.current.get(video.id)
+      if (existing && existing.objectUrl) return existing.objectUrl
+      const fromProject = currentProject?.assetUrlsByVideoId[video.id]
+      if (fromProject) return fromProject
+      if (video.source.kind === "imported") {
+        const cached = sessionImportedUrlsRef.current.get(video.id)
+        if (cached) return cached
+      }
+      return ""
+    },
+    []
+  )
+
+  const restoreHistorySnapshot = useCallback(
+    (direction: -1 | 1) => {
+      const history = historyRef.current
+      const target =
+        direction === -1
+          ? getUndoTargetEntry(history)
+          : getRedoTargetEntry(history)
+      if (!target) return
+
+      const savedState = target.state
+      const savedArtboard: EditorArtboard = {
+        presetId: savedState.artboard.presetId,
+        width: savedState.artboard.width,
+        height: savedState.artboard.height,
+        background: savedState.artboard.background,
+        grain: savedState.artboard.grain,
+        padding: savedState.artboard.padding,
+      }
+      const restoredVideos: CanvasVideoItem[] = savedState.videos.map(
+        (video) =>
+          projectVideoToCanvasVideo(video, resolveObjectUrlForRestore(video))
+      )
+      const restoredClips: CanvasTimelineClip[] =
+        savedState.timelineClips.map(projectClipToCanvasClip)
+
+      restoringFromHistoryRef.current = true
+      historyRef.current = {
+        past: history.past,
+        cursor: history.cursor + direction,
+      }
+
+      const prevArtboard = artboardRef.current
+      artboardRef.current = savedArtboard
+      commitVideosRef(restoredVideos)
+      commitTimelineClipsRef(restoredClips)
+      setArtboard(savedArtboard)
+      setVideos(restoredVideos)
+      setTimelineClips(restoredClips)
+
+      // If the restored artboard has different dimensions, refit the view
+      // to it — matches `setArtboardPreset`'s behavior so undoing/redoing
+      // a preset change leaves the canvas zoomed to fit the new size
+      // instead of stranding it at the previous fit.
+      if (
+        prevArtboard.width !== savedArtboard.width ||
+        prevArtboard.height !== savedArtboard.height
+      ) {
+        hasCustomViewRef.current = false
+        const fitTransform = getFitViewTransform(
+          viewportSizeRef.current,
+          savedArtboard
+        )
+        viewTransformRef.current = fitTransform
+        setViewTransformState(fitTransform)
+      }
+
+      // Clear selection if the previously-selected video no longer exists
+      // in the restored set. Artboard selection is always valid.
+      const selId = selectedItemIdRef.current
+      if (
+        selId !== null &&
+        selId !== ARTBOARD_SELECTION_ID &&
+        !restoredVideos.some((video) => video.id === selId)
+      ) {
+        selectedItemIdRef.current = null
+        setSelectedItemId(null)
+      }
+
+      // Clamp the playhead if the restored timeline is shorter than the
+      // current position. Sync media so the canvas catches up immediately.
+      const newDuration = Math.max(
+        TIMELINE_MIN_CLIP_DURATION_SECONDS,
+        restoredClips.reduce(
+          (duration, clip) => Math.max(duration, clip.end),
+          0
+        )
+      )
+      if (timelineTimeRef.current > newDuration) {
+        const clamped = clampTimelineTime(timelineTimeRef.current, newDuration)
+        timelineTimeRef.current = clamped
+        setTimelineTimeState(clamped)
+      }
+
+      setCanUndo(canUndoHistory(historyRef.current))
+      setCanRedo(canRedoHistory(historyRef.current))
+    },
+    [
+      commitTimelineClipsRef,
+      commitVideosRef,
+      resolveObjectUrlForRestore,
+    ]
+  )
+
+  const undo = useCallback(() => {
+    restoreHistorySnapshot(-1)
+  }, [restoreHistorySnapshot])
+
+  const redo = useCallback(() => {
+    restoreHistorySnapshot(1)
+  }, [restoreHistorySnapshot])
 
   const selectedVideo = useMemo(
     () => videos.find((video) => video.id === selectedItemId) ?? null,
@@ -2458,6 +2750,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       error: saveError,
     }),
     [saveStatus, saveError]
+  )
+
+  const historyValue = useMemo<EditorCanvasHistoryContextValue>(
+    () => ({ canUndo, canRedo, undo, redo }),
+    [canUndo, canRedo, undo, redo]
   )
 
   const viewValue = useMemo<EditorCanvasViewContextValue>(
@@ -2607,6 +2904,14 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       lastWrittenSerializedRef.current = null
       setSaveStatus("saved")
       setSaveError(null)
+      // Each project owns its own undo stack; clear it before adopting the
+      // new project so Cmd+Z in project B doesn't return project A's state.
+      historyRef.current = createEmptyHistory()
+      historyCommitTagRef.current = null
+      restoringFromHistoryRef.current = false
+      sessionImportedUrlsRef.current.clear()
+      setCanUndo(false)
+      setCanRedo(false)
       commitVideosRef([])
       commitTimelineClipsRef([])
       timelineCanvasNodesRef.current.forEach((node) => {
@@ -2689,9 +2994,27 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       // autosave effect's immediate post-hydration run sees "no diff" and
       // skips the IPC. Without this, every project open pays an extra
       // redundant write for an indicator that briefly flashes "Saving…".
-      lastWrittenSerializedRef.current = fingerprintProjectState(
-        serializeProjectState(savedArtboard, restoredVideos, restoredClips)
+      const hydratedSnapshot = serializeProjectState(
+        savedArtboard,
+        restoredVideos,
+        restoredClips
       )
+      const hydratedFingerprint = fingerprintProjectState(hydratedSnapshot)
+      lastWrittenSerializedRef.current = hydratedFingerprint
+
+      // Seed the history baseline so the user's first edit is undoable back
+      // to the loaded state. Without this, the first edit lands at cursor 0
+      // and Cmd+Z has nothing to walk back to.
+      const seeded = applyHistoryCommit(
+        historyRef.current,
+        hydratedSnapshot,
+        hydratedFingerprint,
+        "unknown",
+        Date.now()
+      )
+      historyRef.current = seeded.next
+      setCanUndo(false)
+      setCanRedo(false)
 
       hydratedProjectIdRef.current = project.id
       return
@@ -2757,6 +3080,33 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const fit = getFitViewTransform(viewportSizeRef.current, nextArtboard)
       viewTransformRef.current = fit
       setViewTransformState(fit)
+    }
+
+    // Seed the slow-path baseline before any auto-add runs so the
+    // synthesized artboard + empty video/clip state lands at cursor 0. The
+    // first addRemoteVideo's autosave pushes the auto-added state at
+    // cursor 1, and the user's first edit pushes cursor 2 — Cmd+Z walks
+    // back through both. We also seed `lastWrittenSerializedRef` to avoid
+    // a redundant IPC write of the still-empty state when the destructive
+    // flush inside `addRemoteVideo` fires before its own setVideos.
+    {
+      const baselineSnapshot = serializeProjectState(
+        artboardRef.current,
+        videosRef.current,
+        timelineClipsRef.current
+      )
+      const baselineFingerprint = fingerprintProjectState(baselineSnapshot)
+      lastWrittenSerializedRef.current = baselineFingerprint
+      const seeded = applyHistoryCommit(
+        historyRef.current,
+        baselineSnapshot,
+        baselineFingerprint,
+        "unknown",
+        Date.now()
+      )
+      historyRef.current = seeded.next
+      setCanUndo(false)
+      setCanRedo(false)
     }
 
     if (
@@ -2899,7 +3249,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
             <EditorCanvasArtboardContext.Provider value={artboardValue}>
               <EditorCanvasViewContext.Provider value={viewValue}>
                 <EditorCanvasSaveStatusContext.Provider value={saveStatusValue}>
-                  {children}
+                  <EditorCanvasHistoryContext.Provider value={historyValue}>
+                    {children}
+                  </EditorCanvasHistoryContext.Provider>
                 </EditorCanvasSaveStatusContext.Provider>
               </EditorCanvasViewContext.Provider>
             </EditorCanvasArtboardContext.Provider>
@@ -2967,6 +3319,13 @@ export function useEditorCanvasSaveStatus() {
   return useRequiredEditorCanvasContext(
     useContext(EditorCanvasSaveStatusContext),
     "useEditorCanvasSaveStatus"
+  )
+}
+
+export function useEditorHistory() {
+  return useRequiredEditorCanvasContext(
+    useContext(EditorCanvasHistoryContext),
+    "useEditorHistory"
   )
 }
 

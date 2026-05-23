@@ -162,13 +162,14 @@ Goal: end of recording lands you in the editor with the screen + camera already 
 - Register `.openscreen` as a macOS package + file association in `electron-builder.yml`.
 - "Recent projects" list (from `~/Documents/openscreen/`).
 
-### Phase 3 — Undo/redo (1–2 days)
+### Phase 3 — Undo/redo (1–2 days) — **IMPLEMENTED**
 
-- `useHistory` hook in `components/editor/canvas/`.
-- Wire commits on `dragend` / `transformend`, add / delete / duplicate, preset change, lock.
-- `Cmd+Z` / `Cmd+Shift+Z` shortcuts.
-- A subtle history-state indicator (later).
-- Bonus: persist last N history entries to `history/` for crash recovery (defer to Phase 6).
+- Pure history module at `components/editor/canvas/history.ts`; provider exposes `useEditorHistory()` from `components/editor/canvas/provider.tsx`.
+- Capture is autosave-debounce-aligned (no per-surface wiring on sliders / Konva / timeline). Each provider action tags its commit; the push site inside `flushAutosave`'s drain decides between coalesce and new entry. Destructive actions (`add`/`delete`/`duplicate`/`preset`) call a synchronous `flushAutosaveNow()` so the prior edit window becomes its own undo entry.
+- `Cmd/Ctrl+Z` / `Cmd/Ctrl+Shift+Z` wired in `editor-workspace.tsx`'s key handler; blocked while typing in editable elements, during Transformer rotation/drag, and during pan.
+- `canUndo` / `canRedo` are reactive React state on the hook, ready for a future toolbar/menu surface.
+- Bonus: persist last N history entries to `<project>/history/` for crash recovery — **still deferred** to Phase 6.
+- Full design in `docs/editor-canvas.md` → "Undo / Redo".
 
 ### Phase 4 — Timeline integration (3–5 days)
 

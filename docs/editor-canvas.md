@@ -201,9 +201,69 @@ Context hooks:
 - `useEditorCanvasTimeline()`: clips, selected clip, playhead time, duration, timeline zoom, fit mode, playback state, primary audio video id.
 - `useEditorCanvasActions()`: stable canvas actions.
 - `useEditorCanvasTimelineActions()`: stable timeline playback, clip-editing, and media-registration actions.
+- `useEditorCanvasSaveStatus()`: autosave indicator state.
+- `useEditorHistory()`: `canUndo`, `canRedo`, `undo()`, `redo()`. Reactive enablement flags for future toolbar/menu surfaces; stable callbacks for the keyboard handler.
 - `useEditorCanvas()`: compatibility hook that merges every context and should be avoided in hot or narrow components.
 
 `ResizeObserver` updates the viewport size from the workspace area, so the Konva stage follows timeline resizing and sidebar collapse/expand.
+
+## Undo / Redo
+
+Snapshot-based, in-memory undo/redo for the document state. Lives entirely in `EditorCanvasProvider`; pure decision logic in `components/editor/canvas/history.ts`. Cleared on project switch and app quit (no crash-recovery persistence — that's reserved for Phase 6 in `docs/project-plan.md`).
+
+Scope:
+
+- Restores `{ artboard, videos, timelineClips }` — the same slice the autosave fingerprint covers.
+- Does NOT restore selection (`selectedItemId`), playhead time (`timelineTime`), timeline zoom/scroll, workspace view transform, hover preview, or any other session-only state. Selection is invalidated only when the previously-selected video no longer exists in the restored set; otherwise it is left alone. The playhead is clamped if the restored duration is shorter than its current position.
+- When the restored artboard dimensions differ from the current ones (e.g., undoing a preset change), the viewport is auto-refit to the new size via `getFitViewTransform`. This matches `setArtboardPreset`'s "always fit on size change" rule so the canvas never strands at a stale zoom after an undo.
+
+Capture point:
+
+- Aligned to the existing 500 ms autosave debounce. The push site lives inside `flushAutosave`'s drain loop (in `provider.tsx`, immediately after the fingerprint compare). Every drain iteration calls `pushHistoryFromAutosave(snapshot, fingerprint, capturedTag)` regardless of disk-write outcome, so history advances even on transient IPC errors and on no-op fingerprint matches.
+- **Zero per-surface wiring** on sliders, Konva drag/transform, or timeline clip move/resize. The natural debounce already collapses a fast-fire burst into one entry.
+- **Tag capture is synchronous with the snapshot.** The drain reads and clears `historyCommitTagRef.current` at the same instant it serialises the snapshot, then passes the captured tag through to the push. A user action that races the IPC await cannot mis-attribute its tag to the in-flight snapshot — its tag is picked up by the next drain pass instead.
+
+Coalescing:
+
+- Each action sets `historyCommitTagRef.current = "<tag>"` before mutating state (one line per action). Tags used today: `transform`, `appearance`, `nudge` (same tag as `transform` today), `lock`, `add`, `delete`, `duplicate`, `preset`, `background`, `padding`, `grain`, `clip-move`, `clip-resize`. A missing tag is treated as `unknown` and always pushes a new entry.
+- `applyHistoryCommit` (in `history.ts`) replaces the top entry when the new commit shares the previous tag AND lands inside `HISTORY_COALESCE_WINDOW_MS = 2000`. Otherwise it appends a new entry. The replace branch truncates the redo tail past the cursor — editing on top of an undid cursor must invalidate the stale future. Identical fingerprints just refresh the timestamp and preserve the existing tag when the incoming tag is `unknown` (so a benign post-flush no-op cannot demote a meaningful tag).
+- `ALWAYS_NEW_ENTRY_TAGS = { "add", "delete", "duplicate", "preset" }` — these always push a new entry, never coalesce. Coupled with the destructive-flush rule below they guarantee that "Cmd+Z" undoes exactly one delete/add/duplicate/preset change.
+
+Destructive flush:
+
+- `addVideoFile`, `addRemoteVideo`, `duplicateVideo`, `deleteVideo`, and `setArtboardPreset` call `flushAutosaveNow()` **before** they mutate state. The helper pushes the pre-destructive snapshot to history **synchronously** (so the boundary survives even when another save is already in flight — `flushAutosave` would queue itself and the in-memory boundary would otherwise be lost), then kicks the async drain to write that snapshot to disk. The destructive change that follows lands as its own entry on the next autosave fire.
+
+Storage:
+
+- `MAX_HISTORY_ENTRIES = 100`, FIFO eviction at the front.
+- In-memory `historyRef` in the provider. The state never touches disk.
+- The project-switch reset block (`useEffect` ~`provider.tsx:2581`) clears `historyRef`, `historyCommitTagRef`, `restoringFromHistoryRef`, `sessionImportedUrlsRef`, and both reactive flags.
+- Both hydration paths seed a baseline entry tagged `"unknown"` so the user's first edit becomes index 1 and `Cmd+Z` returns to the loaded state. The slow path also seeds `lastWrittenSerializedRef` so the destructive flush inside `addRemoteVideo` does not write the still-empty state to disk before the auto-add lands.
+
+Object URL on restore:
+
+- Recording-source videos take their URL from `project.assetUrlsByVideoId[videoId]` (resolved by main at project open).
+- Imported-source videos take their URL from (in order): an existing in-state copy, `project.assetUrlsByVideoId`, or a `sessionImportedUrlsRef: Map<id, string>` cache populated when the file was first imported via `addVideoFile` / `addRemoteVideo`. The cache only ever holds `file://` URL strings — no blob memory is pinned by undo. A missing file falls back to an empty `objectUrl`, identical to hydration's broken-asset semantics.
+
+Keyboard:
+
+- `Cmd/Ctrl + Z` = undo. `Cmd/Ctrl + Shift + Z` = redo. Wired in `editor-workspace.tsx`'s `handleKeyDown`, above the selection-required branch so the shortcut works without a selection. Bails when `isEditableTarget(event.target)` is true. Blocked during active rotation (`isRotatingSelectedNodeRef`), Transformer drags (`isTransformingSelectedNodeRef`), and pan (`isPanningRef`) so a keypress mid-gesture cannot yank state out from under the hot path.
+
+Titlebar buttons:
+
+- `components/editor/history-controls.tsx` renders ghost-style icon buttons (HugeIcons `Undo03Icon` / `Redo03Icon`) next to the Folder and `SaveStatusIndicator` in `components/ui/titlebar.tsx`. Each is wrapped in a Tooltip; clicking calls `undo()` / `redo()`. The buttons are `disabled` when `canUndo` / `canRedo` is false, so they grey out at the ends of the stack and after a project switch.
+
+Performance:
+
+- Push site: one pure JS array op per autosave. Serialization is O(videos + clips). Negligible vs the IPC write.
+- Restore: one bulk replace of three state slots → one content-layer redraw. `CanvasVideoNode` memoization keeps unchanged nodes from re-rendering, preserving the 5000-node stress invariant.
+- Memory peak today (10 videos × 100 entries × ~1 KB) ≈ 1 MB. At the 5000-node stress invariant from `CLAUDE.md` the same 100-entry cap would hold ≈ 250 MB of snapshots — well above the budget for that target. When the editor moves toward that scale, swap the entry cap for a byte-budgeted cap (or move to diff snapshots) before turning on persisted history.
+
+Known limitations:
+
+- Two **different** non-destructive actions landing inside the same 500 ms autosave window coalesce into one entry (the last tag wins). One `Cmd+Z` rolls back both. The destructive-flush rule prevents this from mixing destructive and non-destructive edits; pairs like "nudge + appearance change" within 500 ms are accepted as a single undo unit. Acceptable per the zero-wiring constraint.
+- Undoing a deleted video whose underlying file is no longer on disk restores a node with an empty `objectUrl`. Same semantics as hydration after the file disappears.
+- Crash-recovery persistence (replay `<project>/history/` on app open) is intentionally deferred to Phase 6 of `docs/project-plan.md`.
 
 ## Layout Resizing
 
@@ -609,7 +669,7 @@ Schema (`electron/ipc/project-schema.ts`):
 - `timelineClips: ProjectTimelineClip[]` — `start`, `end`, `sourceIn`, `sourceOut` per clip.
 - `updatedAtUnixMs` — refreshed by main on every successful write.
 
-Not persisted: selection, playhead time, timeline zoom/scroll, viewport transform, hover preview state, all `*Ref` runtime state. The view always re-fits the artboard on load.
+Not persisted: selection, playhead time, timeline zoom/scroll, viewport transform, hover preview state, the in-memory undo/redo history (`historyRef`), the session-only imported URL cache (`sessionImportedUrlsRef`), all `*Ref` runtime state. The view always re-fits the artboard on load.
 
 Hydration (in `components/editor/canvas/provider.tsx`):
 

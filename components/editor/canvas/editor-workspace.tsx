@@ -37,6 +37,7 @@ import {
   useEditorCanvasTimeline,
   useEditorCanvasTimelineActions,
   useEditorCanvasView,
+  useEditorHistory,
 } from "@/components/editor/canvas/provider"
 import {
   hasZoomModifier,
@@ -193,6 +194,7 @@ export default function EditorWorkspace() {
   const viewTransformFrameRef = useRef<number | null>(null)
   const toolbarPositionFrameRef = useRef<number | null>(null)
   const isRotatingSelectedNodeRef = useRef(false)
+  const isTransformingSelectedNodeRef = useRef(false)
   const rotatingNodeRef = useRef<Konva.Image | null>(null)
   const [isSpacePressed, setIsSpacePressed] = useState(false)
   const [isPanning, setIsPanning] = useState(false)
@@ -226,6 +228,7 @@ export default function EditorWorkspace() {
     registerTimelineVideoElement,
     onTimelineVideoSeeked,
   } = useEditorCanvasTimelineActions()
+  const { undo, redo } = useEditorHistory()
   const { selectTab: selectSidebarTab, open: openSidebar } =
     useSidebarTabsContext()
   const selectedVideoIsTimelineVisible =
@@ -729,6 +732,23 @@ export default function EditorWorkspace() {
 
       if (isEditableTarget(event.target)) return
 
+      // Undo / redo. Lives above the selection branch so the shortcut works
+      // even when nothing is selected. Blocked during active rotation,
+      // Transformer drags, and pan to avoid yanking state out from under a
+      // hot-path interaction.
+      if (hasZoomModifier(event) && event.code === "KeyZ") {
+        if (isRotatingSelectedNodeRef.current) return
+        if (isTransformingSelectedNodeRef.current) return
+        if (isPanningRef.current) return
+        event.preventDefault()
+        if (event.shiftKey) {
+          redo()
+        } else {
+          undo()
+        }
+        return
+      }
+
       if (selectedItemIdRef.current) {
         const selectedVideo = selectedVideoRef.current
 
@@ -965,7 +985,9 @@ export default function EditorWorkspace() {
     deleteVideo,
     duplicateVideo,
     fitArtboardToViewport,
+    redo,
     setVideoLocked,
+    undo,
     updateVideoTransform,
     viewportSize.height,
     viewportSize.width,
@@ -1334,6 +1356,7 @@ export default function EditorWorkspace() {
               onRotationStart={showRotationReadout}
               onRotationFrame={updateRotationReadout}
               onRotationEnd={hideRotationReadout}
+              isTransformingRef={isTransformingSelectedNodeRef}
             />
           </Layer>
           </Stage>
