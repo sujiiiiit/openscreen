@@ -729,6 +729,103 @@ Known limitations:
 - ArrayBuffer-over-IPC import works fine for typical screen recordings (tens to hundreds of MB) but allocates the entire file in renderer memory before the copy. For multi-GB imports a streaming path API would be required.
 - `beforeunload` flushes are best-effort — the platform does not guarantee an async IPC round-trip completes before the window is destroyed. The 500 ms debounce keeps the worst-case loss tight.
 
+## Export Pipeline
+
+Exporting reads the same `ProjectStateV1` snapshot the autosave writes, replays the timeline frame-by-frame onto a vanilla-Konva offscreen stage, and feeds each composed frame to a WebCodecs-backed encoder via [Mediabunny](https://mediabunny.dev/). Audio is streamed window-by-window through a separate mixer (`streamTimelineAudio`) so peak RAM stays bounded regardless of source-file size or timeline duration.
+
+Trigger:
+
+- Editor titlebar Export button (`components/editor/title-bar-export-button.tsx`). Disabled when the project has no timeline clips. On click it serialises the current state with `serializeProjectState(artboard, videos, timelineClips)` and calls `window.api.export.openWindow({ settings, state, assetUrlsByVideoId, outputBaseName })`. The main process stashes the payload and opens the Export window.
+
+Window:
+
+- Separate `BrowserWindow` configured in `electron/windowConfigs.ts` (`exportWin`, **560×280**, vibrancy `under-window`, hidden titlebar — same chrome family as Recording Quality and Permissions). The `createExportWindow` site in `main.ts` falls back to 480×560 if the config is somehow missing; the configured value is what actually ships.
+- Route: `/export/` (`app/export/page.tsx`). States: `loading`, `ready` (settings form), `running` (progress + cancel), `done` (success + Reveal in Finder + Export again), `error` / `cancelled` (retry / close). The editor window is hidden when encoding starts (`export:markPreparing` → main calls `hideMainWindow`). The editor is shown again on `cancel`, `error`, or when the export window closes — **not** on `done`, because the user is supposed to see the success surface (Reveal in Finder / Export again) before dismissing.
+
+IPC (`electron/ipc/export.ts`):
+
+- `export:openWindow` — receives `ExportStartPayload`, stashes it, opens the window. If an export window is already open, brings it forward without replacing the payload or resetting state (close + reopen is the way to get a fresh snapshot).
+- `export:getStartPayload` — read-once payload pull from the export window.
+- `export:getSettings` / `export:setSettings` — persisted to `<userData>/export-settings.json` via the same coercion path used by `defaultExportSettings()` (`lib/editor-project/export-settings.ts`).
+- `export:markPreparing` — flips phase + hides the editor.
+- `export:reportProgress`, `export:reportDone(ArrayBuffer)`, `export:reportError` — state machine + final file write to `~/Documents/openscreen/exports/<base>-<ISO>.<ext>`. All three refuse to mutate state once the phase is terminal (`done`/`error`/`cancelled`) — see the state-machine notes below.
+- `export:cancel` — refuses for terminal phases (a late cancel after `done` would otherwise resurrect the state machine, with catastrophic consequences for the just-written output). For active phases, flips to `cancelled` and restores the editor. The export window's own `AbortController` short-circuits the in-flight `runExport` promise.
+- `export:revealOutput` — `shell.showItemInFolder`, gated to paths inside the exports directory.
+- `export:closeWindow` — pure window operation; **does not touch state.phase** so a terminal phase survives the close and the `disposeExportPendingPayload` cleanup correctly leaves the output alone. The window's `closed` handler in `main.ts` calls `disposeExportPendingPayload` and restores the editor.
+
+**State-machine invariants** — `done`, `error`, and `cancelled` are terminal. Every IPC handler checks `TERMINAL_PHASES.has(state.phase)` before mutating, so a late or duplicate IPC can never resurrect a finished job. The `disposeExportPendingPayload` cleanup only deletes `state.outputPath` when phase is **not** terminal — a successful `done` job is "the user's file now" and must never be touched. (This combination fixes the bug where clicking Done used to call `cancel` first, flip the phase, and trigger a phantom delete of the just-saved video.)
+
+Settings (`electron/ipc/export-schema.ts` + mirror in `types/api.d.ts` + renderer-side helpers in `lib/editor-project/export-settings.ts`):
+
+- `format: 'mp4-avc' | 'mp4-hevc' | 'webm-vp9'`. Probed on mount with Mediabunny's `canEncodeVideo`; unsupported codecs are dimmed in the dropdown.
+- `resolution: 'artboard' | '720p' | '1080p' | '1440p' | '4k'`. Aspect-preserving fit via `exportResolutionPixels` — long edge snaps to the target preset, short edge follows the artboard's aspect ratio, **and** the result is capped to the preset's nominal 16:9 pixel budget so near-square artboards at 4K don't blow past H.264 Level 5.2's 9.4 Mpx ceiling. Both dimensions are rounded to even pixels so AVC/HEVC accept them.
+- `fps: 30 | 60`. (FPS is informational for the probe — `canEncodeVideo` doesn't take it.)
+- Audio is **always** muxed when any source clip has an audio track. There is no `includeAudio` toggle.
+
+`exportResolutionPixels` lives **only** in `lib/editor-project/export-settings.ts`. The electron-side `export-schema.ts` deliberately does not duplicate it — see the comment in that file. The basic helpers (`defaultExportSettings`, `coerceExportSettings`, `exportContainerExtension`) are duplicated across the two modules because the renderer's tsconfig excludes `electron/`; those three MUST stay byte-equivalent, and the unit tests in `lib/editor-project/__tests__/export-settings.test.ts` lock the behaviour in.
+
+**No quality knob.** We deliberately don't expose a quality dropdown because users already pick a resolution. Instead `computeScreenContentBitrate` in `run-export.ts` derives a single text-content-tuned bitrate from `(codec, width, height, fps)` — anchored at 14 Mbps for 1080p H.264, ~2× what Mediabunny's `QUALITY_HIGH` would have produced. Mediabunny's `QUALITY_*` constants assume natural-video content where ~6 Mbps for 1080p H.264 looks fine; for terminal output / code / design tools that same bitrate is the dominant source of visible text blur. The encoder is also given `contentHint: 'text'` and a 1 s `keyFrameInterval` (more frequent I-frames preserve static text). Audio is pinned to 128 kbps AAC / Opus.
+
+**Safety guards in `run-export.ts`**:
+
+- `MAX_TIMELINE_SECONDS = 4 h` — refuse to start an export above this. A multi-hour blocking encode that crashes near the end is unrecoverable; users with longer content should trim first.
+- `MAX_OUTPUT_PIXELS = 3840 × 2160` — refuse output dimensions above the 4K nominal pixel budget. The pixel-budget cap in `exportResolutionPixels` already keeps presets in line; this catches custom artboards at `resolution: 'artboard'`.
+- Every `await` inside the frame loop, the audio mixer, and the audio-presence probe checks the `AbortSignal` so cancel response is at most one frame's latency.
+
+Rendering pipeline (`components/editor/export/`):
+
+- `build-stage.ts`: builds a vanilla `Konva.Stage` from a `ProjectStateV1` snapshot. One `Konva.Layer` for the background (color or wallpaper bitmap + grain overlay) and one for the video content. Each video is a `Konva.Image` whose `sceneFunc` calls the shared `drawCanvasVideoFrame` from `components/editor/canvas/video-scene-draw.ts` — so the export frame is pixel-identical to the editor preview. A scale factor (output width / artboard width) is applied at the Stage level so all node coordinates remain in artboard space. Nodes start `visible(false)`; the loop activates them per frame.
+- `source-frames.ts`: source-side WebCodecs decode pipeline. `planExportFrames` walks the timeline once and produces (a) a per-output-frame list of active clips and (b) the monotonic sequence of source timestamps each unique source video will be asked about. `SourceFrameProvider.create({...})` opens a Mediabunny `Input` over `UrlSource` (HTTP Range streaming — does **not** blob the whole file into memory) and wraps a `CanvasSink.canvasesAtTimestamps(...)` async generator. Mediabunny decodes each source packet **at most once** when timestamps are monotonic and pre-fetches `poolSize`–1 canvases ahead of the consumer. The create path is wrapped in try/catch so a failure between `new Input` and the iterator handoff disposes the Input rather than leaking it.
+- `decode-audio.ts` (`streamTimelineAudio`): **window-based streaming mixer**. The previous implementation `fetch(file://…) → arrayBuffer() → OfflineAudioContext.decodeAudioData()` per source loaded the entire source video file into RAM and then allocated a single timeline-sized output `AudioBuffer` — for a 2 GB recording and a 1 h timeline that's ~2 GB transient + ~1.4 GB decoded, easily crashing the export window. The current pipeline:
+  1. Opens one Mediabunny `Input` per unique source URL (HTTP Range streaming).
+  2. Builds one `AudioBufferSink.buffers(sourceIn, sourceOut)` async iterator per timeline clip — lazy decode, packet-by-packet.
+  3. Walks the output timeline in fixed 0.5 s windows. For each window: allocate a window-sized `AudioBuffer` (~192 KB at 48 kHz stereo), mix-add every overlapping clip's decoded chunks into it (so overlapping clips compose instead of clobbering), `await audioSource.add(windowBuffer)` to honour encoder backpressure, then drop the window buffer to GC.
+  Peak RAM stays bounded under ~10 MB regardless of timeline length or source size. Output sample rate is the max observed across all sources; mismatched sources are linearly resampled inline.
+- `run-export.ts`: orchestrates the loop. Emits an `onStage(stage)` callback at every phase boundary (`preparing`, `decoding-audio`, `encoding`, `muxing-audio`, `finalizing`) so the export window can swap its headline + status text in step with the pipeline. **Probe-before-add**: because Mediabunny doesn't let you remove a track after `output.start()`, the runner first calls `probeHasAnyAudio` to open each source briefly and check `getPrimaryAudioTrack()`. If any source has audio, an `AudioBufferSource` is added; otherwise the file is video-only. The source-decoder spin-up uses `Promise.allSettled` so a single bad source doesn't abort the export — surviving sources still render, missing ones are skipped per frame. For each output frame:
+  1. `node.visible(false)` on every video node (so a clip that ended last frame doesn't ghost a stale image).
+  2. In parallel, `await provider.next()` for each active source → assign the returned canvas to its Konva node via `node.image(canvas)` + `node.visible(true)`.
+  3. `handles.contentLayer.draw()` — only the content layer; background stays untouched.
+  4. Blit every layer canvas onto the stable composite `<canvas>` (via the layer's underlying `_canvas`).
+  5. `await videoSource.add(t, 1/fps)` — Mediabunny's backpressure; never fire-and-forget.
+  6. Periodic `onProgress` callback (~10 Hz) with `{ framesDone, framesTotal, etaSeconds }`, reported through IPC. The page renders a realtime `Frame N of M · WxH · ETA` line plus a cycling micro-phrase (`Composing`, `Painting frames`, `Wiring shadows`, …) so the user sees the export actively breathing during the long encoding phase.
+- After the frame loop, if an audio track was added, `streamTimelineAudio` is run end-to-end and the windows are pushed through `AudioBufferSource.add` one at a time. If audio mixing throws or produces no samples (edge case: every source's audio decode failed), a single tiny silent buffer is pushed so the track isn't empty (Mediabunny requires at least one packet per declared track before finalize).
+
+Why this is fast — what we removed:
+
+- **No per-frame `<video>.currentTime` seek.** Each seek invalidated the decoder and re-decoded from the prior keyframe (50–200 ms per call). With a sequential `VideoDecoder` pipeline via `CanvasSink`, every source packet is decoded **once**, in order, while we hand canvases to the encoder. For text-heavy 1080p exports this alone is the difference between ~5 fps and ~30+ fps export throughput.
+- **No per-frame background redraw.** v1 called `stage.draw()` every iteration which redrew both layers; the background never changes, so we draw it once at startup and only `contentLayer.draw()` per frame.
+- **No `HTMLVideoElement` lifecycle overhead.** No `loadedmetadata` waits, no rVFC safety nets, no off-DOM stalls. The source files are streamed in via HTTP Range requests through `UrlSource`.
+- **No fetch+arrayBuffer+decodeAudioData for audio.** Mediabunny `AudioBufferSink` streams source packets the same way the video sink does, so audio decode shares the same HTTP-Range / pool-of-canvases lifecycle and never holds the full source file in JS heap.
+- The Mediabunny output uses `BufferTarget`; on success the renderer hands the `ArrayBuffer` to `export:reportDone`, which writes the bytes to disk in main.
+
+Performance / scaling notes:
+
+- Constant layer count (1 background + 1 content), regardless of video count — scales to 5000+ nodes.
+- `listening(false)`, `perfectDrawEnabled = false` on every node. No transformer, no interaction listeners.
+- The composite canvas is allocated once and redrawn in place each frame; no `getImageData` round-trips. Mediabunny's `CanvasSource` wraps it directly into a `VideoFrame`.
+- Source decode and encode are both WebCodecs-backed and execute on browser-internal threads. The driver in `run-export.ts` is a single pure async function with an `AbortSignal`.
+- The audio mixer holds at most one window-sized `AudioBuffer` plus the per-source decoder pre-fetch (typically a handful of packets per active clip) — peak RAM constant under ~10 MB.
+
+Per-window CSP / `webSecurity`:
+
+- The export window opts in to `webSecurity: false` (in `createExportWindow`) so cross-origin `<video>` loads from `file://` don't taint the canvas, which would break `new VideoFrame(canvas, …)`.
+- The CSP `connect-src 'self' app: file:` is scoped to the export window only via a per-`webContentsId` check in `onHeadersReceived`. Every other window keeps the tighter base CSP (`connect-src 'self' app:`).
+
+Cancellation:
+
+- `AbortController.abort()` inside the export page rejects the next `await` in `runExport`. The outer `finally` block disposes the Konva stage; the inner `finally` disposes every `SourceFrameProvider` (which cancels in-flight HTTP Range requests, closes the WebCodecs `VideoDecoder`, and returns pooled canvases to GC). The audio mixer's `finally` disposes its own Inputs + iterator handles. Mediabunny output is left to GC — no partial file is written because `reportDone` is the only write site.
+- The renderer-side `cancelEncode` is guarded: it sends the `cancel` IPC only when an `AbortController` is active. This prevents the "click Done on the success screen → file gets deleted" bug by ensuring the cancel handler never runs after a terminal phase.
+
+Known limitations:
+
+- HEVC encode availability varies by OS/GPU. The codec probe hides it when missing.
+- The driver runs on the export window's main thread. Long-duration 4K60 exports may stutter the export window's UI (progress bar) under encoder backpressure; the editor stays fully responsive because it's a separate window. The source decode and encode are both already WebCodecs-backed and run on browser-internal threads, so moving the driver itself to a Worker is mostly a UI-stutter mitigation, not a perf win.
+- Non-monotonic source timestamps (rare: two clips referencing the same source at out-of-order source times) still work but lose `CanvasSink.canvasesAtTimestamps`'s per-packet decode optimisation — the decoder re-seeks per timestamp jump.
+- Audio sample-rate conversion uses linear interpolation inline per output frame. This is fine for the common 44.1 → 48 kHz conversion at screen-recording quality; a polyphase resampler would be sharper for extreme rate ratios but the cost/benefit doesn't justify it today.
+- Wallpaper backgrounds load via `fetch(/assets/...)`. On a packaged build this resolves to `app://./assets/...`, which is on the allowlisted protocol — works, but the bitmap is loaded fresh per export.
+- The export settings live in `<userData>/export-settings.json`, **not** inside `project.json`. This is intentional — last-used export preferences are a user-level setting, not project state. Keep them out of `ProjectStateV1`.
+- Hard ceilings: timelines above 4 hours and outputs above the 4K nominal pixel budget are refused at the start of `runExport`. Beyond these the failure modes shift from "slow" to "OOM mid-encode", which is unrecoverable; failing early gives the user actionable feedback.
+
 ## Problems, Decisions, And Solutions
 
 ### React-Konva And Next.js SSR

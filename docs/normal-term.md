@@ -78,3 +78,10 @@ Use this table when discussion language and implementation language differ. Pref
 | Undo step                   | History snapshot                | One `{ artboard, videos, timelineClips }` `ProjectStateV1` entry held in the in-memory undo stack. Pushed by the autosave-aligned push site. |
 | Action category             | Commit tag                      | Action-category label (`transform`, `appearance`, `nudge`, `lock`, `add`, `delete`, `duplicate`, `preset`, `background`, `padding`, `grain`, `clip-move`, `clip-resize`) stamped by each action; read by the push site to decide between coalesce and new entry. |
 | Bundle window               | Coalesce window                 | The 2 s window during which same-tag pushes replace the top entry instead of appending. |
+| Save as video / render out  | Export                          | Encode the current `ProjectStateV1` snapshot into a single `.mp4` / `.webm` file under `~/Documents/openscreen/exports/`. |
+| Export settings window      | Export window                   | Separate vibrancy-panel `BrowserWindow` (`exportWin` in `electron/windowConfigs.ts`) hosting the settings form + progress UI for an export job. |
+| Time on the output timeline | Composition time                | Output-timeline position `T_c` in seconds, in `[0, timelineDuration]`. Drives `frame = T_c × fps`. |
+| Time inside a source clip   | Source time                     | Per-clip seek position `T_s = sourceIn + (T_c − clip.start)`, in seconds. Computed only for clips active at `T_c`. |
+| Frame-by-frame render loop  | Export frame loop               | The sequential per-frame loop in `run-export.ts`: seek active clips → `stage.draw()` → composite → `videoSource.add()`. |
+| Combined output canvas      | Export composite                | The single stable `<canvas>` flattened from every Konva layer each frame; the only canvas Mediabunny's `CanvasSource` ever reads. |
+| Export render surface       | Export stage                    | The vanilla-Konva `Konva.Stage` built from a `ProjectStateV1` snapshot. Sized to the output's pixel dimensions, scaled so all node attrs stay in artboard space. |

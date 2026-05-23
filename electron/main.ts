@@ -29,6 +29,10 @@ import {
   setActiveProjectFromFolder,
 } from './ipc/projects'
 import {
+  disposeExportPendingPayload,
+  registerExportHandlers,
+} from './ipc/export'
+import {
   clearLockedRegionOverlay,
   disposeWindowPicker,
   registerWindowPickerHandlers,
@@ -49,6 +53,7 @@ let recordingControlsWin: BrowserWindow | null = null
 let cameraWin: BrowserWindow | null = null
 let permissionWin: BrowserWindow | null = null
 let recordingSettingsWin: BrowserWindow | null = null
+let exportWin: BrowserWindow | null = null
 let activeCameraDeviceId: string | null = null
 const fixedWindowSizeEnforcers = new WeakMap<BrowserWindow, () => void>()
 const zoomLockedWindows = new WeakSet<BrowserWindow>()
@@ -71,7 +76,7 @@ const SHARED_WEB_PREFERENCES = {
   nodeIntegration: false,
   sandbox: true,
 } as const
-const CSP = [
+const CSP_BASE = [
   "default-src 'self' app:",
   "script-src 'self' app:",
   "style-src 'self' app: 'unsafe-inline'",
@@ -83,6 +88,19 @@ const CSP = [
   "base-uri 'self'",
   "frame-ancestors 'none'",
 ].join('; ')
+
+// Relaxed CSP applied ONLY to the export window. Mediabunny's UrlSource
+// uses `fetch(file://…)` under the hood to stream-decode local recording
+// files (both video frame slices and audio). Every other window stays on
+// the tighter CSP_BASE so this loosening doesn't widen the attack surface
+// of the rest of the app. The renderer is still sandboxed + contextIsolated
+// + nodeIntegration:false, and `file:` was already reachable via media-src
+// for the editor's <video> elements — connect-src just lets Mediabunny's
+// JS fetch the same URLs.
+const CSP_EXPORT = CSP_BASE.replace(
+  "connect-src 'self' app:",
+  "connect-src 'self' app: file:",
+)
 
 if (!isDev) {
   protocol.registerSchemesAsPrivileged([
@@ -631,6 +649,74 @@ function closePermissionWindow(): void {
   stopPermissionPolling()
 }
 
+function createExportWindow(): void {
+  if (exportWin && !exportWin.isDestroyed()) {
+    if (exportWin.isMinimized()) exportWin.restore()
+    exportWin.show()
+    exportWin.focus()
+    return
+  }
+
+  const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize
+  const winW = windowConfigs.exportWin.width ?? 480
+  const winH = windowConfigs.exportWin.height ?? 560
+  const x = Math.round((screenW - winW) / 2)
+  const y = Math.round((screenH - winH) / 2)
+
+  exportWin = new BrowserWindow({
+    x,
+    y,
+    ...windowConfigs.exportWin,
+    // Same relaxation as the editor: <video> elements need to load the
+    // project's recording assets from file:// URLs cross-origin (the page
+    // itself is served from app:// in prod, http://localhost:3535 in dev).
+    // Without webSecurity:false the load fails with a SecurityError and
+    // any later canvas.drawImage(video, …) would taint the canvas, killing
+    // Mediabunny's `new VideoFrame(canvas, …)` call. Sandbox /
+    // contextIsolation / nodeIntegration stay locked down via
+    // SHARED_WEB_PREFERENCES.
+    webPreferences: { ...SHARED_WEB_PREFERENCES, webSecurity: false },
+  })
+  if (process.platform === 'darwin') {
+    exportWin.setWindowButtonVisibility(false)
+  }
+  hardenWebContents(exportWin)
+  // Intentionally NOT calling keepWindowOnEveryWorkspace — the export
+  // window behaves like a normal app window: minimisable, ordinary z-order,
+  // doesn't float over the user's other apps during a long encode.
+
+  exportWin.once('ready-to-show', () => {
+    if (exportWin) focusWindow(exportWin)
+  })
+  exportWin.on('closed', () => {
+    exportWin = null
+    disposeExportPendingPayload()
+    // Editor window must always come back when the export window goes away,
+    // even on an unexpected close (OS quit, devtools), so the user is never
+    // stranded without a visible window.
+    if (mainWin && !mainWin.isDestroyed() && !mainWin.isVisible()) {
+      mainWin.show()
+      mainWin.focus()
+    }
+  })
+
+  loadAppRoute(exportWin, '/export/')
+}
+
+function closeExportWindow(): void {
+  if (exportWin && !exportWin.isDestroyed()) {
+    exportWin.close()
+  }
+  exportWin = null
+}
+
+function showEditorWindow(): void {
+  if (mainWin && !mainWin.isDestroyed() && !mainWin.isVisible()) {
+    mainWin.show()
+    mainWin.focus()
+  }
+}
+
 function createRecordingSettingsWindow(): void {
   if (recordingSettingsWin && !recordingSettingsWin.isDestroyed()) {
     if (recordingSettingsWin.isMinimized()) recordingSettingsWin.restore()
@@ -810,8 +896,19 @@ app.whenReady().then(() => {
 
   if (!isDev) {
     session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      // Per-window CSP: only the export window gets the file:-permitted
+      // policy; everything else stays on the base CSP. `webContentsId` is
+      // present on requests originating from a renderer; protocol-handler
+      // requests that happen before any renderer attaches simply hit the
+      // base policy.
+      const fromExport =
+        typeof details.webContentsId === 'number' &&
+        exportWin !== null &&
+        !exportWin.isDestroyed() &&
+        exportWin.webContents.id === details.webContentsId
+      const csp = fromExport ? CSP_EXPORT : CSP_BASE
       callback({
-        responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [CSP] },
+        responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [csp] },
       })
     })
 
@@ -887,6 +984,14 @@ app.whenReady().then(() => {
     startRecordingForTarget: async (target) => {
       await startRecording(target)
     },
+  })
+  registerExportHandlers({
+    getExportWindow: () => exportWin,
+    getEditorWindow: () => mainWin,
+    openExportWindow: createExportWindow,
+    closeExportWindow,
+    hideEditorWindow: hideMainWindow,
+    showEditorWindow,
   })
   showPermissionGate('startup')
 

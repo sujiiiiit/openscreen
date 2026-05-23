@@ -108,6 +108,31 @@ const recordingSettingsBase: WindowConfig = {
   acceptFirstMouse: true,
 }
 
+// Export window. Triggered from the editor titlebar's Export button. Hosts
+// the settings form (resolution / format / fps) and swaps to a progress +
+// cancel view during encode. Same vibrancy panel chrome as the permission
+// and Recording Quality windows so the three feel like one family of
+// utility surfaces — but unlike those, the export window is NOT
+// alwaysOnTop: a long export shouldn't sit over the user's other work
+// while they wait, and the window is a regular minimisable surface.
+const exportBase: WindowConfig = {
+  title: 'Export',
+  width: 560,
+  height: 280,
+  show: false,
+  backgroundColor: '#00000000',
+  alwaysOnTop: false,
+  hasShadow: true,
+  roundedCorners: true,
+  fullscreen: false,
+  fullscreenable: false,
+  resizable: false,
+  maximizable: false,
+  minimizable: true,
+  movable: true,
+  acceptFirstMouse: true,
+}
+
 const windowPickerBase: WindowConfig = {
   title: 'OpenScreen Picker',
   width: 1,
@@ -167,6 +192,9 @@ if (process.platform === 'darwin') {
   recordingSettingsBase.titleBarStyle = 'hidden'
   recordingSettingsBase.vibrancy = 'under-window'
   recordingSettingsBase.visualEffectState = 'active'
+  exportBase.titleBarStyle = 'hidden'
+  exportBase.vibrancy = 'under-window'
+  exportBase.visualEffectState = 'active'
 } else {
   // Windows / Linux: no NSWindow chrome to inherit — go fully frameless and
   // transparent. backgroundMaterial 'acrylic' provides the native blur on
@@ -181,12 +209,15 @@ if (process.platform === 'darwin') {
   cameraBase.transparent = true
   recordingSettingsBase.frame = false
   recordingSettingsBase.transparent = true
+  exportBase.frame = false
+  exportBase.transparent = true
   if (process.platform === 'win32') {
     recorderBarBase.backgroundMaterial = 'acrylic'
     recordingControlsBase.backgroundMaterial = 'acrylic'
     permissionBase.backgroundMaterial = 'acrylic'
     cameraBase.backgroundMaterial = 'acrylic'
     recordingSettingsBase.backgroundMaterial = 'acrylic'
+    exportBase.backgroundMaterial = 'acrylic'
   }
 }
 
@@ -197,4 +228,5 @@ export const windowConfigs = {
   cameraWin: cameraBase,
   windowPickerWin: windowPickerBase,
   recordingSettingsWin: recordingSettingsBase,
+  exportWin: exportBase,
 }

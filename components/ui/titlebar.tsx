@@ -21,6 +21,7 @@ import { DRAG, NO_DRAG } from "@/lib/window-drag"
 import { useProject } from "@/components/editor/project/provider"
 import { HistoryControls } from "@/components/editor/history-controls"
 import { SaveStatusIndicator } from "@/components/editor/save-status-indicator"
+import { TitleBarExportButton } from "@/components/editor/title-bar-export-button"
 
 export function Titlebar() {
   const [platform, setPlatform] = useState<NodeJS.Platform | null>(null)
@@ -96,6 +97,13 @@ export function Titlebar() {
           <TooltipContent side="bottom">Open project</TooltipContent>
         </Tooltip>
         <HistoryControls />
+      </div>
+
+      <div
+        className="ml-auto flex items-center gap-1 pr-2 pl-2"
+        style={NO_DRAG}
+      >
+        <TitleBarExportButton />
       </div>
 
       {showWindowControls && <WindowControls isMaximized={isMaximized} />}

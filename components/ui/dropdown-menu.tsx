@@ -5,6 +5,7 @@ import { Menu as MenuPrimitive } from "@base-ui/react/menu"
 import { cn } from "@/lib/utils"
 import { HugeiconsIcon } from "@hugeicons/react"
 import { ArrowRight01Icon, Tick02Icon } from "@hugeicons/core-free-icons"
+import { NO_DRAG } from "@/lib/window-drag"
 
 // ─── Shared ────────────────────────────────────────────────────────────────
 
@@ -158,7 +159,10 @@ function DropdownMenuContent({
             "[&:has([data-slot=dropdown-menu-sub-trigger],[data-slot=dropdown-menu-radio-item],[data-slot=dropdown-menu-checkbox-item])_[data-slot=dropdown-menu-item]_[data-slot=dropdown-menu-item-subtext]]:mr-9",
             className
           )}
-          style={style}
+          // Menus pop OVER the titlebar drag region — without NO_DRAG,
+          // mousedown on a menu item gets swallowed by the OS window-drag
+          // handler and the click never fires.
+          style={{ ...NO_DRAG, ...style }}
           {...props}
         />
       </MenuPrimitive.Positioner>

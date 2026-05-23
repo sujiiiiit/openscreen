@@ -269,6 +269,70 @@ export type SaveProjectStateResult =
   | { ok: true; writtenAtUnixMs: number }
   | { ok: false; reason: string }
 
+// ─── export-settings schema (mirrored from electron/ipc/export-schema.ts) ──
+
+export type ExportFormatId = 'mp4-avc' | 'mp4-hevc' | 'webm-vp9'
+
+export type ExportResolutionId =
+  | 'artboard'
+  | '720p'
+  | '1080p'
+  | '1440p'
+  | '4k'
+
+export type ExportFrameRate = 30 | 60
+
+export interface ExportSettings {
+  format: ExportFormatId
+  resolution: ExportResolutionId
+  fps: ExportFrameRate
+}
+
+export type ExportPhase =
+  | 'idle'
+  | 'preparing'
+  | 'encoding'
+  | 'finalizing'
+  | 'done'
+  | 'error'
+  | 'cancelled'
+
+export interface ExportProgress {
+  framesDone: number
+  framesTotal: number
+  etaSeconds: number | null
+}
+
+export interface ExportJobState {
+  phase: ExportPhase
+  settings: ExportSettings
+  progress: ExportProgress
+  outputPath: string | null
+  startedAtUnixMs: number | null
+  lastError: string | null
+}
+
+export interface ExportSourceVideo {
+  id: string
+  fileUrl: string
+}
+
+export interface ExportStartPayload {
+  settings: ExportSettings
+  state: ProjectStateV1
+  // Pre-resolved file:// URLs for every video in `state.videos`.
+  // Mirrors `ProjectSummary.assetUrlsByVideoId`.
+  assetUrlsByVideoId: Record<string, string>
+  // Filename basename (no extension) used to derive the timestamp portion
+  // of the output file. Defaults to the active project name.
+  outputBaseName?: string
+}
+
+export interface ExportCodecSupport {
+  format: ExportFormatId
+  supported: boolean
+}
+
 export interface ProjectSummary {
   id: string
   name: string
@@ -345,6 +409,21 @@ export interface Api {
     getSession: () => Promise<WindowPickerSession>
     setRegionSelection: (bounds: RegionSelectionBounds | null) => Promise<RegionSelectionResult>
     onTargetChanged: (callback: (target: PickerOverlayTarget | null) => void) => Unsubscribe
+  }
+  export: {
+    openWindow: (payload: ExportStartPayload) => Promise<void>
+    getStartPayload: () => Promise<ExportStartPayload | null>
+    getState: () => Promise<ExportJobState>
+    getSettings: () => Promise<ExportSettings>
+    setSettings: (patch: Partial<ExportSettings>) => Promise<ExportSettings>
+    markPreparing: () => Promise<void>
+    reportProgress: (progress: ExportProgress) => Promise<void>
+    reportDone: (bytes: ArrayBuffer) => Promise<{ outputPath: string }>
+    reportError: (message: string) => Promise<void>
+    cancel: () => Promise<void>
+    revealOutput: (path: string) => Promise<void>
+    closeWindow: () => Promise<void>
+    onStateChanged: (callback: (state: ExportJobState) => void) => Unsubscribe
   }
 }
 

@@ -22,6 +22,12 @@ import type {
   SaveProjectStateResult,
 } from './ipc/project-schema'
 import type {
+  ExportJobState,
+  ExportProgress,
+  ExportSettings,
+} from './ipc/export-schema'
+import type { ExportStartPayload } from './ipc/export'
+import type {
   WindowStateChange,
   WindowStateSnapshot,
 } from './ipc/window-controls'
@@ -117,6 +123,30 @@ const api = {
       ipcRenderer.invoke('windowPicker:setRegionSelection', bounds),
     onTargetChanged: (callback: (target: PickerOverlayTarget | null) => void) =>
       subscribe<PickerOverlayTarget | null>('windowPicker:targetChanged', callback),
+  },
+  export: {
+    openWindow: (payload: ExportStartPayload): Promise<void> =>
+      ipcRenderer.invoke('export:openWindow', payload),
+    getStartPayload: (): Promise<ExportStartPayload | null> =>
+      ipcRenderer.invoke('export:getStartPayload'),
+    getState: (): Promise<ExportJobState> => ipcRenderer.invoke('export:getState'),
+    getSettings: (): Promise<ExportSettings> =>
+      ipcRenderer.invoke('export:getSettings'),
+    setSettings: (patch: Partial<ExportSettings>): Promise<ExportSettings> =>
+      ipcRenderer.invoke('export:setSettings', patch),
+    markPreparing: (): Promise<void> => ipcRenderer.invoke('export:markPreparing'),
+    reportProgress: (progress: ExportProgress): Promise<void> =>
+      ipcRenderer.invoke('export:reportProgress', progress),
+    reportDone: (bytes: ArrayBuffer): Promise<{ outputPath: string }> =>
+      ipcRenderer.invoke('export:reportDone', bytes),
+    reportError: (message: string): Promise<void> =>
+      ipcRenderer.invoke('export:reportError', message),
+    cancel: (): Promise<void> => ipcRenderer.invoke('export:cancel'),
+    revealOutput: (path: string): Promise<void> =>
+      ipcRenderer.invoke('export:revealOutput', path),
+    closeWindow: (): Promise<void> => ipcRenderer.invoke('export:closeWindow'),
+    onStateChanged: (callback: (state: ExportJobState) => void) =>
+      subscribe<ExportJobState>('export:stateChanged', callback),
   },
 }
 
