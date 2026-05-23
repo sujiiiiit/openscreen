@@ -1,4 +1,4 @@
-import { app, BrowserWindow, nativeTheme, net, protocol, screen, session, shell } from 'electron'
+import { app, BrowserWindow, dialog, nativeTheme, net, protocol, screen, session, shell } from 'electron'
 import addon from '@openscreen/mac-addon'
 import * as path from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -23,7 +23,11 @@ import {
   reservePickerStart,
   startRecording,
 } from './ipc/recorder'
-import { registerProjectsHandlers } from './ipc/projects'
+import {
+  projectsRoot,
+  registerProjectsHandlers,
+  setActiveProjectFromFolder,
+} from './ipc/projects'
 import {
   clearLockedRegionOverlay,
   disposeWindowPicker,
@@ -233,6 +237,46 @@ function hideMainWindow(): void {
   if (mainWin && !mainWin.isDestroyed()) {
     mainWin.hide()
   }
+}
+
+async function pickAndOpenProjectInEditor(): Promise<void> {
+  const parent =
+    recorderBarWin && !recorderBarWin.isDestroyed() ? recorderBarWin : null
+  const dialogOptions: Electron.OpenDialogOptions = {
+    title: 'Open project',
+    defaultPath: projectsRoot(),
+    properties: ['openDirectory'],
+    buttonLabel: 'Open',
+  }
+  const result = parent
+    ? await dialog.showOpenDialog(parent, dialogOptions)
+    : await dialog.showOpenDialog(dialogOptions)
+  if (result.canceled || result.filePaths.length === 0) return
+
+  const folder = result.filePaths[0]
+  const opened = await setActiveProjectFromFolder(folder)
+  if (!opened) {
+    const message: Electron.MessageBoxOptions = {
+      type: 'error',
+      message: 'That folder is not an OpenScreen project.',
+      detail:
+        'A project folder must contain a recording.json manifest. Pick the folder created when you stopped a recording.',
+      buttons: ['OK'],
+    }
+    if (parent) {
+      await dialog.showMessageBox(parent, message)
+    } else {
+      await dialog.showMessageBox(message)
+    }
+    return
+  }
+
+  // Switching into the editor mirrors the post-recording transition:
+  // tear down the recorder bar (and camera preview) and hand the user the
+  // main window, which will boot via projects:getLatest and pick up the
+  // override we just set.
+  closeRecorderBarWindow()
+  createMainWindow()
 }
 
 function hideRecorderBarWindow(): void {
@@ -799,6 +843,9 @@ app.whenReady().then(() => {
     startPicker: startWindowPicker,
     cancelPicker: cancelWindowPicker,
     openRecordingSettingsWindow: createRecordingSettingsWindow,
+    openProjectFromDialog: () => {
+      void pickAndOpenProjectInEditor()
+    },
     onStatusChanged: (status, snapshot) => {
       if (status === 'recording' || status === 'paused') {
         hideRecorderBarWindow()
@@ -811,6 +858,12 @@ app.whenReady().then(() => {
         // recorder + camera windows down and surface the main window so the
         // user lands on their recordings instead of another empty bar.
         if (snapshot.lastResult) {
+          // Pin the just-recorded folder as the sticky active project so a
+          // window refresh after recording still lands on it (instead of
+          // an older project the user previously chose via "Open project…").
+          if (snapshot.outputDir) {
+            void setActiveProjectFromFolder(snapshot.outputDir)
+          }
           closeRecorderBarWindow()
           createMainWindow()
         } else {

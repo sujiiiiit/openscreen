@@ -15,6 +15,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { cn } from '@/lib/utils'
 import { DRAG, NO_DRAG } from '@/lib/window-drag'
 import { useProject } from '@/components/editor/project/provider'
+import { SaveStatusIndicator } from '@/components/editor/save-status-indicator'
 
 export function Titlebar() {
   const [platform, setPlatform] = useState<NodeJS.Platform | null>(null)
@@ -77,6 +78,7 @@ export function Titlebar() {
           />
           <TooltipContent side="bottom">Open project</TooltipContent>
         </Tooltip>
+        <SaveStatusIndicator />
       </div>
 
       {showWindowControls && <WindowControls isMaximized={isMaximized} />}

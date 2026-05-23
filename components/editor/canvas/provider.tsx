@@ -29,11 +29,21 @@ import type {
   CanvasVideoAppearancePatch,
   CanvasVideoItem,
   CanvasVideoRole,
+  CanvasVideoSource,
   CanvasVideoTransformPatch,
   EditorArtboard,
+  EditorSaveStatus,
   ViewTransform,
 } from "@/types/editor-canvas"
-import type { ProjectAsset } from "@/types/api"
+import type { ProjectAsset, ProjectSummary } from "@/types/api"
+import {
+  PROJECT_STATE_AUTOSAVE_DEBOUNCE_MS,
+  PROJECT_STATE_AUTOSAVE_RETRY_MS,
+  fingerprintProjectState,
+  projectClipToCanvasClip,
+  projectVideoToCanvasVideo,
+  serializeProjectState,
+} from "@/components/editor/canvas/persistence"
 
 const DEFAULT_VIEWPORT_SIZE: CanvasSize = { width: 0, height: 0 }
 const DEFAULT_ARTBOARD_PRESET = getArtboardPreset(DEFAULT_ARTBOARD_PRESET_ID)
@@ -80,6 +90,7 @@ type AddRemoteVideoInput = {
   intrinsicHeight: number
   durationMs?: number
   role: "screen" | "camera"
+  source: CanvasVideoSource
   placement?: Partial<Pick<CanvasVideoItem, "x" | "y" | "width" | "height">>
   shouldAbort?: () => boolean
 }
@@ -239,6 +250,11 @@ type EditorCanvasTimelineActionsContextValue = Pick<
   | "subscribeTimelineTicks"
 >
 
+type EditorCanvasSaveStatusContextValue = {
+  status: EditorSaveStatus
+  error: string | null
+}
+
 const EditorCanvasMediaContext =
   createContext<EditorCanvasMediaContextValue | null>(null)
 const EditorCanvasArtboardContext =
@@ -251,6 +267,8 @@ const EditorCanvasTimelineContext =
   createContext<EditorCanvasTimelineContextValue | null>(null)
 const EditorCanvasTimelineActionsContext =
   createContext<EditorCanvasTimelineActionsContextValue | null>(null)
+const EditorCanvasSaveStatusContext =
+  createContext<EditorCanvasSaveStatusContextValue | null>(null)
 
 function readVideoMetadata(objectUrl: string): Promise<VideoMetadata> {
   return new Promise((resolve, reject) => {
@@ -551,6 +569,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   >(() => new Set())
   const [isTimelinePlaying, setIsTimelinePlaying] = useState(false)
   const [isHoverPreviewActive, setIsHoverPreviewActive] = useState(false)
+  const [saveStatus, setSaveStatus] = useState<EditorSaveStatus>("idle")
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   const objectUrlsRef = useRef(new Set<string>())
   const videosRef = useRef(videos)
@@ -591,6 +611,130 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   )
   const hydratedProjectIdRef = useRef<string | null>(null)
   const hydrationGenerationRef = useRef(0)
+
+  const { project } = useProject()
+  const projectRef = useRef<ProjectSummary | null>(project)
+  useEffect(() => {
+    projectRef.current = project
+  }, [project])
+
+  // Autosave plumbing — every change to artboard/videos/timelineClips schedules
+  // a debounced write of `project.json`. Saves are gated on hydration so we
+  // never persist a half-initialised state. While one save is in flight, any
+  // further changes set `autosavePendingRef` so a single follow-up fires when
+  // the in-flight write completes.
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const autosaveRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  )
+  const autosaveInFlightRef = useRef(false)
+  const autosavePendingRef = useRef(false)
+  // Fingerprint of the last successful write — populated either on a
+  // successful save or seeded from the loaded `project.state` during
+  // fast-path hydration. Used to skip the redundant first save that the
+  // autosave effect schedules immediately after `setArtboard`/`setVideos`/
+  // `setTimelineClips` commit the hydrated values.
+  const lastWrittenSerializedRef = useRef<string | null>(null)
+  // Ref-pointer to the latest `flushAutosave` so the retry setTimeout doesn't
+  // self-reference the useCallback (React Compiler can't preserve manual
+  // memoisation around self-referential `useCallback`s and the lint refuses
+  // it). The ref is mirrored from `flushAutosave` via an effect below.
+  const flushAutosaveRef = useRef<((projectPath: string) => Promise<void>) | null>(
+    null
+  )
+
+  const flushAutosave = useCallback(async (projectPath: string) => {
+    if (autosaveInFlightRef.current) {
+      autosavePendingRef.current = true
+      return
+    }
+    autosaveInFlightRef.current = true
+    // Clear any pending retry — we're saving now, so a scheduled retry would
+    // duplicate work and may race with this attempt.
+    if (autosaveRetryTimerRef.current !== null) {
+      clearTimeout(autosaveRetryTimerRef.current)
+      autosaveRetryTimerRef.current = null
+    }
+    setSaveStatus("saving")
+    let lastError: string | null = null
+    let abortedForProjectSwitch = false
+    try {
+      // Drain mode: keep writing as long as edits arrive while one save is in
+      // flight. Each pass serialises fresh refs, so the last write always
+      // reflects the latest committed state. We bail mid-drain if the user
+      // switched projects — otherwise we'd write the new project's state to
+      // the old project's `project.json`.
+      do {
+        autosavePendingRef.current = false
+        if (projectRef.current?.path !== projectPath) {
+          abortedForProjectSwitch = true
+          break
+        }
+        const snapshot = serializeProjectState(
+          artboardRef.current,
+          videosRef.current,
+          timelineClipsRef.current
+        )
+        const fingerprint = fingerprintProjectState(snapshot)
+        if (
+          fingerprint !== null &&
+          fingerprint === lastWrittenSerializedRef.current
+        ) {
+          // Memory matches what's already on disk — skip the IPC, treat as
+          // a successful no-op. Avoids a redundant write right after fast-
+          // path hydration and any other "schedule-but-no-real-change" path.
+          lastError = null
+          continue
+        }
+        try {
+          const result = await window.api?.projects.saveState(
+            projectPath,
+            snapshot
+          )
+          if (result && result.ok === false) {
+            lastError = result.reason
+            console.error("[provider] autosave rejected:", result.reason)
+          } else {
+            lastError = null
+            if (fingerprint !== null) {
+              lastWrittenSerializedRef.current = fingerprint
+            }
+          }
+        } catch (cause) {
+          lastError = cause instanceof Error ? cause.message : String(cause)
+          console.error("[provider] autosave failed:", cause)
+        }
+      } while (autosavePendingRef.current)
+    } finally {
+      autosaveInFlightRef.current = false
+      if (abortedForProjectSwitch) {
+        // Don't surface a failure for an aborted save — the user just moved
+        // on; the new project's autosave will paint the indicator next.
+      } else {
+        setSaveError(lastError)
+        setSaveStatus(lastError ? "error" : "saved")
+        if (lastError) {
+          // Auto-retry once after a short delay so transient I/O errors
+          // (full disk that just freed, perms that just changed, USB blip)
+          // self-heal without a user edit. A new edit supersedes the retry
+          // because the autosave effect clears `autosaveRetryTimerRef`.
+          if (autosaveRetryTimerRef.current !== null) {
+            clearTimeout(autosaveRetryTimerRef.current)
+          }
+          autosaveRetryTimerRef.current = setTimeout(() => {
+            autosaveRetryTimerRef.current = null
+            if (projectRef.current?.path !== projectPath) return
+            const next = flushAutosaveRef.current
+            if (next) void next(projectPath)
+          }, PROJECT_STATE_AUTOSAVE_RETRY_MS)
+        }
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    flushAutosaveRef.current = flushAutosave
+  }, [flushAutosave])
 
   const commitVideosRef = useCallback((nextVideos: CanvasVideoItem[]) => {
     videosRef.current = nextVideos
@@ -1797,51 +1941,112 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         return
       }
 
-      const objectUrl = URL.createObjectURL(file)
-      objectUrlsRef.current.add(objectUrl)
+      const currentProject = projectRef.current
+      if (!currentProject) {
+        setImportError(
+          "Open a project before adding videos so the file can be saved."
+        )
+        return
+      }
+      // Snapshot the project id so we can detect a switch during the async
+      // probe + copy. If the user opens a different project mid-import we
+      // would otherwise attach an asset whose path lives in the old folder
+      // to the new project's videos.
+      const expectedProjectId = currentProject.id
 
+      // Probe metadata from a transient blob URL — the renderer needs a URL
+      // it can hand to a `<video>` element to learn the intrinsic size and
+      // duration before the file is copied into the project folder.
+      const probeUrl = URL.createObjectURL(file)
+      let metadata: VideoMetadata
       try {
-        const metadata = await readVideoMetadata(objectUrl)
-        const placement = getCoverVideoPlacement(metadata, artboardRef.current)
-        const id = createCanvasId()
-        const item: CanvasVideoItem = {
-          id,
-          fileName: file.name,
-          objectUrl,
-          fileSize: file.size,
-          intrinsicWidth: metadata.width,
-          intrinsicHeight: metadata.height,
-          durationMs: metadata.durationMs,
-          rotation: 0,
-          locked: false,
-          role: "media",
-          ...placement,
-          ...createVideoAppearanceDefaults("media", placement),
-        }
-
-        setVideos((current) => {
-          const nextVideos = [...current, item]
-          commitVideosRef(nextVideos)
-          return nextVideos
-        })
-        setTimelineClips((current) => {
-          const clip = createTimelineClip(item)
-          const nextClips = [...current, clip]
-          commitTimelineClipsRef(nextClips)
-          return nextClips
-        })
-        selectedItemIdRef.current = id
-        setSelectedItemId(id)
-        setImportError(null)
+        metadata = await readVideoMetadata(probeUrl)
       } catch (error) {
-        objectUrlsRef.current.delete(objectUrl)
-        URL.revokeObjectURL(objectUrl)
+        URL.revokeObjectURL(probeUrl)
         setImportError(
           error instanceof Error
             ? error.message
             : "The selected video could not be loaded."
         )
+        return
+      } finally {
+        URL.revokeObjectURL(probeUrl)
       }
+
+      if (projectRef.current?.id !== expectedProjectId) {
+        // Project switched during the probe — drop the import silently;
+        // the user has already moved on.
+        return
+      }
+
+      const id = createCanvasId()
+      let importResult
+      try {
+        const bytes = await file.arrayBuffer()
+        importResult = await window.api?.projects.importAsset(
+          currentProject.path,
+          { id, fileName: file.name, bytes }
+        )
+      } catch (error) {
+        setImportError(
+          error instanceof Error
+            ? error.message
+            : "The selected video could not be copied into the project."
+        )
+        return
+      }
+      if (!importResult) {
+        setImportError("The selected video could not be copied into the project.")
+        return
+      }
+
+      if (projectRef.current?.id !== expectedProjectId) {
+        // Project switched after the copy completed. The asset file is now
+        // orphaned in the previous project's `assets/videos/<id>/` — accept
+        // the leak (we have no IPC to undo the copy yet) and refuse to wire
+        // the new project to a foreign file path.
+        console.warn(
+          "[provider] addVideoFile aborted after project switch; orphaning asset",
+          importResult.relativePath
+        )
+        return
+      }
+
+      const placement = getCoverVideoPlacement(metadata, artboardRef.current)
+      const item: CanvasVideoItem = {
+        id,
+        fileName: file.name,
+        objectUrl: importResult.fileUrl,
+        fileSize: importResult.fileSize,
+        source: {
+          kind: "imported",
+          relativePath: importResult.relativePath,
+          fileSize: importResult.fileSize,
+        },
+        intrinsicWidth: metadata.width,
+        intrinsicHeight: metadata.height,
+        durationMs: metadata.durationMs,
+        rotation: 0,
+        locked: false,
+        role: "media",
+        ...placement,
+        ...createVideoAppearanceDefaults("media", placement),
+      }
+
+      setVideos((current) => {
+        const nextVideos = [...current, item]
+        commitVideosRef(nextVideos)
+        return nextVideos
+      })
+      setTimelineClips((current) => {
+        const clip = createTimelineClip(item)
+        const nextClips = [...current, clip]
+        commitTimelineClipsRef(nextClips)
+        return nextClips
+      })
+      selectedItemIdRef.current = id
+      setSelectedItemId(id)
+      setImportError(null)
     },
     [commitTimelineClipsRef, commitVideosRef]
   )
@@ -1936,6 +2141,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           typeof input.fileSize === "number" && Number.isFinite(input.fileSize)
             ? Math.max(0, input.fileSize)
             : 0,
+        source: input.source,
         intrinsicWidth: input.intrinsicWidth,
         intrinsicHeight: input.intrinsicHeight,
         durationMs,
@@ -2187,7 +2393,14 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         (video) => video.objectUrl === deletedVideo.objectUrl
       )
 
-      if (!objectUrlStillUsed) {
+      // `objectUrl` may now be a `file://` URL pointing into the project
+      // folder — those are owned by the project, not the renderer, so we only
+      // ever revoke blob: URLs created via `URL.createObjectURL`.
+      if (
+        !objectUrlStillUsed &&
+        deletedVideo.objectUrl.startsWith("blob:") &&
+        objectUrlsRef.current.has(deletedVideo.objectUrl)
+      ) {
         objectUrlsRef.current.delete(deletedVideo.objectUrl)
         URL.revokeObjectURL(deletedVideo.objectUrl)
       }
@@ -2237,6 +2450,14 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       artboard,
     }),
     [artboard]
+  )
+
+  const saveStatusValue = useMemo<EditorCanvasSaveStatusContextValue>(
+    () => ({
+      status: saveStatus,
+      error: saveError,
+    }),
+    [saveStatus, saveError]
   )
 
   const viewValue = useMemo<EditorCanvasViewContextValue>(
@@ -2350,8 +2571,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     ]
   )
 
-  const { project } = useProject()
-
   useEffect(() => {
     if (!project) return
     if (hydratedProjectIdRef.current === project.id) return
@@ -2359,11 +2578,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     const findAsset = (role: ProjectAsset["role"]) =>
       project.assets.find((asset) => asset.role === role) ?? null
 
-    const screenAsset = findAsset("screen")
-    const cameraAsset = findAsset("camera")
-
-    if (!screenAsset && !cameraAsset) return
-
+    // Reset prior project's transient state before adopting the new one.
     if (
       hydratedProjectIdRef.current !== null &&
       hydratedProjectIdRef.current !== project.id
@@ -2375,6 +2590,23 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         cancelAnimationFrame(timelinePlaybackFrameRef.current)
         timelinePlaybackFrameRef.current = null
       }
+      if (autosaveTimerRef.current !== null) {
+        clearTimeout(autosaveTimerRef.current)
+        autosaveTimerRef.current = null
+      }
+      if (autosaveRetryTimerRef.current !== null) {
+        clearTimeout(autosaveRetryTimerRef.current)
+        autosaveRetryTimerRef.current = null
+      }
+      autosavePendingRef.current = false
+      // Save-status carries over between projects without this reset and can
+      // strand the indicator on "saving" or "error" forever if the new
+      // project never produces an edit. Wipe both the status and the
+      // last-written fingerprint so the new project starts from a clean
+      // slate; the hydration paths below will seed `saved` again.
+      lastWrittenSerializedRef.current = null
+      setSaveStatus("saved")
+      setSaveError(null)
       commitVideosRef([])
       commitTimelineClipsRef([])
       timelineCanvasNodesRef.current.forEach((node) => {
@@ -2391,6 +2623,88 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setTimelineTimeState(0)
       setIsTimelinePlaying(false)
       setSelectedItemId(null)
+    }
+
+    hydrationGenerationRef.current += 1
+    const hydrationGeneration = hydrationGenerationRef.current
+    const shouldAbort = () =>
+      hydrationGenerationRef.current !== hydrationGeneration
+
+    // FAST PATH: project.json exists. We trust the saved state verbatim and
+    // skip the metadata-probing hop because the saved record already carries
+    // intrinsic size + duration. URLs for each video id were resolved in main
+    // and arrive in `assetUrlsByVideoId`.
+    if (project.state) {
+      const savedState = project.state
+      const savedArtboard: EditorArtboard = {
+        presetId: savedState.artboard.presetId,
+        width: savedState.artboard.width,
+        height: savedState.artboard.height,
+        background: savedState.artboard.background,
+        grain: savedState.artboard.grain,
+        padding: savedState.artboard.padding,
+      }
+      artboardRef.current = savedArtboard
+      // Hydration is a one-shot synchronization from disk into React state —
+      // the surrounding slow path performs the same pattern. Cascading-render
+      // warnings don't apply when the effect's sole job is to seed state.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setArtboard(savedArtboard)
+      // Fast path = on-disk state matches in-memory state at this instant.
+      // Surface that as "saved" so the titlebar indicator doesn't lie about
+      // unwritten changes for the brief window before the first autosave
+      // fires (the autosave effect will rewrite the same snapshot, which is
+      // a benign no-op).
+      setSaveStatus("saved")
+      setSaveError(null)
+      hasCustomViewRef.current = false
+      const fit = getFitViewTransform(viewportSizeRef.current, savedArtboard)
+      viewTransformRef.current = fit
+      setViewTransformState(fit)
+
+      const screenAsset = findAsset("screen")
+      if (screenAsset?.width && screenAsset?.height) {
+        sourceVideoDimsRef.current = {
+          width: screenAsset.width,
+          height: screenAsset.height,
+        }
+      }
+
+      const restoredVideos: CanvasVideoItem[] = savedState.videos.map((video) =>
+        projectVideoToCanvasVideo(
+          video,
+          project.assetUrlsByVideoId[video.id] ?? ""
+        )
+      )
+      commitVideosRef(restoredVideos)
+      setVideos(restoredVideos)
+
+      const restoredClips: CanvasTimelineClip[] = savedState.timelineClips.map(
+        projectClipToCanvasClip
+      )
+      commitTimelineClipsRef(restoredClips)
+      setTimelineClips(restoredClips)
+
+      // Seed the last-written fingerprint with the hydrated snapshot so the
+      // autosave effect's immediate post-hydration run sees "no diff" and
+      // skips the IPC. Without this, every project open pays an extra
+      // redundant write for an indicator that briefly flashes "Saving…".
+      lastWrittenSerializedRef.current = fingerprintProjectState(
+        serializeProjectState(savedArtboard, restoredVideos, restoredClips)
+      )
+
+      hydratedProjectIdRef.current = project.id
+      return
+    }
+
+    // SLOW PATH: first open after recording. Synthesize defaults from
+    // `project.assets` and probe the source videos for accurate duration.
+    const screenAsset = findAsset("screen")
+    const cameraAsset = findAsset("camera")
+
+    if (!screenAsset && !cameraAsset) {
+      hydratedProjectIdRef.current = project.id
+      return
     }
 
     if (
@@ -2445,11 +2759,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setViewTransformState(fit)
     }
 
-    hydrationGenerationRef.current += 1
-    const hydrationGeneration = hydrationGenerationRef.current
-    const shouldAbort = () =>
-      hydrationGenerationRef.current !== hydrationGeneration
-
     if (
       screenAsset &&
       typeof screenAsset.width === "number" &&
@@ -2466,6 +2775,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         intrinsicHeight: screenAsset.height,
         durationMs: screenAsset.durationMs,
         role: "screen",
+        source: { kind: "recording", assetRole: "screen" },
         shouldAbort,
       })
     }
@@ -2486,6 +2796,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         intrinsicHeight: cameraAsset.height,
         durationMs: cameraAsset.durationMs,
         role: "camera",
+        source: { kind: "recording", assetRole: "camera" },
         shouldAbort,
       })
     }
@@ -2499,6 +2810,87 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     project,
   ])
 
+  // Autosave: 500ms debounce on any change to artboard / videos /
+  // timelineClips, plus a flush on window blur and beforeunload. Gated on
+  // hydration so we never write a half-initialised state. Concurrent saves
+  // are coalesced via `autosavePendingRef`.
+  useEffect(() => {
+    if (!project) return
+    if (hydratedProjectIdRef.current !== project.id) return
+
+    const projectPath = project.path
+    if (autosaveTimerRef.current !== null) {
+      clearTimeout(autosaveTimerRef.current)
+    }
+    // A new edit supersedes any pending retry — the user has moved on, the
+    // next save will carry their newest state, and we don't want two writes
+    // racing each other.
+    if (autosaveRetryTimerRef.current !== null) {
+      clearTimeout(autosaveRetryTimerRef.current)
+      autosaveRetryTimerRef.current = null
+    }
+    setSaveStatus("saving")
+    autosaveTimerRef.current = setTimeout(() => {
+      autosaveTimerRef.current = null
+      void flushAutosave(projectPath)
+    }, PROJECT_STATE_AUTOSAVE_DEBOUNCE_MS)
+
+    return () => {
+      if (autosaveTimerRef.current !== null) {
+        clearTimeout(autosaveTimerRef.current)
+        autosaveTimerRef.current = null
+      }
+      if (autosaveRetryTimerRef.current !== null) {
+        clearTimeout(autosaveRetryTimerRef.current)
+        autosaveRetryTimerRef.current = null
+      }
+    }
+  }, [artboard, videos, timelineClips, project, flushAutosave])
+
+  // Window-level flush hooks. We only react if the gate (project + hydrated)
+  // passes — otherwise blur during boot would otherwise trigger an empty save.
+  useEffect(() => {
+    if (!project) return
+    const projectPath = project.path
+    const handleBlur = () => {
+      if (hydratedProjectIdRef.current !== project.id) return
+      if (autosaveTimerRef.current !== null) {
+        clearTimeout(autosaveTimerRef.current)
+        autosaveTimerRef.current = null
+      }
+      void flushAutosave(projectPath)
+    }
+    // `beforeunload` cannot await async IPC — if there is unsaved work
+    // (a pending debounce or an in-flight write), set `returnValue` so the
+    // platform prompts the user before destroying the window. Closing
+    // anyway loses at most the 500ms-debounced edit; the prompt nudges
+    // them to wait for the indicator to settle.
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (hydratedProjectIdRef.current !== project.id) return
+      const hasUnsavedWork =
+        autosaveTimerRef.current !== null ||
+        autosaveInFlightRef.current ||
+        autosavePendingRef.current
+      if (autosaveTimerRef.current !== null) {
+        clearTimeout(autosaveTimerRef.current)
+        autosaveTimerRef.current = null
+      }
+      void flushAutosave(projectPath)
+      if (hasUnsavedWork) {
+        event.preventDefault()
+        // Legacy spec — some browsers/Electron versions still require a
+        // truthy `returnValue` to actually surface the prompt.
+        event.returnValue = ""
+      }
+    }
+    window.addEventListener("blur", handleBlur)
+    window.addEventListener("beforeunload", handleBeforeUnload)
+    return () => {
+      window.removeEventListener("blur", handleBlur)
+      window.removeEventListener("beforeunload", handleBeforeUnload)
+    }
+  }, [project, flushAutosave])
+
   return (
     <EditorCanvasActionsContext.Provider value={actionsValue}>
       <EditorCanvasTimelineActionsContext.Provider value={timelineActionsValue}>
@@ -2506,7 +2898,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           <EditorCanvasTimelineContext.Provider value={timelineValue}>
             <EditorCanvasArtboardContext.Provider value={artboardValue}>
               <EditorCanvasViewContext.Provider value={viewValue}>
-                {children}
+                <EditorCanvasSaveStatusContext.Provider value={saveStatusValue}>
+                  {children}
+                </EditorCanvasSaveStatusContext.Provider>
               </EditorCanvasViewContext.Provider>
             </EditorCanvasArtboardContext.Provider>
           </EditorCanvasTimelineContext.Provider>
@@ -2566,6 +2960,13 @@ export function useEditorCanvasTimelineActions() {
   return useRequiredEditorCanvasContext(
     useContext(EditorCanvasTimelineActionsContext),
     "useEditorCanvasTimelineActions"
+  )
+}
+
+export function useEditorCanvasSaveStatus() {
+  return useRequiredEditorCanvasContext(
+    useContext(EditorCanvasSaveStatusContext),
+    "useEditorCanvasSaveStatus"
   )
 }
 

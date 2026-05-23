@@ -104,7 +104,11 @@ Not implemented yet:
 | `components/ui/dropdown-menu.tsx`                         | Shared dropdown menu primitives used by artboard and zoom controls.                                                                                             |
 | `lib/editor-canvas.ts`                                    | Artboard presets, zoom/grid constants, fit transform, clamped view helpers, and pointer-centered zoom helper.                                                   |
 | `lib/editor-canvas-snap.ts`                               | Pure snap math: rotated AABB, snap-cache builder, drag-snap and resize-snap solvers, equal-spacing distance guides, grid snap helpers.                          |
-| `types/editor-canvas.ts`                                  | Canvas types: size, artboard, pixel grid settings, view transform, video item, transform patch.                                                                 |
+| `types/editor-canvas.ts`                                  | Canvas types: size, artboard, pixel grid settings, view transform, video item (incl. persistence `source`), transform patch.                                    |
+| `components/editor/canvas/persistence.ts`                 | Pure serialize / deserialize helpers between `CanvasVideoItem` + `EditorArtboard` + `CanvasTimelineClip` and the `ProjectStateV1` schema written to `project.json`. |
+| `components/editor/save-status-indicator.tsx`             | Cloud icon in the titlebar that reflects autosave state (`saving` / `saved` / `error`); pulses while writing, turns red on failure, tooltips clarify in plain English. |
+| `electron/ipc/project-schema.ts`                          | Schema source of truth for `project.json` (versioned `ProjectStateV1`), `parseProjectState` validator, plus import-asset and save-state IPC payload types.        |
+| `electron/ipc/projects.ts`                                | `projects:*` IPC handlers — reads `project.json`, resolves `assetUrlsByVideoId`, atomically writes editor state, copies imported videos into the project folder. |
 | `app/globals.css`                                         | Theme tokens, including `--editor-workspace`.                                                                                                                   |
 | `docs/normal-term.md`                                     | Developer-friendly translation table from discussion terms to industry terms.                                                                                   |
 
@@ -161,7 +165,7 @@ Layer split:
 
 Important types:
 
-- `CanvasVideoItem`: `id`, `fileName`, `objectUrl`, `fileSize`, `intrinsicWidth`, `intrinsicHeight`, `durationMs`, `x`, `y`, `width`, `height`, `rotation`, `locked`, `role`, plus per-node appearance fields `cornerRadius`, `cornerSmoothing`, `borderWidth`, `borderColor`, `borderOffset`, `borderAlignment` (`"inside" | "center" | "outside"`), `shadowColor` (rgba string with baked alpha), `shadowBlur`, `shadowOffsetX`, `shadowOffsetY`, `shadowSpread`.
+- `CanvasVideoItem`: `id`, `fileName`, `objectUrl`, `fileSize`, `source` (persistence pointer — `{ kind: "recording", assetRole }` for screen/camera recordings or `{ kind: "imported", relativePath, fileSize }` for files copied into the project folder), `intrinsicWidth`, `intrinsicHeight`, `durationMs`, `x`, `y`, `width`, `height`, `rotation`, `locked`, `role`, plus per-node appearance fields `cornerRadius`, `cornerSmoothing`, `borderWidth`, `borderColor`, `borderOffset`, `borderAlignment` (`"inside" | "center" | "outside"`), `shadowColor` (rgba string with baked alpha), `shadowBlur`, `shadowOffsetX`, `shadowOffsetY`, `shadowSpread`. `objectUrl` is the runtime URL the renderer hands to a `<video>` element; it is rebuilt on every hydration from `source` and is not persisted.
 - `CanvasTimelineClip`: `id`, `videoId`, `start`, `end`, `sourceIn`, `sourceOut`.
 - `EditorArtboard`: `presetId`, `width`, `height`.
 - `ViewTransform`: `scale`, `x`, `y`.
@@ -575,6 +579,95 @@ The outer workspace background color is a theme token:
 - Value: `#1e1e1e`
 
 Use this token for future editor workspace surfaces instead of hardcoding the color.
+
+## Project Persistence
+
+Editor state is autosaved into the project folder so reloading a project reproduces the exact same arrangement. Recording files are owned by the mac-addon and remain untouched.
+
+On-disk layout per project (under `~/Documents/openscreen/<ISO-timestamp>/`):
+
+```text
+<project>/
+  recording.json     # owned by @openscreen/mac-addon, untouched by the editor
+  project.json       # editor state (this section)
+  screen.mov         # the screen recording
+  camera.mov         # optional camera recording
+  assets/
+    videos/
+      <video-id>/
+        <file>.mp4   # videos imported via the Background tab, copied here on import
+```
+
+Schema (`electron/ipc/project-schema.ts`):
+
+- `version: 1` — first line of every read; mismatches fall back to "no saved state" and the renderer re-synthesises defaults.
+- `artboard: { presetId, width, height, background, padding, grain }`.
+  - `background` is either `null`, `{ type: "color", value }`, or `{ type: "wallpaper", value, blurRadius? }`. For wallpapers, `value` is a stable `WallpaperId` from `lib/wallpapers.ts` — wallpaper assets ship with the app and are not copied per-project.
+- `videos: ProjectVideo[]` — one entry per `CanvasVideoItem`, including its `source`:
+  - `{ kind: "recording", assetRole: "screen" | "camera" }` — file path resolves through `project.assets` (which itself resolves from `recording.json`).
+  - `{ kind: "imported", relativePath, fileSize }` — `relativePath` is always inside `<project>/assets/videos/<id>/`.
+- `timelineClips: ProjectTimelineClip[]` — `start`, `end`, `sourceIn`, `sourceOut` per clip.
+- `updatedAtUnixMs` — refreshed by main on every successful write.
+
+Not persisted: selection, playhead time, timeline zoom/scroll, viewport transform, hover preview state, all `*Ref` runtime state. The view always re-fits the artboard on load.
+
+Hydration (in `components/editor/canvas/provider.tsx`):
+
+- Fast path — `project.state` present: write the saved `artboard`, `videos`, and `timelineClips` directly into state. Each video's `objectUrl` is taken from `ProjectSummary.assetUrlsByVideoId[video.id]`, which main computes by joining the project folder with `source.relativePath` (or the resolved recording asset URL). Missing files leave that entry undefined — the renderer keeps the node so the user can see what is broken instead of silently dropping it.
+- Slow path — `project.state` is `null` (first open after a recording, or schema mismatch): the existing flow runs (probe screen/camera metadata via `readVideoMetadata`, pick an Auto vs Wide preset, add videos with `source: { kind: "recording", assetRole }`). The next user edit creates `project.json`.
+
+Autosave:
+
+- A single effect watches `artboard`, `videos`, and `timelineClips`. Any change schedules a `setTimeout` after `PROJECT_STATE_AUTOSAVE_DEBOUNCE_MS` (500 ms) that calls `window.api.projects.saveState(project.path, snapshot)`.
+- `window` `blur` and `beforeunload` listeners flush the pending timer synchronously so quick edits before quit make it to disk.
+- A "single writer + pending" pair (`autosaveInFlightRef` / `autosavePendingRef`) collapses concurrent writes — at most one IPC save is in flight, and any change made during it triggers one follow-up write when it returns.
+- Both the debounced effect and the flush listeners gate on `hydratedProjectIdRef.current === project.id`, so saves never fire before hydration completes or with the wrong project's path.
+
+Imported video files:
+
+- `addVideoFile(file)` probes the file with a transient blob URL (for intrinsic size + duration), then ships `file.arrayBuffer()` over IPC to `projects:importAsset`. The main handler writes it to `<project>/assets/videos/<id>/<sanitized-name>` and returns the `file://` URL plus the relative path. The `CanvasVideoItem` ends up with `source: { kind: "imported", relativePath, fileSize }` and uses the returned URL as its `objectUrl`.
+- Filenames are sanitised in main (`sanitizeFileName`) and the resolved path is rejected unless it is inside the project folder, so a hostile asset can never escape `<project>/assets/`.
+
+Atomic writes:
+
+- `writeJsonAtomic` writes to a `.project.json.<pid>-<ts>-<rand>.tmp` sibling first, then `rename`s on top. POSIX `rename` on the same filesystem is atomic, so a crash mid-write leaves either the previous or the new file — never a torn JSON. Any failure — `writeFile` *or* `rename` — unlinks the tmp so a read-only or full disk doesn't accumulate `.tmp` orphans.
+
+Safety invariants for the autosave pipeline:
+
+- **Cross-project bail.** `flushAutosave` captures `projectPath` once and re-checks `projectRef.current.path` at the top of every drain-loop iteration. If the user switches projects mid-save, the drain stops and the indicator silently rolls over to the new project's autosave; we never write the new project's data to the old project's `project.json`.
+- **Status reset on project switch.** The hydration effect's reset block clears `autosaveTimerRef`, `autosaveRetryTimerRef`, `autosavePendingRef`, `lastWrittenSerializedRef`, the in-memory save error, and resets `saveStatus` to `saved` — so the cloud indicator can never strand on `saving` or `error` after a switch.
+- **Skip redundant first save.** A fingerprint (JSON minus `updatedAtUnixMs`) of the last successful write lives in `lastWrittenSerializedRef`. Fast-path hydration seeds it from the loaded state, so the autosave effect's immediate post-hydration run sees no diff and skips the IPC. The indicator still briefly flashes `saving` (optimistic), then settles back on `saved`.
+- **`addVideoFile` cross-project guard.** Captures the project id at function start, re-checks `projectRef.current.id` after the metadata probe *and* after `importAsset` returns. A switch during either async stage aborts cleanly. If the switch happens after the copy completed, the asset file is logged as an orphan in the old project's `assets/videos/<id>/` and the new project is left untouched.
+- **`beforeunload` prompt during unsaved work.** If a debounce timer is pending, a save is in flight, or another follow-up is queued, we call `event.preventDefault()` + set `event.returnValue = ""` so the platform shows its "Leave site?" prompt. Closing anyway still loses at most the 500 ms-debounced edit (the IPC round-trip won't complete), but the prompt nudges the user to wait for the indicator to settle.
+- **Auto-retry on transient errors.** When a save fails, `flushAutosave` schedules a single retry after `PROJECT_STATE_AUTOSAVE_RETRY_MS` (5 s). A new user edit supersedes the retry (the autosave-trigger effect clears `autosaveRetryTimerRef`). A project switch also cancels it.
+- **Filename hardening.** `sanitizeFileName` / `sanitizeAssetId` reject pure-dot inputs (`.`, `..`, `...`) so a hostile caller can't aim a write at a parent directory even though `isPathInside` is the second line of defence.
+
+Performance notes:
+
+- Saving is debounced to 500 ms and writes the full document; payload size is dominated by `videos[]` which is small even at thousands of nodes (~100 bytes per video). For a true 5000-node stress case, the JSON would land at ~500 KB — still cheap, but if it grows further we should switch to a binary or delta format rather than ship denser per-node fields.
+- The serialiser allocates two fresh arrays per save (`videos.map`, `timelineClips.map`). The autosave debounce keeps this off the interaction hot path; it never runs inside drag, transform, or playback ticks.
+
+Save status indicator (`components/editor/save-status-indicator.tsx`):
+
+- A cloud icon lives in the titlebar (right of the Open project button). Subscribes only to the dedicated `useEditorCanvasSaveStatus()` slice so frequent video/timeline updates don't re-render it.
+- States: `idle` (hidden — no project loaded yet), `saving` (`CloudLoadingIcon`, gently animated), `saved` (`CloudSavingDone01Icon`), `error` (same `CloudSavingDone01Icon` tinted with `text-destructive`, error reason shown under the tooltip label).
+- The provider sets `saving` whenever the debounce timer is scheduled or a save is in flight, and resolves to `saved` or `error` inside `flushAutosave`'s `finally`. The fast-path hydration also seeds `saved` so the indicator doesn't lie about pending writes immediately after open.
+
+Opening a project without recording:
+
+- The recorder-bar settings menu has an **Open project…** item. It opens a native folder picker rooted at `~/Documents/openscreen/`, validates the folder via `loadProjectFromFolder` (must have a `recording.json`), and if valid promotes the path to the **sticky active project**. The recorder bar then closes and the main editor window opens — same transition as after a recording. Invalid folders surface an error dialog; cancel is silent.
+- Sticky active project (`activeProjectPath` in `electron/ipc/projects.ts`):
+  - In-memory in the main process and persisted to `<userData>/active-project.json` so it survives both window reloads (Cmd+R) and full app restarts.
+  - `projects:getLatest` checks it first, before the recorder hint and the "newest folder by mtime" fallback. Without this, refreshing the editor after switching from Project A to Project B would silently snap back to A because A's folder was modified more recently.
+  - **Every "open a project" path funnels through `setActiveProjectFromFolder`** so the choice is always persisted: the recorder-bar settings menu's "Open project…" entry, the titlebar's folder picker (`projects:pickAndOpen`), the programmatic `projects:open(path)` IPC, and `main.ts`'s `onStatusChanged` recording-stop branch. The function validates the folder via `loadProjectFromFolder` (`recording.json` must exist), returns the loaded `ProjectSummary` on success so callers don't double-load, and writes the path to disk for restart persistence.
+  - `projects:getLatest` is the *only* read-only path — it never promotes a fallback result to active, so the active slot only changes in response to explicit user opens or successful recordings.
+  - Self-heals if the folder is missing on a subsequent boot: the slot is cleared and `getLatest` falls through to the legacy "newest by mtime" path.
+
+Known limitations:
+
+- A missing asset on reload renders an empty `objectUrl` — the video element will fail. We surface no UI for this yet; treat reporting a "broken video" placeholder + recovery affordances as a follow-up.
+- ArrayBuffer-over-IPC import works fine for typical screen recordings (tens to hundreds of MB) but allocates the entire file in renderer memory before the copy. For multi-GB imports a streaming path API would be required.
+- `beforeunload` flushes are best-effort — the platform does not guarantee an async IPC round-trip completes before the window is destroyed. The 500 ms debounce keeps the worst-case loss tight.
 
 ## Problems, Decisions, And Solutions
 

@@ -117,12 +117,18 @@ interface RegisterRecorderHandlersOptions {
   // BrowserWindow factory can use SHARED_WEB_PREFERENCES / loadAppRoute
   // without re-implementing them here.
   openRecordingSettingsWindow?: () => void
+  // Lets the user pick an existing project from disk and open it in the
+  // editor without first making a recording. Wired from main.ts so it can
+  // show a native folder dialog parented to the recorder bar window and
+  // hand the picked folder to the main editor window.
+  openProjectFromDialog?: () => void
 }
 
 let cameraPreviewListener: ((deviceId: string | null) => void) | null = null
 let getRecorderWindowRef: (() => BrowserWindow | null) | null = null
 let getControlsWindowRef: (() => BrowserWindow | null) | null = null
 let openRecordingSettingsWindowRef: (() => void) | null = null
+let openProjectFromDialogRef: (() => void) | null = null
 let statusChangedListener:
   | ((status: RecorderStatus, snapshot: RecorderState) => void)
   | null = null
@@ -673,7 +679,12 @@ function recorderSettingsMenuTemplate(): MenuItemConstructorOptions[] {
     },
     { type: 'separator' },
     {
-      label: 'Recording quality…',
+      label: 'Open project…',
+      enabled: canChangeSettings(),
+      click: () => openProjectFromDialogRef?.(),
+    },
+    {
+      label: 'Settings',
       enabled: canChangeSettings(),
       click: () => openRecordingSettingsWindowRef?.(),
     },
@@ -1143,6 +1154,7 @@ export function registerRecorderHandlers(options: RegisterRecorderHandlersOption
   getControlsWindowRef = options.getControlsWindow ?? null
   statusChangedListener = options.onStatusChanged ?? null
   openRecordingSettingsWindowRef = options.openRecordingSettingsWindow ?? null
+  openProjectFromDialogRef = options.openProjectFromDialog ?? null
   ipcMain.handle('recorder:getState', () => publicState())
   ipcMain.handle(
     'recorder:getRecordingSettings',

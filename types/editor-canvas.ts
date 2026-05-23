@@ -36,9 +36,30 @@ export type ViewTransform = {
   y: number
 }
 
+/**
+ * Coarse-grained label for the autosave pipeline shown in the titlebar.
+ * - `idle`: no project loaded yet, indicator hidden.
+ * - `saving`: a debounce timer or in-flight write is pending.
+ * - `saved`: last write succeeded and there are no pending changes.
+ * - `error`: last write failed; indicator turns red and the tooltip explains.
+ */
+export type EditorSaveStatus = "idle" | "saving" | "saved" | "error"
+
 export type CanvasVideoRole = "screen" | "camera" | "media"
 
 export type CanvasBorderAlignment = "inside" | "center" | "outside"
+
+/**
+ * Persistence-side description of where a video's bytes live. Imported files
+ * are stored inside the project folder (`relativePath` is relative to it);
+ * recording sources resolve through `recording.json` and the project's
+ * `assets[]` array. The renderer never invents file paths from this — the
+ * main process maps each video id to a `file://` URL when loading the
+ * project (`ProjectSummary.assetUrlsByVideoId`).
+ */
+export type CanvasVideoSource =
+  | { kind: "recording"; assetRole: "screen" | "camera" }
+  | { kind: "imported"; relativePath: string; fileSize: number }
 
 export type CanvasVideoItem = {
   id: string
@@ -46,6 +67,8 @@ export type CanvasVideoItem = {
   objectUrl: string
   /** Source file size in bytes. `0` when unknown (e.g. remote stream). */
   fileSize: number
+  /** Persistence pointer to the underlying media file. */
+  source: CanvasVideoSource
   intrinsicWidth: number
   intrinsicHeight: number
   durationMs: number

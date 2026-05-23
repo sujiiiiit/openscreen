@@ -256,11 +256,9 @@ export default function RecordingSettingsPage() {
       <header className="flex items-center justify-between px-5 pt-4 pb-3">
         <div>
           <h1 className="text-[13px] font-medium leading-tight">
-            Recording Quality
+           Settings
           </h1>
-          <p className="text-muted-foreground text-[11px]">
-            Applies to the next recording.
-          </p>
+         
         </div>
         <Button
           variant="ghost"
@@ -278,7 +276,7 @@ export default function RecordingSettingsPage() {
         ) : (
           <>
             <section>
-              <SectionTitle>Video</SectionTitle>
+             
               <SettingRow label="Codec">
                 <Select
                   value={settings.videoCodec}
@@ -328,16 +326,7 @@ export default function RecordingSettingsPage() {
               </SettingRow>
             </section>
 
-            <section>
-              <SectionTitle>Estimated bitrate</SectionTitle>
-              <div className="text-muted-foreground py-2.5 text-[11px]">
-                {estimatedBitrateLabel(
-                  settings.videoCodec,
-                  settings.videoQuality,
-                  settings.frameRate,
-                )}
-              </div>
-            </section>
+           
           </>
         )}
       </div>

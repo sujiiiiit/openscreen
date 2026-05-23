@@ -175,6 +175,100 @@ export interface ProjectAsset {
   audioTracks: ProjectAssetAudioTrack[]
 }
 
+// ─── project.json schema (mirrored from electron/ipc/project-schema.ts) ──
+// Edits here MUST be reflected in electron/ipc/project-schema.ts. Renderer
+// code imports these types from `@/types/api`.
+
+export type ProjectStateVersion = 1
+
+export type ProjectArtboardPresetId =
+  | 'wide'
+  | 'vertical'
+  | 'portrait'
+  | 'standard'
+  | 'square'
+  | 'auto'
+
+export type ProjectArtboardBackground =
+  | { type: 'color'; value: string }
+  | { type: 'wallpaper'; value: string; blurRadius?: number }
+
+export interface ProjectArtboard {
+  presetId: ProjectArtboardPresetId
+  width: number
+  height: number
+  background: ProjectArtboardBackground | null
+  padding: number
+  grain: number
+}
+
+export type ProjectVideoRole = 'screen' | 'camera' | 'media'
+export type ProjectBorderAlignment = 'inside' | 'center' | 'outside'
+
+export type ProjectVideoSource =
+  | { kind: 'recording'; assetRole: 'screen' | 'camera' }
+  | { kind: 'imported'; relativePath: string; fileSize: number }
+
+export interface ProjectVideo {
+  id: string
+  fileName: string
+  source: ProjectVideoSource
+  intrinsicWidth: number
+  intrinsicHeight: number
+  durationMs: number
+  role: ProjectVideoRole
+  x: number
+  y: number
+  width: number
+  height: number
+  rotation: number
+  locked: boolean
+  cornerRadius: number
+  cornerSmoothing: number
+  borderWidth: number
+  borderColor: string
+  borderOffset: number
+  borderAlignment: ProjectBorderAlignment
+  shadowColor: string
+  shadowBlur: number
+  shadowOffsetX: number
+  shadowOffsetY: number
+  shadowSpread: number
+}
+
+export interface ProjectTimelineClip {
+  id: string
+  videoId: string
+  start: number
+  end: number
+  sourceIn: number
+  sourceOut: number
+}
+
+export interface ProjectStateV1 {
+  version: 1
+  artboard: ProjectArtboard
+  videos: ProjectVideo[]
+  timelineClips: ProjectTimelineClip[]
+  updatedAtUnixMs: number
+}
+
+export interface ImportAssetPayload {
+  id: string
+  fileName: string
+  bytes: ArrayBuffer
+}
+
+export interface ImportAssetResult {
+  relativePath: string
+  fileUrl: string
+  fileSize: number
+}
+
+export type SaveProjectStateResult =
+  | { ok: true; writtenAtUnixMs: number }
+  | { ok: false; reason: string }
+
 export interface ProjectSummary {
   id: string
   name: string
@@ -182,6 +276,8 @@ export interface ProjectSummary {
   createdAtUnixMs: number
   recordingType: ProjectRecordingType | null
   assets: ProjectAsset[]
+  state: ProjectStateV1 | null
+  assetUrlsByVideoId: Record<string, string>
 }
 
 export interface Api {
@@ -232,6 +328,14 @@ export interface Api {
     getLatest: () => Promise<ProjectSummary | null>
     open: (folderPath: string) => Promise<ProjectSummary | null>
     pickAndOpen: () => Promise<ProjectSummary | null>
+    saveState: (
+      folderPath: string,
+      state: ProjectStateV1,
+    ) => Promise<SaveProjectStateResult>
+    importAsset: (
+      folderPath: string,
+      payload: ImportAssetPayload,
+    ) => Promise<ImportAssetResult>
   }
   windowPicker: {
     confirm: () => Promise<void>

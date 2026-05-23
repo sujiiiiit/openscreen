@@ -2,13 +2,15 @@
 
 import dynamic from "next/dynamic"
 
+import { Spinner } from "@/components/ui/spinner"
+
 const EditorWorkspace = dynamic(
   () => import("@/components/editor/canvas/editor-workspace"),
   {
     ssr: false,
     loading: () => (
-      <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
-        Loading canvas
+      <div className="flex h-full w-full items-center justify-center">
+        <Spinner />
       </div>
     ),
   }

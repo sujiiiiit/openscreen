@@ -16,6 +16,12 @@ import type {
 } from './ipc/window-picker'
 import type { ProjectSummary } from './ipc/projects'
 import type {
+  ImportAssetPayload,
+  ImportAssetResult,
+  ProjectStateV1,
+  SaveProjectStateResult,
+} from './ipc/project-schema'
+import type {
   WindowStateChange,
   WindowStateSnapshot,
 } from './ipc/window-controls'
@@ -85,6 +91,16 @@ const api = {
       ipcRenderer.invoke('projects:open', folderPath),
     pickAndOpen: (): Promise<ProjectSummary | null> =>
       ipcRenderer.invoke('projects:pickAndOpen'),
+    saveState: (
+      folderPath: string,
+      state: ProjectStateV1,
+    ): Promise<SaveProjectStateResult> =>
+      ipcRenderer.invoke('projects:saveState', folderPath, state),
+    importAsset: (
+      folderPath: string,
+      payload: ImportAssetPayload,
+    ): Promise<ImportAssetResult> =>
+      ipcRenderer.invoke('projects:importAsset', folderPath, payload),
   },
   windowPicker: {
     confirm: (): Promise<void> => ipcRenderer.invoke('windowPicker:confirm'),
