@@ -423,7 +423,8 @@ Panel layout:
     - **Shadow** — inline color row (`ColorAlphaSwatch`: a checker-backed native `<input type="color">` swatch with a directly-editable hex text input beside it — no popover), Opacity slider (0–100% — edits the alpha channel of `shadowColor`, default 25%), and X / Y / Blur / Spread sliders. Opacity lives on its own row beside the spatial sliders, but `shadowColor` remains the single source of truth and stores alpha as part of the rgba string.
 - When no videos exist yet, list view shows an inline `Squircle` hint pointing at the Background tab.
 - The settings-view subtree is keyed on the video id so internal refs reset cleanly across selections.
-- `CanvasVideoItem.fileSize` is populated from `File.size` on local uploads and `ProjectAsset.fileSize` on hydration, and falls back to `0` ("Unknown size") for remote streams without a known byte count.
+- `CanvasVideoItem.fileSize` is populated from `File.size` (really the imported `ArrayBuffer.byteLength`) on local uploads and from `ProjectAsset.fileSize` for recordings. It falls back to `0` ("Unknown size") only when the byte count is genuinely unknown (remote stream, or a recording whose asset file is missing).
+  - **Source of truth differs by kind.** Imported videos persist their size in `project.json` (`source.fileSize`). Recordings do **not** — a recording's size is owned by its on-disk `.mov`, which the main process freshly stats into `ProjectAsset.fileSize` on every project open. Both hydration paths therefore resolve a recording's size from `project.assets` (by `assetRole`) rather than from the saved record, via `resolveFileSizeForRestore` in `provider.tsx`. This is why recordings show their real size after a refresh instead of "Unknown size" — earlier the fast path hard-coded `0` for recording sources.
 
 Performance posture:
 
@@ -664,12 +665,14 @@ Schema (`electron/ipc/project-schema.ts`):
 - `artboard: { presetId, width, height, background, padding, grain }`.
   - `background` is either `null`, `{ type: "color", value }`, or `{ type: "wallpaper", value, blurRadius? }`. For wallpapers, `value` is a stable `WallpaperId` from `lib/wallpapers.ts` — wallpaper assets ship with the app and are not copied per-project.
 - `videos: ProjectVideo[]` — one entry per `CanvasVideoItem`, including its `source`:
-  - `{ kind: "recording", assetRole: "screen" | "camera" }` — file path resolves through `project.assets` (which itself resolves from `recording.json`).
+  - `{ kind: "recording", assetRole: "screen" | "camera" }` — file path **and byte size** resolve through `project.assets` (which itself resolves from `recording.json`); deliberately no `fileSize` on the recording source, so the size never goes stale relative to the on-disk `.mov`.
   - `{ kind: "imported", relativePath, fileSize }` — `relativePath` is always inside `<project>/assets/videos/<id>/`.
 - `timelineClips: ProjectTimelineClip[]` — `start`, `end`, `sourceIn`, `sourceOut` per clip.
 - `updatedAtUnixMs` — refreshed by main on every successful write.
 
 Not persisted: selection, playhead time, timeline zoom/scroll, viewport transform, hover preview state, the in-memory undo/redo history (`historyRef`), the session-only imported URL cache (`sessionImportedUrlsRef`), all `*Ref` runtime state. The view always re-fits the artboard on load.
+
+Derived-on-load (not persisted, but reconstructed every hydration): a recording's `CanvasVideoItem.fileSize` is read back from `ProjectAsset.fileSize`, not from `project.json`. Both hydration paths (fast-path restore and slow-path synthesis) and both undo/redo restores route through `resolveFileSizeForRestore`. Imported videos keep their persisted `source.fileSize` instead.
 
 Hydration (in `components/editor/canvas/provider.tsx`):
 

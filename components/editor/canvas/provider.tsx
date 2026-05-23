@@ -2612,6 +2612,28 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     []
   )
 
+  // Pure helper: resolve a restored video's byte size. Imported sources carry
+  // their size in the saved record; recording sources don't — their size is
+  // owned by the on-disk asset (re-stat'd by main on every project open), so
+  // we read it from `project.assets` by role. Without this, recordings load
+  // back as 0 bytes and the video panel shows "Unknown size" after a refresh.
+  // A live in-memory item (undo/redo within a session) is preferred when it
+  // already resolved a non-zero size. Returns 0 when the asset is gone, which
+  // the panel renders honestly as "Unknown size".
+  const resolveFileSizeForRestore = useCallback(
+    (video: ProjectStateV1["videos"][number]): number => {
+      if (video.source.kind === "imported") return video.source.fileSize
+      const existing = videoByIdRef.current.get(video.id)
+      if (existing && existing.fileSize > 0) return existing.fileSize
+      const assetRole = video.source.assetRole
+      const asset = projectRef.current?.assets.find(
+        (candidate) => candidate.role === assetRole
+      )
+      return asset?.fileSize ?? 0
+    },
+    []
+  )
+
   const restoreHistorySnapshot = useCallback(
     (direction: -1 | 1) => {
       const history = historyRef.current
@@ -2632,7 +2654,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       }
       const restoredVideos: CanvasVideoItem[] = savedState.videos.map(
         (video) =>
-          projectVideoToCanvasVideo(video, resolveObjectUrlForRestore(video))
+          projectVideoToCanvasVideo(
+            video,
+            resolveObjectUrlForRestore(video),
+            resolveFileSizeForRestore(video)
+          )
       )
       const restoredClips: CanvasTimelineClip[] =
         savedState.timelineClips.map(projectClipToCanvasClip)
@@ -2702,6 +2728,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       commitTimelineClipsRef,
       commitVideosRef,
       resolveObjectUrlForRestore,
+      resolveFileSizeForRestore,
     ]
   )
 
@@ -2978,7 +3005,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const restoredVideos: CanvasVideoItem[] = savedState.videos.map((video) =>
         projectVideoToCanvasVideo(
           video,
-          project.assetUrlsByVideoId[video.id] ?? ""
+          project.assetUrlsByVideoId[video.id] ?? "",
+          resolveFileSizeForRestore(video)
         )
       )
       commitVideosRef(restoredVideos)
@@ -3158,6 +3186,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     commitTimelineVisibleVideoIds,
     commitVideosRef,
     project,
+    resolveFileSizeForRestore,
   ])
 
   // Autosave: 500ms debounce on any change to artboard / videos /

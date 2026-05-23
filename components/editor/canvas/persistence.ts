@@ -118,16 +118,26 @@ export function serializeProjectState(
   }
 }
 
+/**
+ * Rebuild a runtime video item from its persisted record.
+ *
+ * `fileSize` is supplied by the caller rather than derived from `video`:
+ * imported sources persist their byte size in `project.json`, but recording
+ * sources do not — a recording's size is owned by its on-disk asset, which the
+ * main process freshly stats on every project open. The caller resolves it
+ * from the matching `ProjectAsset.fileSize`, so a recording reports its real
+ * size after a reload instead of falling back to "Unknown size".
+ */
 export function projectVideoToCanvasVideo(
   video: ProjectVideo,
-  objectUrl: string
+  objectUrl: string,
+  fileSize: number
 ): CanvasVideoItem {
   return {
     id: video.id,
     fileName: video.fileName,
     objectUrl,
-    fileSize:
-      video.source.kind === "imported" ? video.source.fileSize : 0,
+    fileSize,
     source: video.source,
     intrinsicWidth: video.intrinsicWidth,
     intrinsicHeight: video.intrinsicHeight,
