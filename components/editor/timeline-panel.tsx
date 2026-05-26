@@ -415,41 +415,38 @@ export function EditorTimelineZoomControls() {
   const hasTimeline = timelineClips.length > 0
 
   return (
-    <div className="inline-flex h-7 items-center divide-x divide-border overflow-hidden rounded-md border border-border bg-background select-none">
+    <div className="inline-flex items-center gap-1 select-none">
       <Button
         type="button"
-        variant="ghost"
-        size="icon-xs"
+        variant="outline"
+        size="icon-sm"
         onClick={zoomTimelineOut}
         disabled={!hasTimeline}
         aria-label="Zoom timeline out"
-        className="h-full rounded-none border-0"
       >
-        <HugeiconsIcon icon={MinusSignIcon} size={12} color="currentColor" />
+        <HugeiconsIcon icon={MinusSignIcon} size={16} color="currentColor" />
       </Button>
       <Button
         type="button"
-        variant="ghost"
-        size="xs"
+        variant="outline"
+        size="sm"
         onClick={fitTimelineToWidth}
         disabled={!hasTimeline}
         aria-label="Fit timeline to width"
         aria-pressed={isTimelineFit}
-        className="h-full rounded-none border-0"
       >
-        <HugeiconsIcon icon={FitToScreenIcon} size={12} color="currentColor" />
+        <HugeiconsIcon icon={FitToScreenIcon} size={16} color="currentColor" />
         Fit
       </Button>
       <Button
         type="button"
-        variant="ghost"
-        size="icon-xs"
+        variant="outline"
+        size="icon-sm"
         onClick={zoomTimelineIn}
         disabled={!hasTimeline}
         aria-label="Zoom timeline in"
-        className="h-full rounded-none border-0"
       >
-        <HugeiconsIcon icon={PlusSignIcon} size={12} color="currentColor" />
+        <HugeiconsIcon icon={PlusSignIcon} size={16} color="currentColor" />
       </Button>
     </div>
   )

@@ -213,6 +213,12 @@ export interface ProjectVideo {
   id: string
   fileName: string
   source: ProjectVideoSource
+  /**
+   * Whether the video is placed on the canvas / timeline. Optional for
+   * back-compat: missing means `true`. `false` marks a video the user removed
+   * from the canvas — kept in the project so it can be re-added.
+   */
+  onCanvas?: boolean
   intrinsicWidth: number
   intrinsicHeight: number
   durationMs: number

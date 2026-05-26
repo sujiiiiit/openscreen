@@ -5,11 +5,6 @@ import { HugeiconsIcon } from "@hugeicons/react"
 import { Share03Icon } from "@hugeicons/core-free-icons"
 
 import { Button } from "@/components/ui/button"
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip"
 import { NO_DRAG } from "@/lib/window-drag"
 import { useProject } from "@/components/editor/project/provider"
 import {
@@ -17,6 +12,7 @@ import {
   useEditorCanvasMedia,
   useEditorCanvasTimeline,
 } from "@/components/editor/canvas/provider"
+import { buildExportAssetUrlsByVideoId } from "@/components/editor/export/asset-urls"
 import { serializeProjectState } from "@/components/editor/canvas/persistence"
 import { defaultExportSettings } from "@/lib/editor-project/export-settings"
 
@@ -34,19 +30,17 @@ export function TitleBarExportButton() {
     const api = window.api?.export
     if (!api) return
     const state = serializeProjectState(artboard, videos, timelineClips)
+    const assetUrlsByVideoId = buildExportAssetUrlsByVideoId(
+      videos,
+      project.assetUrlsByVideoId,
+    )
     void api.openWindow({
       settings: defaultExportSettings(),
       state,
-      assetUrlsByVideoId: project.assetUrlsByVideoId,
+      assetUrlsByVideoId,
       outputBaseName: project.name,
     })
   }, [project, isExportable, artboard, videos, timelineClips])
-
-  const tooltipMessage = !project
-    ? "Open a project to export."
-    : !isExportable
-      ? "Add clips to the timeline to export."
-      : "Export…"
 
   return (
     <Button

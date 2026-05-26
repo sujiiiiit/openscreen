@@ -22,6 +22,10 @@ import { formatToVideoCodec } from "./codec-probe"
 import { buildExportStage } from "./build-stage"
 import { streamTimelineAudio } from "./decode-audio"
 import { planExportFrames, SourceFrameProvider } from "./source-frames"
+import {
+  findMissingActiveSourceVideoIds,
+  formatExportSourceList,
+} from "./source-validation"
 
 export type ExportStage =
   | "preparing"
@@ -99,6 +103,15 @@ export async function runExport(
   if (timelineDurationSec > MAX_TIMELINE_SECONDS) {
     throw new Error(
       `Timeline is longer than the export cap of ${MAX_TIMELINE_SECONDS / 3600} hours. Trim the timeline and try again.`,
+    )
+  }
+  const missingSourceVideoIds = findMissingActiveSourceVideoIds(
+    state,
+    assetUrlsByVideoId,
+  )
+  if (missingSourceVideoIds.length > 0) {
+    throw new Error(
+      `Export is missing source media for active clip(s): ${formatExportSourceList(state, missingSourceVideoIds)}. Reopen the project or restore the source file and try again.`,
     )
   }
 
@@ -229,37 +242,42 @@ export async function runExport(
 
     const providers = new Map<string, SourceFrameProvider>()
     try {
+      const sourceTimelineEntries = Array.from(
+        plan.sourceTimelinesByVideoId.entries(),
+      ).filter(([, timestamps]) => timestamps.length > 0)
+      const missingMetadataVideoIds = sourceTimelineEntries
+        .filter(([videoId]) => !videoMeta.has(videoId))
+        .map(([videoId]) => videoId)
+      if (missingMetadataVideoIds.length > 0) {
+        throw new Error(
+          `Export is missing source metadata for active clip(s): ${formatExportSourceList(state, missingMetadataVideoIds)}.`,
+        )
+      }
+
       // Spin up all decoders in parallel — each does a metadata read
       // (lightweight HTTP Range request) before the loop starts so frame 0
       // doesn't pay for N sequential init round-trips.
-      //
-      // Using Promise.allSettled (not Promise.all) so a single bad source
-      // doesn't abort the export — we render whatever sources we could
-      // open, and the missing ones are skipped per frame. Whatever
-      // succeeded is collected into `providers`; rejected entries are
-      // already disposed inside `SourceFrameProvider.create` on failure.
       const initResults = await Promise.allSettled(
-        Array.from(plan.sourceTimelinesByVideoId.entries()).map(
-          async ([videoId, timestamps]) => {
-            const meta = videoMeta.get(videoId)
-            if (!meta || timestamps.length === 0) return
-            const provider = await SourceFrameProvider.create({
-              url: meta.url,
-              intrinsicWidth: meta.intrinsicWidth,
-              intrinsicHeight: meta.intrinsicHeight,
-              timestamps,
-            })
-            providers.set(videoId, provider)
-          },
-        ),
+        sourceTimelineEntries.map(async ([videoId, timestamps]) => {
+          const meta = videoMeta.get(videoId)
+          if (!meta) return
+          const provider = await SourceFrameProvider.create({
+            url: meta.url,
+            intrinsicWidth: meta.intrinsicWidth,
+            intrinsicHeight: meta.intrinsicHeight,
+            timestamps,
+          })
+          providers.set(videoId, provider)
+        }),
       )
       throwIfAborted(signal)
-      // Surface decoder-init failures in a non-fatal log; the missing
-      // frames will simply not draw for the affected clip(s).
-      for (const r of initResults) {
-        if (r.status === "rejected" && process.env.NODE_ENV !== "production") {
-          console.warn("[export] source frame provider failed:", r.reason)
-        }
+      const failedDecoderVideoIds = initResults.flatMap((result, index) =>
+        result.status === "rejected" ? [sourceTimelineEntries[index][0]] : [],
+      )
+      if (failedDecoderVideoIds.length > 0) {
+        throw new Error(
+          `Export could not decode source video(s): ${formatExportSourceList(state, failedDecoderVideoIds)}. Try recording in H.264 or restore the source media and try again.`,
+        )
       }
 
       await output.start()
@@ -273,6 +291,16 @@ export async function runExport(
       let lastProgressAt = 0
       const startWall = performance.now()
       const frameDuration = 1 / settings.fps
+      // Catch the "silently black export" case (a source that opens but never
+      // decodes a single frame — corrupt or undecodable media) by tracking,
+      // per source, whether it ever produced a frame across the whole render.
+      // We deliberately do NOT penalize transient or trailing gaps: a clip
+      // whose audio track outlasts its video track yields `null` for the tail
+      // frames, which is expected and should still export the frames it has.
+      const expectedSourceIds = new Set(
+        sourceTimelineEntries.map(([videoId]) => videoId),
+      )
+      const decodedSourceIds = new Set<string>()
 
       for (let frame = 0; frame < totalFrames; frame++) {
         throwIfAborted(signal)
@@ -300,6 +328,7 @@ export async function runExport(
             if (!node) return
             node.image(canvas)
             node.visible(true)
+            decodedSourceIds.add(entry.videoId)
           }),
         )
 
@@ -329,6 +358,18 @@ export async function runExport(
             etaSeconds: framesDone >= 30 ? eta : null,
           })
         }
+      }
+
+      // A source that had active frames but never decoded a single one means
+      // its clips would be silently black in the output — fail loudly with the
+      // offending file name(s) rather than handing back a broken export.
+      const undecodedSourceIds = Array.from(expectedSourceIds).filter(
+        (videoId) => !decodedSourceIds.has(videoId),
+      )
+      if (undecodedSourceIds.length > 0) {
+        throw new Error(
+          `Export could not decode any frames for source video(s): ${formatExportSourceList(state, undecodedSourceIds)}. Try recording in H.264 or restore the source media and try again.`,
+        )
       }
 
       if (audioSource) {

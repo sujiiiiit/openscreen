@@ -50,6 +50,7 @@ Implemented:
 - Live video playback inside the artboard.
 - Timeline panel with top transport controls, playhead scrubbing, unlabeled neutral media lanes, and editable clips.
 - Non-destructive source trims for timeline clips.
+- Export/render pipeline for MP4 / WebM output.
 - Playhead-driven playback sync for screen, camera, and imported media.
 - Selection, dragging, resizing, and rotation through Konva `Transformer`.
 - Hover outline for unselected video nodes.
@@ -60,10 +61,10 @@ Implemented:
 - Workspace theme color token: `editor-workspace` = `#1e1e1e`.
 - Per-node video appearance via the Video sidebar tab: squircle corner radius + smoothing, a squircle-following border (width, color, alignment, offset), and a squircle-following drop shadow (color with baked alpha, X / Y, blur, spread).
 - Auto-routing of canvas / timeline selection to the Video tab via a `SidebarSelectionBridge`.
+- Non-destructive remove-from-canvas: deleting a video (recorded or imported) detaches it from the canvas/timeline but keeps it in the project; the Video tab lists it with an **Add** action to put it back.
 
 Not implemented yet:
 
-- Export/render pipeline.
 - Audio controls.
 - Cropping/masking.
 - Workspace grid outside the artboard.
@@ -90,7 +91,7 @@ Not implemented yet:
 | `components/editor/canvas/editor-workspace.tsx`           | Konva stage shell, layer composition, viewport sizing, zoom, pan, and keyboard shortcuts.                                                                       |
 | `components/editor/canvas/artboard-pixel-grid.tsx`        | Custom non-listening pixel grid renderer for high zoom inside the artboard.                                                                                     |
 | `components/editor/canvas/canvas-video-node.tsx`          | Live video node rendering, frame callbacks, object URL playback, cover crop attrs, squircle sceneFunc with passes for drop shadow (off-canvas-cast technique) and per-node border, hitFunc kept at the node body, and Konva node registration.   |
-| `components/editor/video-panel.tsx`                       | Video tab UI: file-card list of every video on the canvas, with the appearance controls (Corners — radius + smoothing; Border — width, color, alignment, offset; Shadow — color with baked alpha, X, Y, blur, spread) shown when a card is selected.              |
+| `components/editor/video-panel.tsx`                       | Video tab UI: file-card list of every project video — on-canvas videos (action: **Select**) followed by detached videos (action: **Add**) — with the appearance controls (Corners — radius + smoothing; Border — width, color, alignment, offset; Shadow — color with baked alpha, X, Y, blur, spread) shown when a card is selected.              |
 | `lib/rgba-color.ts`                                       | Minimal rgba parser / formatter shared by `CanvasVideoNode` and the Shadow color picker. Accepts `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb(...)`, `rgba(...)`, and `transparent`; emits a normalised `rgba(R, G, B, A)` string.                                                                |
 | `components/editor/sidebar/selection-bridge.tsx`          | Subscribes to canvas selection and switches the sidebar to the Video tab + opens the sidebar whenever a video is selected.                                      |
 | `lib/squircle.ts`                                         | Figma-style continuous-corner math. `computeSquircleCornerParams(radius, smoothing)` and `traceSquirclePath(ctx, w, h, params)` for allocation-free hot path.   |
@@ -179,7 +180,8 @@ Important actions:
 - `updateVideoAppearance(id, patch)` — partial update covering `cornerRadius`, `cornerSmoothing`, `borderWidth`, `borderColor`, `borderOffset`, `borderAlignment`, `shadowColor`, `shadowBlur`, `shadowOffsetX`, `shadowOffsetY`, `shadowSpread`. Bypasses the `locked` gate (locking only blocks geometry); the no-op bail-out compares all eleven fields so a slider parked at its current value never triggers a redraw.
 - `setVideoLocked(id, locked)`
 - `duplicateVideo(id)`
-- `deleteVideo(id)`
+- `deleteVideo(id)` — **non-destructive**: detaches the video from the canvas/timeline (moves it to `detachedVideos`, drops its clip) instead of removing it from the project. Despite the name, no project data or asset file is deleted.
+- `addVideoToCanvas(id)` — inverse of `deleteVideo`: re-attaches a detached video to the canvas with a fresh full-length timeline clip and selects it.
 - `setArtboardPreset(id)`
 - `setViewportSize(size)`
 - `setViewTransform(transform)`
@@ -195,7 +197,7 @@ Important actions:
 
 Context hooks:
 
-- `useEditorCanvasMedia()`: videos, selection, selected video, import error.
+- `useEditorCanvasMedia()`: `videos` (on canvas), `detachedVideos` (in project, removed from canvas), selection, selected video, import error.
 - `useEditorCanvasArtboard()`: current artboard.
 - `useEditorCanvasView()`: viewport size and viewport transform.
 - `useEditorCanvasTimeline()`: clips, selected clip, playhead time, duration, timeline zoom, fit mode, playback state, primary audio video id.
@@ -213,8 +215,8 @@ Snapshot-based, in-memory undo/redo for the document state. Lives entirely in `E
 
 Scope:
 
-- Restores `{ artboard, videos, timelineClips }` — the same slice the autosave fingerprint covers.
-- Does NOT restore selection (`selectedItemId`), playhead time (`timelineTime`), timeline zoom/scroll, workspace view transform, hover preview, or any other session-only state. Selection is invalidated only when the previously-selected video no longer exists in the restored set; otherwise it is left alone. The playhead is clamped if the restored duration is shorter than its current position.
+- Restores `{ artboard, videos, timelineClips }` — the same slice the autosave fingerprint covers. The serialized `videos` array carries both on-canvas and detached videos (split by `onCanvas`), so a detach or re-add is restored as an atomic undo step: restore re-splits the array back into the `videos` / `detachedVideos` lists.
+- Does NOT restore selection (`selectedItemId`), playhead time (`timelineTime`), timeline zoom/scroll, workspace view transform, hover preview, or any other session-only state. Selection is invalidated only when the previously-selected video no longer exists in the restored **on-canvas** set; otherwise it is left alone. The playhead is clamped if the restored duration is shorter than its current position.
 - When the restored artboard dimensions differ from the current ones (e.g., undoing a preset change), the viewport is auto-refit to the new size via `getFitViewTransform`. This matches `setArtboardPreset`'s "always fit on size change" rule so the canvas never strands at a stale zoom after an undo.
 
 Capture point:
@@ -231,7 +233,7 @@ Coalescing:
 
 Destructive flush:
 
-- `addVideoFile`, `addRemoteVideo`, `duplicateVideo`, `deleteVideo`, and `setArtboardPreset` call `flushAutosaveNow()` **before** they mutate state. The helper pushes the pre-destructive snapshot to history **synchronously** (so the boundary survives even when another save is already in flight — `flushAutosave` would queue itself and the in-memory boundary would otherwise be lost), then kicks the async drain to write that snapshot to disk. The destructive change that follows lands as its own entry on the next autosave fire.
+- `addVideoFile`, `addRemoteVideo`, `duplicateVideo`, `deleteVideo`, `addVideoToCanvas`, and `setArtboardPreset` call `flushAutosaveNow()` **before** they mutate state. The helper pushes the pre-destructive snapshot to history **synchronously** (so the boundary survives even when another save is already in flight — `flushAutosave` would queue itself and the in-memory boundary would otherwise be lost), then kicks the async drain to write that snapshot to disk. The destructive change that follows lands as its own entry on the next autosave fire.
 
 Storage:
 
@@ -332,7 +334,7 @@ On import:
 - `readVideoMetadata()` creates a temporary `HTMLVideoElement`.
 - It reads `videoWidth` and `videoHeight` from `loadedmetadata`.
 - The video is placed as a cover fit over the current artboard.
-- The created `objectUrl` is stored and revoked on provider unmount, import failure, or delete when no remaining duplicated video references the same URL.
+- The created `objectUrl` is stored and revoked on provider unmount, import failure, or project switch. Removing a video from the canvas (`deleteVideo`) is now a detach and deliberately does **not** revoke the URL — the video remains in the project and may be re-added. In practice on-canvas/detached videos hold `file://` URLs (recordings resolve from `project.assets`; imports resolve from the copied asset), so there is no blob memory to reclaim until the project unloads.
 
 For rendering:
 
@@ -416,7 +418,7 @@ Tab routing:
 Panel layout:
 
 - The Video panel has two mutually-exclusive views driven entirely by `selectedItemId`. It uses `Tabs` from `@/components/ui/tabs` as a controlled motion container only — there is no visible tab bar; the active value is fully derived from selection, with no `onValueChange` so nothing inside the Tabs subtree can toggle the view on its own:
-  - **List view** (no selection): heading + one-line description + a single-column stack of `Squircle` file cards, one per video on the canvas. Each card shows the `FileEmpty02` icon on the left and the file name + file size stacked on the right (formatted via a local `formatFileSize` helper — no monospace digit treatment). Tapping a card calls `selectItem(id)`, which is the single source of truth: canvas Transformer, timeline clip highlight, and the panel itself all derive from it.
+  - **List view** (no selection): heading + one-line description + a single-column stack of `Squircle` file cards — every on-canvas video first, then every detached video. Each card shows the `FileEmpty02` icon on the left and the file name + file size stacked on the right (formatted via a local `formatFileSize` helper — no monospace digit treatment), with a hover-revealed action affordance on the right. On-canvas cards show **Select** and call `selectItem(id)` (the single source of truth: canvas Transformer, timeline clip highlight, and the panel itself all derive from it); detached cards show **Add** and call `addVideoToCanvas(id)`, which re-attaches the video and selects it. The card chrome is identical for both — only the affordance label and click action change.
   - **Settings view** (video selected): replaces the heading with a `Button variant="link"` "← Videos" affordance at the same `text-sm font-semibold` slot, with its own one-line description below. Clicking it calls `selectItem(null)`, returning the user to list view and clearing the canvas / timeline selection in the same hop. Beneath the heading sit three appearance groups:
     - **Corners** — radius + smoothing.
     - **Border** — width slider, color swatch with native `<input type="color">`, alignment radiogroup of `inside | center | outside`, and offset slider in `[-64, +64]` artboard px. All Border controls except Width are disabled while `borderWidth === 0`, mirroring Figma's "no stroke when width is 0" behaviour.
@@ -450,10 +452,10 @@ Timeline model:
 - `start` and `end` are timeline seconds.
 - `sourceIn` and `sourceOut` are non-destructive source seconds.
 - Minimum clip duration is `1 / 30` seconds.
-- The project timeline duration is the larger of the longest source asset and the furthest edited clip end.
+- The project timeline duration is the larger of the longest source asset and the furthest edited clip end. An **empty** timeline (no clips) reports a duration of `0`, so the transport reads `00:00.00`; the `1 / 30` minimum-clip floor only applies once at least one clip exists, to guarantee a non-zero scrub range.
 - Timeline transport controls live in the footer's top toolbar, above the ruler and lanes. They use the shared `Button` component, theme foreground/muted colors, `text-xs` proportional timer text in `0:01` / `1:05:00` format, and skip-back/play/skip-forward icon controls. Play/pause uses the same `PlayIcon` / `PauseIcon` pair as the recorder controls.
 - The ruler may extend past the longest clip for breathing room, but the playhead is capped at `timelineDuration`: `EditorTimelinePanel` passes `maxCursorTime={timelineDuration}` to the `Timeline` component, which clamps cursor drag and time-area clicks so the user cannot scrub into the empty trailing area.
-- Timeline zoom controls live in the footer's top toolbar. Fit is the default timeline view. Zoom in/out changes horizontal density and exits Fit; Fit computes a scale from the visible timeline width so the widest timeline clip block fits the viewport, then scrolls to that clip's start if it begins later in the timeline.
+- Timeline zoom controls live in the footer's top toolbar as three standalone shared `Button` instances (`variant="outline"`, `size="sm"`; the zoom-out/zoom-in icon buttons use `size="icon-sm"` for matching height). They match the `Button variant="outline" size="sm"` used by the artboard-preset and canvas-zoom dropdowns, keeping the whole footer toolbar on one button style instead of a custom segmented wrapper. Fit is the default timeline view. Zoom in/out changes horizontal density and exits Fit; Fit computes a scale from the visible timeline width so the widest timeline clip block fits the viewport, then scrolls to that clip's start if it begins later in the timeline.
 - The footer owns the timeline surface background; the nested top toolbar and timeline panel use transparent backgrounds.
 - The timeline uses unlabeled neutral lanes with a 30 px start inset. There is no fixed track label rail or role-colored track background; clip role is communicated through the clip icon, color, and file name.
 - The lane area disables the full-height per-second grid background and avoids row divider borders; compact major ruler dots remain available for time orientation.
@@ -509,10 +511,10 @@ Selection:
 - Click a video to select it.
 - Click the empty artboard hit rect to deselect.
 - Selected video attaches one Konva `Transformer`.
-- Selected video also shows a floating DOM toolbar with lock, duplicate, and delete actions.
+- Selected video also shows a floating DOM toolbar with lock, duplicate, and delete actions. The delete action is **remove-from-canvas** (detach), not a project delete — see Project Persistence → "Detached videos".
 - Locking keeps the video selectable and keeps the toolbar visible, but disables dragging, resize handles, side handles, and rotation controls. While locked, the toolbar collapses to the unlock action only and remeasures itself so it remains centered.
 - Selection and drag persistence are handled at the `Stage` level by delegating events from nodes named `video-node`, rather than attaching full interaction handlers to every canvas node.
-- Shortcuts when a node is selected: `Cmd/Ctrl + Shift + L` toggles lock, `Cmd/Ctrl + D` duplicates, `Delete` or `Backspace` deletes, and `Arrow` keys nudge the node by 1 artboard pixel (`Shift + Arrow` nudges by 10). Shortcuts are ignored while typing in editable controls.
+- Shortcuts when a node is selected: `Cmd/Ctrl + Shift + L` toggles lock, `Cmd/Ctrl + D` duplicates, `Delete` or `Backspace` removes the node from the canvas (detaches it — the video stays in the project and can be re-added from the Video tab), and `Arrow` keys nudge the node by 1 artboard pixel (`Shift + Arrow` nudges by 10). Shortcuts are ignored while typing in editable controls.
 
 Hovering:
 
@@ -664,24 +666,27 @@ Schema (`electron/ipc/project-schema.ts`):
 - `version: 1` — first line of every read; mismatches fall back to "no saved state" and the renderer re-synthesises defaults.
 - `artboard: { presetId, width, height, background, padding, grain }`.
   - `background` is either `null`, `{ type: "color", value }`, or `{ type: "wallpaper", value, blurRadius? }`. For wallpapers, `value` is a stable `WallpaperId` from `lib/wallpapers.ts` — wallpaper assets ship with the app and are not copied per-project.
-- `videos: ProjectVideo[]` — one entry per `CanvasVideoItem`, including its `source`:
+- `videos: ProjectVideo[]` — one entry per project video (both on-canvas and detached), including its `source`:
   - `{ kind: "recording", assetRole: "screen" | "camera" }` — file path **and byte size** resolve through `project.assets` (which itself resolves from `recording.json`); deliberately no `fileSize` on the recording source, so the size never goes stale relative to the on-disk `.mov`.
   - `{ kind: "imported", relativePath, fileSize }` — `relativePath` is always inside `<project>/assets/videos/<id>/`.
-- `timelineClips: ProjectTimelineClip[]` — `start`, `end`, `sourceIn`, `sourceOut` per clip.
+  - `onCanvas?: boolean` — **optional, back-compat-safe** (added without a version bump per the "adding optional fields is safe" rule). Missing or `true` means the video is on the canvas; `false` marks a **detached** video (removed from the canvas but kept in the project). `serializeProjectState` writes on-canvas videos first with the field omitted (so legacy `project.json` stays byte-identical and the post-hydration fingerprint is a no-op), then appends detached videos tagged `onCanvas: false`.
+- `timelineClips: ProjectTimelineClip[]` — `start`, `end`, `sourceIn`, `sourceOut` per clip. Only on-canvas videos have a clip; detached videos carry none.
 - `updatedAtUnixMs` — refreshed by main on every successful write.
 
-Not persisted: selection, playhead time, timeline zoom/scroll, viewport transform, hover preview state, the in-memory undo/redo history (`historyRef`), the session-only imported URL cache (`sessionImportedUrlsRef`), all `*Ref` runtime state. The view always re-fits the artboard on load.
+Not persisted: selection, playhead time, timeline zoom/scroll, viewport transform, hover preview state, the in-memory undo/redo history (`historyRef`), the session-only imported URL cache (`sessionImportedUrlsRef`), runtime `objectUrl` strings, all `*Ref` runtime state. The view always re-fits the artboard on load.
 
 Derived-on-load (not persisted, but reconstructed every hydration): a recording's `CanvasVideoItem.fileSize` is read back from `ProjectAsset.fileSize`, not from `project.json`. Both hydration paths (fast-path restore and slow-path synthesis) and both undo/redo restores route through `resolveFileSizeForRestore`. Imported videos keep their persisted `source.fileSize` instead.
 
+Export source URLs are also runtime-only. `ProjectSummary.assetUrlsByVideoId` is computed by main when a project loads, but the slow path after a fresh recording starts with no saved `project.json`, so that map can be empty while the renderer already has valid screen/camera `objectUrl` file URLs. The Export button therefore builds its payload with `buildExportAssetUrlsByVideoId(videos, project.assetUrlsByVideoId)`, preferring each live `CanvasVideoItem.objectUrl` and falling back to the project-summary URL. Nothing about that URL map is written back into `project.json`.
+
 Hydration (in `components/editor/canvas/provider.tsx`):
 
-- Fast path — `project.state` present: write the saved `artboard`, `videos`, and `timelineClips` directly into state. Each video's `objectUrl` is taken from `ProjectSummary.assetUrlsByVideoId[video.id]`, which main computes by joining the project folder with `source.relativePath` (or the resolved recording asset URL). Missing files leave that entry undefined — the renderer keeps the node so the user can see what is broken instead of silently dropping it.
+- Fast path — `project.state` present: write the saved `artboard`, `videos`, and `timelineClips` directly into state. Saved `videos` are split by `onCanvas`: `onCanvas !== false` videos go to the live `videos` list, `onCanvas === false` videos go to the `detachedVideos` list (Video-tab-only, no canvas node). Clips are filtered to those whose `videoId` is an on-canvas video (defensive against a stale clip pointing at a detached video). Each video's `objectUrl` — including detached ones — is taken from `ProjectSummary.assetUrlsByVideoId[video.id]` (main resolves URLs for the entire `state.videos` array, so a detached video's file URL is ready the moment it is re-added). Missing files leave that entry undefined — the renderer keeps the node so the user can see what is broken instead of silently dropping it.
 - Slow path — `project.state` is `null` (first open after a recording, or schema mismatch): the existing flow runs (probe screen/camera metadata via `readVideoMetadata`, pick an Auto vs Wide preset, add videos with `source: { kind: "recording", assetRole }`). The next user edit creates `project.json`.
 
 Autosave:
 
-- A single effect watches `artboard`, `videos`, and `timelineClips`. Any change schedules a `setTimeout` after `PROJECT_STATE_AUTOSAVE_DEBOUNCE_MS` (500 ms) that calls `window.api.projects.saveState(project.path, snapshot)`.
+- A single effect watches `artboard`, `videos`, `detachedVideos`, and `timelineClips`. Any change schedules a `setTimeout` after `PROJECT_STATE_AUTOSAVE_DEBOUNCE_MS` (500 ms) that calls `window.api.projects.saveState(project.path, snapshot)`. Every `serializeProjectState` call site (autosave drain, synchronous flush, both hydration seeds) passes `detachedVideosRef.current` as the 4th argument; the export snapshot omits it (export must never include detached videos).
 - `window` `blur` and `beforeunload` listeners flush the pending timer synchronously so quick edits before quit make it to disk.
 - A "single writer + pending" pair (`autosaveInFlightRef` / `autosavePendingRef`) collapses concurrent writes — at most one IPC save is in flight, and any change made during it triggers one follow-up write when it returns.
 - Both the debounced effect and the flush listeners gate on `hydratedProjectIdRef.current === project.id`, so saves never fire before hydration completes or with the wrong project's path.
@@ -690,6 +695,15 @@ Imported video files:
 
 - `addVideoFile(file)` probes the file with a transient blob URL (for intrinsic size + duration), then ships `file.arrayBuffer()` over IPC to `projects:importAsset`. The main handler writes it to `<project>/assets/videos/<id>/<sanitized-name>` and returns the `file://` URL plus the relative path. The `CanvasVideoItem` ends up with `source: { kind: "imported", relativePath, fileSize }` and uses the returned URL as its `objectUrl`.
 - Filenames are sanitised in main (`sanitizeFileName`) and the resolved path is rejected unless it is inside the project folder, so a hostile asset can never escape `<project>/assets/`.
+
+Detached videos (remove-from-canvas / add-back lifecycle):
+
+- "Delete" from the canvas — the selection toolbar trash button, the `Delete` / `Backspace` shortcut — is **non-destructive**. `deleteVideo(id)` moves the whole `CanvasVideoItem` from `videos` to `detachedVideos`, drops its timeline clip, clears selection if it was selected, and **does not revoke its object URL** (the file still belongs to the project). The same path applies to both recordings and imported videos.
+- The renderer keeps two in-memory lists: `videos` (on canvas, the only list every existing consumer — canvas nodes, timeline, playback, export, padding, primary-audio — reads) and `detachedVideos` (Video-tab-only). Detached videos are deliberately **not** a flag on `videos` so the 5000-node hot paths never iterate or filter a detached entry.
+- The Video tab lists `videos` then `detachedVideos`; on-canvas cards show **Select** (calls `selectItem`), detached cards show **Add** (calls `addVideoToCanvas`). The card chrome is identical — only the affordance label and click action differ.
+- `addVideoToCanvas(id)` is the inverse: it moves the item back to `videos`, mints a **fresh full-length** `createTimelineClip` (the pre-removal trim/position on the timeline is intentionally *not* restored), and selects the restored video. The item keeps its stored canvas position, size, and appearance (corners/border/shadow) because those live on the `CanvasVideoItem` itself. The item is **appended** to `videos`, so a re-added video returns to the top of the canvas z-order (front-most) rather than its original stacking index — "re-add = bring to front", matching how a freshly imported video lands.
+- Both `deleteVideo` and `addVideoToCanvas` are destructive-flush + history-tagged actions (`"delete"` / `"add"`, both in `ALWAYS_NEW_ENTRY_TAGS`), so each is exactly one undo step. Undo/redo restore re-splits the snapshot's `videos` by `onCanvas`, so detach and re-add round-trip through history cleanly.
+- There is **no permanent-delete UI** today: a detached video persists in `project.json` (with `onCanvas: false`) indefinitely. Removing it from the project entirely (and deleting the underlying imported asset) is a future affordance.
 
 Atomic writes:
 
@@ -738,7 +752,7 @@ Exporting reads the same `ProjectStateV1` snapshot the autosave writes, replays 
 
 Trigger:
 
-- Editor titlebar Export button (`components/editor/title-bar-export-button.tsx`). Disabled when the project has no timeline clips. On click it serialises the current state with `serializeProjectState(artboard, videos, timelineClips)` and calls `window.api.export.openWindow({ settings, state, assetUrlsByVideoId, outputBaseName })`. The main process stashes the payload and opens the Export window.
+- Editor titlebar Export button (`components/editor/title-bar-export-button.tsx`). Disabled when the project has no timeline clips. On click it serialises the current state with `serializeProjectState(artboard, videos, timelineClips)`, resolves export source URLs with `buildExportAssetUrlsByVideoId(videos, project.assetUrlsByVideoId)`, and calls `window.api.export.openWindow({ settings, state, assetUrlsByVideoId, outputBaseName })`. The live URL merge is required for immediate post-recording export: before a reload, `ProjectSummary.assetUrlsByVideoId` can still be empty because main computed it before the slow-path canvas videos were synthesized and autosaved. The main process stashes the payload and opens the Export window.
 
 Window:
 
@@ -773,6 +787,8 @@ Settings (`electron/ipc/export-schema.ts` + mirror in `types/api.d.ts` + rendere
 
 - `MAX_TIMELINE_SECONDS = 4 h` — refuse to start an export above this. A multi-hour blocking encode that crashes near the end is unrecoverable; users with longer content should trim first.
 - `MAX_OUTPUT_PIXELS = 3840 × 2160` — refuse output dimensions above the 4K nominal pixel budget. The pixel-budget cap in `exportResolutionPixels` already keeps presets in line; this catches custom artboards at `resolution: 'artboard'`.
+- Active timeline clips must resolve to source media before the export stage is built. Missing source URLs now fail the job instead of producing a correct-duration white background encode.
+- Source decoder startup is fail-fast for every active source. If Mediabunny/WebCodecs cannot open a source (for example an unsupported recording codec), the export surfaces an error instead of silently skipping that clip. The frame loop additionally tracks, per source, whether it ever produced a decoded canvas; after the loop it fails the job (naming the offending file) if any source that had active frames decoded **zero** frames end-to-end, which catches "decoder opened but never produced pixels" failures before a blank file can be written. This is deliberately a per-source *total*, not a per-frame window: a clip whose audio track outlasts its video track yields `null` for its trailing frames, and that must still export the frames it has rather than abort.
 - Every `await` inside the frame loop, the audio mixer, and the audio-presence probe checks the `AbortSignal` so cancel response is at most one frame's latency.
 
 Rendering pipeline (`components/editor/export/`):
@@ -784,7 +800,7 @@ Rendering pipeline (`components/editor/export/`):
   2. Builds one `AudioBufferSink.buffers(sourceIn, sourceOut)` async iterator per timeline clip — lazy decode, packet-by-packet.
   3. Walks the output timeline in fixed 0.5 s windows. For each window: allocate a window-sized `AudioBuffer` (~192 KB at 48 kHz stereo), mix-add every overlapping clip's decoded chunks into it (so overlapping clips compose instead of clobbering), `await audioSource.add(windowBuffer)` to honour encoder backpressure, then drop the window buffer to GC.
   Peak RAM stays bounded under ~10 MB regardless of timeline length or source size. Output sample rate is the max observed across all sources; mismatched sources are linearly resampled inline.
-- `run-export.ts`: orchestrates the loop. Emits an `onStage(stage)` callback at every phase boundary (`preparing`, `decoding-audio`, `encoding`, `muxing-audio`, `finalizing`) so the export window can swap its headline + status text in step with the pipeline. **Probe-before-add**: because Mediabunny doesn't let you remove a track after `output.start()`, the runner first calls `probeHasAnyAudio` to open each source briefly and check `getPrimaryAudioTrack()`. If any source has audio, an `AudioBufferSource` is added; otherwise the file is video-only. The source-decoder spin-up uses `Promise.allSettled` so a single bad source doesn't abort the export — surviving sources still render, missing ones are skipped per frame. For each output frame:
+- `run-export.ts`: orchestrates the loop. Emits an `onStage(stage)` callback at every phase boundary (`preparing`, `decoding-audio`, `encoding`, `muxing-audio`, `finalizing`) so the export window can swap its headline + status text in step with the pipeline. **Probe-before-add**: because Mediabunny doesn't let you remove a track after `output.start()`, the runner first calls `probeHasAnyAudio` to open each source briefly and check `getPrimaryAudioTrack()`. If any source has audio, an `AudioBufferSource` is added; otherwise the file is video-only. The source-decoder spin-up still runs active sources in parallel, but any missing metadata or decoder failure aborts the job; successful-but-blank exports are worse than a visible error because they look complete until playback. For each output frame:
   1. `node.visible(false)` on every video node (so a clip that ended last frame doesn't ghost a stale image).
   2. In parallel, `await provider.next()` for each active source → assign the returned canvas to its Konva node via `node.image(canvas)` + `node.visible(true)`.
   3. `handles.contentLayer.draw()` — only the content layer; background stays untouched.

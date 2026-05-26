@@ -44,6 +44,14 @@ export interface ProjectVideo {
   id: string
   fileName: string
   source: ProjectVideoSource
+  /**
+   * Whether the video is currently placed on the canvas / timeline. Optional
+   * for back-compat: a missing value (every project written before this field
+   * existed) means `true`. `false` marks a video the user removed from the
+   * canvas — it stays in the project (and in this array) so the Video tab can
+   * offer to add it back, but renders no canvas node and has no timeline clip.
+   */
+  onCanvas?: boolean
   intrinsicWidth: number
   intrinsicHeight: number
   durationMs: number
@@ -278,10 +286,16 @@ function parseVideo(value: unknown): ProjectVideo | null {
   const source = parseVideoSource(value['source'])
   if (!source) return null
 
+  // Optional, tolerant: only a real `false` detaches the video. Anything else
+  // (missing field on legacy files, or `true`) leaves it on the canvas.
+  const onCanvasRaw = value['onCanvas']
+  const onCanvas = typeof onCanvasRaw === 'boolean' ? onCanvasRaw : undefined
+
   return {
     id,
     fileName,
     source,
+    onCanvas,
     intrinsicWidth: value['intrinsicWidth'] as number,
     intrinsicHeight: value['intrinsicHeight'] as number,
     durationMs: value['durationMs'] as number,

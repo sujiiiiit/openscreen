@@ -132,6 +132,12 @@ type TimelineVisibilityWindow = {
 
 type EditorCanvasContextValue = {
   videos: CanvasVideoItem[]
+  /**
+   * Videos that belong to the project but are not currently on the canvas /
+   * timeline (the user removed them). The Video tab lists these alongside the
+   * on-canvas videos and offers an "Add" action to put them back.
+   */
+  detachedVideos: CanvasVideoItem[]
   selectedItemId: string | null
   selectedVideo: CanvasVideoItem | null
   timelineClips: CanvasTimelineClip[]
@@ -157,6 +163,7 @@ type EditorCanvasContextValue = {
   setVideoLocked: (id: string, locked: boolean) => void
   duplicateVideo: (id: string) => void
   deleteVideo: (id: string) => void
+  addVideoToCanvas: (id: string) => void
   setArtboardPreset: (id: ArtboardPresetId) => void
   setArtboardBackground: (background: ArtboardBackground | null) => void
   setArtboardGrain: (grain: number) => void
@@ -195,7 +202,11 @@ type EditorCanvasContextValue = {
 
 type EditorCanvasMediaContextValue = Pick<
   EditorCanvasContextValue,
-  "videos" | "selectedItemId" | "selectedVideo" | "importError"
+  | "videos"
+  | "detachedVideos"
+  | "selectedItemId"
+  | "selectedVideo"
+  | "importError"
 >
 
 type EditorCanvasArtboardContextValue = Pick<
@@ -233,6 +244,7 @@ type EditorCanvasActionsContextValue = Pick<
   | "setVideoLocked"
   | "duplicateVideo"
   | "deleteVideo"
+  | "addVideoToCanvas"
   | "setArtboardPreset"
   | "setArtboardBackground"
   | "setArtboardGrain"
@@ -570,6 +582,13 @@ function clampTimelineTime(time: number, duration: number) {
 
 export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const [videos, setVideos] = useState<CanvasVideoItem[]>([])
+  // Videos removed from the canvas but still part of the project. They render
+  // no canvas node and have no timeline clip; only the Video tab reads them so
+  // it can offer "Add" to put them back. Kept as a separate list (rather than
+  // a flag on `videos`) so every existing consumer of `videos` — canvas,
+  // timeline, playback, export — stays untouched and the 5000-node hot paths
+  // never see a detached entry.
+  const [detachedVideos, setDetachedVideos] = useState<CanvasVideoItem[]>([])
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null)
   const [artboard, setArtboard] = useState<EditorArtboard>(DEFAULT_ARTBOARD)
   const [viewportSize, setViewportSizeState] = useState<CanvasSize>(
@@ -600,6 +619,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
 
   const objectUrlsRef = useRef(new Set<string>())
   const videosRef = useRef(videos)
+  const detachedVideosRef = useRef(detachedVideos)
   const videoByIdRef = useRef(buildVideoById(videos))
   const timelineClipsRef = useRef(timelineClips)
   const timelineClipByVideoIdRef = useRef(
@@ -762,7 +782,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         const snapshot = serializeProjectState(
           artboardRef.current,
           videosRef.current,
-          timelineClipsRef.current
+          timelineClipsRef.current,
+          detachedVideosRef.current
         )
         const fingerprint = fingerprintProjectState(snapshot)
         // Snapshot the tag at the same instant as the state so a user
@@ -859,7 +880,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     const snapshot = serializeProjectState(
       artboardRef.current,
       videosRef.current,
-      timelineClipsRef.current
+      timelineClipsRef.current,
+      detachedVideosRef.current
     )
     const fingerprint = fingerprintProjectState(snapshot)
     const capturedTag = historyCommitTagRef.current
@@ -878,6 +900,13 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     timelineVisibilityWindowRef.current = null
   }, [])
 
+  const commitDetachedVideosRef = useCallback(
+    (nextDetached: CanvasVideoItem[]) => {
+      detachedVideosRef.current = nextDetached
+    },
+    []
+  )
+
   const commitTimelineClipsRef = useCallback(
     (nextClips: CanvasTimelineClip[]) => {
       timelineClipsRef.current = nextClips
@@ -890,6 +919,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     commitVideosRef(videos)
   }, [commitVideosRef, videos])
+
+  useEffect(() => {
+    commitDetachedVideosRef(detachedVideos)
+  }, [commitDetachedVideosRef, detachedVideos])
 
   useEffect(() => {
     commitTimelineClipsRef(timelineClips)
@@ -920,6 +953,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   }, [viewTransform])
 
   const timelineDuration = useMemo(() => {
+    // An empty timeline has no duration — report 0 so the transport reads
+    // 00:00.00. The minimum-clip floor only applies once at least one clip
+    // exists, to guarantee a non-zero scrub range.
+    if (timelineClips.length === 0) return 0
+
     const clipDuration = timelineClips.reduce(
       (duration, clip) => Math.max(duration, clip.end),
       0
@@ -2550,45 +2588,90 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     [commitTimelineClipsRef, commitVideosRef, flushAutosaveNow]
   )
 
+  // "Delete" from the canvas / timeline does NOT remove the video from the
+  // project — it detaches it. The full item (position, size, appearance, and
+  // its object URL) moves to `detachedVideos` so `addVideoToCanvas` can put it
+  // back later, and so the Video tab keeps listing it. We intentionally drop
+  // its timeline clip; re-adding creates a fresh full-length clip. The object
+  // URL is left alive because the video is still part of the project.
   const deleteVideo = useCallback(
     (id: string) => {
       const currentVideos = videosRef.current
-      const deletedVideo = currentVideos.find((video) => video.id === id)
-      if (!deletedVideo) return
+      const detachedVideo = currentVideos.find((video) => video.id === id)
+      if (!detachedVideo) return
+      // Already detached? Nothing to do (defensive against double-fire).
+      if (detachedVideosRef.current.some((video) => video.id === id)) return
 
       flushAutosaveNow()
       historyCommitTagRef.current = "delete"
+
       const nextVideos = currentVideos.filter((video) => video.id !== id)
-      const objectUrlStillUsed = nextVideos.some(
-        (video) => video.objectUrl === deletedVideo.objectUrl
-      )
-
-      // `objectUrl` may now be a `file://` URL pointing into the project
-      // folder — those are owned by the project, not the renderer, so we only
-      // ever revoke blob: URLs created via `URL.createObjectURL`.
-      if (
-        !objectUrlStillUsed &&
-        deletedVideo.objectUrl.startsWith("blob:") &&
-        objectUrlsRef.current.has(deletedVideo.objectUrl)
-      ) {
-        objectUrlsRef.current.delete(deletedVideo.objectUrl)
-        URL.revokeObjectURL(deletedVideo.objectUrl)
-      }
-
       commitVideosRef(nextVideos)
       const nextClips = timelineClipsRef.current.filter(
         (clip) => clip.videoId !== id
       )
       commitTimelineClipsRef(nextClips)
+      const nextDetached = [...detachedVideosRef.current, detachedVideo]
+      commitDetachedVideosRef(nextDetached)
+
       setVideos(nextVideos)
       setTimelineClips(nextClips)
+      setDetachedVideos(nextDetached)
 
       if (selectedItemIdRef.current === id) {
         selectedItemIdRef.current = null
         setSelectedItemId(null)
       }
     },
-    [commitTimelineClipsRef, commitVideosRef, flushAutosaveNow]
+    [
+      commitDetachedVideosRef,
+      commitTimelineClipsRef,
+      commitVideosRef,
+      flushAutosaveNow,
+    ]
+  )
+
+  // Inverse of `deleteVideo`: put a detached video back on the canvas and
+  // timeline. The stored item keeps its prior position / size / appearance;
+  // we mint a fresh full-length timeline clip (the trim from before removal is
+  // intentionally not preserved) and select the restored video.
+  const addVideoToCanvas = useCallback(
+    (id: string) => {
+      const detached = detachedVideosRef.current.find(
+        (video) => video.id === id
+      )
+      if (!detached) return
+      // Guard against an id that somehow already lives on the canvas.
+      if (videosRef.current.some((video) => video.id === id)) return
+
+      // Adding is a discrete, undoable boundary — flush the prior edit window
+      // as its own history entry, then tag this mutation so the next autosave
+      // records the add separately.
+      flushAutosaveNow()
+      historyCommitTagRef.current = "add"
+
+      const nextDetached = detachedVideosRef.current.filter(
+        (video) => video.id !== id
+      )
+      commitDetachedVideosRef(nextDetached)
+      const nextVideos = [...videosRef.current, detached]
+      commitVideosRef(nextVideos)
+      const nextClips = [...timelineClipsRef.current, createTimelineClip(detached)]
+      commitTimelineClipsRef(nextClips)
+
+      setDetachedVideos(nextDetached)
+      setVideos(nextVideos)
+      setTimelineClips(nextClips)
+
+      selectedItemIdRef.current = id
+      setSelectedItemId(id)
+    },
+    [
+      commitDetachedVideosRef,
+      commitTimelineClipsRef,
+      commitVideosRef,
+      flushAutosaveNow,
+    ]
   )
 
   // Pure helper: pick the URL for a restored video. Recording sources come
@@ -2599,7 +2682,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const resolveObjectUrlForRestore = useCallback(
     (video: ProjectStateV1["videos"][number]): string => {
       const currentProject = projectRef.current
-      const existing = videoByIdRef.current.get(video.id)
+      const existing =
+        videoByIdRef.current.get(video.id) ??
+        detachedVideosRef.current.find((item) => item.id === video.id)
       if (existing && existing.objectUrl) return existing.objectUrl
       const fromProject = currentProject?.assetUrlsByVideoId[video.id]
       if (fromProject) return fromProject
@@ -2623,7 +2708,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const resolveFileSizeForRestore = useCallback(
     (video: ProjectStateV1["videos"][number]): number => {
       if (video.source.kind === "imported") return video.source.fileSize
-      const existing = videoByIdRef.current.get(video.id)
+      const existing =
+        videoByIdRef.current.get(video.id) ??
+        detachedVideosRef.current.find((item) => item.id === video.id)
       if (existing && existing.fileSize > 0) return existing.fileSize
       const assetRole = video.source.assetRole
       const asset = projectRef.current?.assets.find(
@@ -2652,16 +2739,24 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         grain: savedState.artboard.grain,
         padding: savedState.artboard.padding,
       }
-      const restoredVideos: CanvasVideoItem[] = savedState.videos.map(
-        (video) =>
-          projectVideoToCanvasVideo(
-            video,
-            resolveObjectUrlForRestore(video),
-            resolveFileSizeForRestore(video)
-          )
-      )
-      const restoredClips: CanvasTimelineClip[] =
-        savedState.timelineClips.map(projectClipToCanvasClip)
+      const toCanvasVideo = (video: ProjectStateV1["videos"][number]) =>
+        projectVideoToCanvasVideo(
+          video,
+          resolveObjectUrlForRestore(video),
+          resolveFileSizeForRestore(video)
+        )
+      const restoredVideos: CanvasVideoItem[] = savedState.videos
+        .filter((video) => video.onCanvas !== false)
+        .map(toCanvasVideo)
+      const restoredDetached: CanvasVideoItem[] = savedState.videos
+        .filter((video) => video.onCanvas === false)
+        .map(toCanvasVideo)
+      // Clips only ever belong to on-canvas videos; filter defensively so a
+      // stale clip for a detached video can't slip into the live timeline.
+      const restoredVideoIds = new Set(restoredVideos.map((video) => video.id))
+      const restoredClips: CanvasTimelineClip[] = savedState.timelineClips
+        .filter((clip) => restoredVideoIds.has(clip.videoId))
+        .map(projectClipToCanvasClip)
 
       restoringFromHistoryRef.current = true
       historyRef.current = {
@@ -2672,9 +2767,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const prevArtboard = artboardRef.current
       artboardRef.current = savedArtboard
       commitVideosRef(restoredVideos)
+      commitDetachedVideosRef(restoredDetached)
       commitTimelineClipsRef(restoredClips)
       setArtboard(savedArtboard)
       setVideos(restoredVideos)
+      setDetachedVideos(restoredDetached)
       setTimelineClips(restoredClips)
 
       // If the restored artboard has different dimensions, refit the view
@@ -2725,6 +2822,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setCanRedo(canRedoHistory(historyRef.current))
     },
     [
+      commitDetachedVideosRef,
       commitTimelineClipsRef,
       commitVideosRef,
       resolveObjectUrlForRestore,
@@ -2757,11 +2855,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const mediaValue = useMemo<EditorCanvasMediaContextValue>(
     () => ({
       videos,
+      detachedVideos,
       selectedItemId,
       selectedVideo,
       importError,
     }),
-    [importError, selectedItemId, selectedVideo, videos]
+    [detachedVideos, importError, selectedItemId, selectedVideo, videos]
   )
 
   const artboardValue = useMemo<EditorCanvasArtboardContextValue>(
@@ -2831,6 +2930,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setVideoLocked,
       duplicateVideo,
       deleteVideo,
+      addVideoToCanvas,
       setArtboardPreset,
       setArtboardBackground,
       setArtboardGrain,
@@ -2848,6 +2948,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setVideoLocked,
       duplicateVideo,
       deleteVideo,
+      addVideoToCanvas,
       setArtboardPreset,
       setArtboardBackground,
       setArtboardGrain,
@@ -2940,6 +3041,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setCanUndo(false)
       setCanRedo(false)
       commitVideosRef([])
+      commitDetachedVideosRef([])
       commitTimelineClipsRef([])
       timelineCanvasNodesRef.current.forEach((node) => {
         node.visible(false)
@@ -2951,6 +3053,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       isTimelinePlayingRef.current = false
       selectedItemIdRef.current = null
       setVideos([])
+      setDetachedVideos([])
       setTimelineClips([])
       setTimelineTimeState(0)
       setIsTimelinePlaying(false)
@@ -3002,19 +3105,31 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      const restoredVideos: CanvasVideoItem[] = savedState.videos.map((video) =>
+      const toCanvasVideo = (video: ProjectStateV1["videos"][number]) =>
         projectVideoToCanvasVideo(
           video,
           project.assetUrlsByVideoId[video.id] ?? "",
           resolveFileSizeForRestore(video)
         )
-      )
+      // `onCanvas === false` videos were removed from the canvas but kept in
+      // the project; hydrate them into the detached list so the Video tab can
+      // offer to add them back. Everything else (including legacy records with
+      // no `onCanvas` field) lands on the canvas.
+      const restoredVideos: CanvasVideoItem[] = savedState.videos
+        .filter((video) => video.onCanvas !== false)
+        .map(toCanvasVideo)
+      const restoredDetached: CanvasVideoItem[] = savedState.videos
+        .filter((video) => video.onCanvas === false)
+        .map(toCanvasVideo)
       commitVideosRef(restoredVideos)
+      commitDetachedVideosRef(restoredDetached)
       setVideos(restoredVideos)
+      setDetachedVideos(restoredDetached)
 
-      const restoredClips: CanvasTimelineClip[] = savedState.timelineClips.map(
-        projectClipToCanvasClip
-      )
+      const restoredVideoIds = new Set(restoredVideos.map((video) => video.id))
+      const restoredClips: CanvasTimelineClip[] = savedState.timelineClips
+        .filter((clip) => restoredVideoIds.has(clip.videoId))
+        .map(projectClipToCanvasClip)
       commitTimelineClipsRef(restoredClips)
       setTimelineClips(restoredClips)
 
@@ -3025,7 +3140,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const hydratedSnapshot = serializeProjectState(
         savedArtboard,
         restoredVideos,
-        restoredClips
+        restoredClips,
+        restoredDetached
       )
       const hydratedFingerprint = fingerprintProjectState(hydratedSnapshot)
       lastWrittenSerializedRef.current = hydratedFingerprint
@@ -3121,7 +3237,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const baselineSnapshot = serializeProjectState(
         artboardRef.current,
         videosRef.current,
-        timelineClipsRef.current
+        timelineClipsRef.current,
+        detachedVideosRef.current
       )
       const baselineFingerprint = fingerprintProjectState(baselineSnapshot)
       lastWrittenSerializedRef.current = baselineFingerprint
@@ -3182,6 +3299,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     hydratedProjectIdRef.current = project.id
   }, [
     addRemoteVideo,
+    commitDetachedVideosRef,
     commitTimelineClipsRef,
     commitTimelineVisibleVideoIds,
     commitVideosRef,
@@ -3224,7 +3342,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         autosaveRetryTimerRef.current = null
       }
     }
-  }, [artboard, videos, timelineClips, project, flushAutosave])
+  }, [artboard, videos, detachedVideos, timelineClips, project, flushAutosave])
 
   // Window-level flush hooks. We only react if the gate (project + hydrated)
   // passes — otherwise blur during boot would otherwise trigger an empty save.

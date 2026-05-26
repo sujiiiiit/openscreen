@@ -135,17 +135,21 @@ function AdjustmentRow({
 
 function VideoFileCard({
   video,
-  onSelect,
+  actionLabel,
+  onActivate,
 }: {
   video: CanvasVideoItem
-  onSelect: (id: string) => void
+  // "Select" for videos already on the canvas, "Add" for ones the user removed
+  // (still part of the project). The card chrome is identical either way.
+  actionLabel: string
+  onActivate: (id: string) => void
 }) {
   // Horizontal card: file icon on the left, name + size stacked, and a
-  // hover-revealed "Select" affordance pinned to the right. The Squircle
+  // hover-revealed action affordance pinned to the right. The Squircle
   // wraps a single <button> so the whole card stays one focusable target —
-  // the visible "Select" is a non-interactive span styled with
-  // `buttonVariants` so clicks bubble to the parent <button> instead of
-  // creating a nested-button accessibility hazard.
+  // the visible label is a non-interactive span styled with `buttonVariants`
+  // so clicks bubble to the parent <button> instead of creating a
+  // nested-button accessibility hazard.
   return (
     <Squircle
       cornerRadius={CARD_CORNER_RADIUS}
@@ -155,12 +159,12 @@ function VideoFileCard({
     >
       <button
         type="button"
-        onClick={() => onSelect(video.id)}
+        onClick={() => onActivate(video.id)}
         title={video.fileName}
         className="group/card relative flex w-full items-center gap-3 px-3 py-3 text-left outline-none transition-transform duration-100 active:scale-[0.97] focus-visible:ring-2 focus-visible:ring-ring/40"
       >
         {/* File body — drops to opacity 0.95 on hover/focus so the card
-            visibly reacts without dimming the Select affordance below. */}
+            visibly reacts without dimming the action affordance below. */}
         <span className="flex min-w-0 flex-1 items-center gap-3 transition-opacity group-hover/card:opacity-95 group-focus-visible/card:opacity-95">
           <span className="inline-flex size-10 shrink-0 items-center justify-center text-primary">
             <HugeiconsIcon icon={FileEmpty02Icon} className="size-6" />
@@ -174,7 +178,7 @@ function VideoFileCard({
             </span>
           </span>
         </span>
-        {/* Visual Select affordance. Inherits the default Button look via
+        {/* Visual action affordance. Inherits the default Button look via
             `buttonVariants`; `pointer-events-none` so clicks always reach
             the outer card button, keeping a single tab stop per row. */}
         <span
@@ -184,7 +188,7 @@ function VideoFileCard({
             "pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 opacity-0 transition-opacity group-hover/card:opacity-100 group-focus-visible/card:opacity-100"
           )}
         >
-          Select
+          {actionLabel}
         </span>
       </button>
     </Squircle>
@@ -193,12 +197,18 @@ function VideoFileCard({
 
 function VideoFileGrid({
   videos,
+  detachedVideos,
   onSelect,
+  onAdd,
 }: {
   videos: CanvasVideoItem[]
+  // Videos still in the project but removed from the canvas. Listed after the
+  // on-canvas videos with an "Add" action that puts them back.
+  detachedVideos: CanvasVideoItem[]
   onSelect: (id: string) => void
+  onAdd: (id: string) => void
 }) {
-  if (videos.length === 0) {
+  if (videos.length === 0 && detachedVideos.length === 0) {
     return (
       <Squircle
         cornerRadius={CARD_CORNER_RADIUS}
@@ -215,7 +225,20 @@ function VideoFileGrid({
   return (
     <div className="flex flex-col gap-2">
       {videos.map((video) => (
-        <VideoFileCard key={video.id} video={video} onSelect={onSelect} />
+        <VideoFileCard
+          key={video.id}
+          video={video}
+          actionLabel="Select"
+          onActivate={onSelect}
+        />
+      ))}
+      {detachedVideos.map((video) => (
+        <VideoFileCard
+          key={video.id}
+          video={video}
+          actionLabel="Add"
+          onActivate={onAdd}
+        />
       ))}
     </div>
   )
@@ -658,8 +681,8 @@ function VideoAppearanceControls({ video }: { video: CanvasVideoItem }) {
 }
 
 export function VideoPanel() {
-  const { videos, selectedVideo } = useEditorCanvasMedia()
-  const { selectItem } = useEditorCanvasActions()
+  const { videos, detachedVideos, selectedVideo } = useEditorCanvasMedia()
+  const { selectItem, addVideoToCanvas } = useEditorCanvasActions()
 
   // Selection IS the navigation state. There is no visible tab bar — the
   // panel uses <Tabs> purely for the controlled motion transition between
@@ -685,7 +708,12 @@ export function VideoPanel() {
                   Pick a video to edit its corner shape.
                 </p>
               </header>
-              <VideoFileGrid videos={videos} onSelect={selectItem} />
+              <VideoFileGrid
+                videos={videos}
+                detachedVideos={detachedVideos}
+                onSelect={selectItem}
+                onAdd={addVideoToCanvas}
+              />
             </div>
           </TabsContent>
           <TabsContent value="settings">

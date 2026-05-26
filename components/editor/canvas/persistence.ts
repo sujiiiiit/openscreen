@@ -62,11 +62,21 @@ function cloneBackground(
   }
 }
 
-export function serializeVideo(video: CanvasVideoItem): ProjectVideo {
+// `onCanvas` is supplied by the caller rather than read from the item: the
+// runtime keeps on-canvas and detached videos in two separate lists, so the
+// flag is known from which list the video came from. We omit the field when
+// the video is on the canvas so `project.json` stays byte-identical to the
+// pre-feature format (a missing `onCanvas` already means "on canvas"), which
+// keeps the post-hydration autosave fingerprint a no-op for legacy projects.
+export function serializeVideo(
+  video: CanvasVideoItem,
+  onCanvas = true
+): ProjectVideo {
   return {
     id: video.id,
     fileName: video.fileName,
     source: video.source,
+    ...(onCanvas ? {} : { onCanvas: false }),
     intrinsicWidth: video.intrinsicWidth,
     intrinsicHeight: video.intrinsicHeight,
     durationMs: video.durationMs,
@@ -104,15 +114,23 @@ export function serializeTimelineClip(
   }
 }
 
+// Detached videos (removed from the canvas but still part of the project) are
+// appended after the on-canvas videos so they survive a refresh. They carry
+// `onCanvas: false` and have no timeline clip. The default `[]` keeps callers
+// that only deal with on-canvas videos (e.g. the export snapshot) unchanged.
 export function serializeProjectState(
   artboard: EditorArtboard,
   videos: CanvasVideoItem[],
-  timelineClips: CanvasTimelineClip[]
+  timelineClips: CanvasTimelineClip[],
+  detachedVideos: CanvasVideoItem[] = []
 ): ProjectStateV1 {
   return {
     version: 1,
     artboard: serializeArtboard(artboard),
-    videos: videos.map(serializeVideo),
+    videos: [
+      ...videos.map((video) => serializeVideo(video, true)),
+      ...detachedVideos.map((video) => serializeVideo(video, false)),
+    ],
     timelineClips: timelineClips.map(serializeTimelineClip),
     updatedAtUnixMs: Date.now(),
   }
