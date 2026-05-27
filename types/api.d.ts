@@ -84,6 +84,10 @@ export interface RecorderSettings {
   // Sticky across recordings; the user manages the list manually via the
   // system audio menu.
   systemAudioApplications: string[]
+  // Opt-in keystroke capture (Screen Studio-style). Off by default; requires
+  // macOS Input Monitoring permission. Mouse + cursor metadata is always
+  // captured regardless.
+  captureKeystrokes: boolean
   recordingQuality: RecordingQualitySettings
 }
 

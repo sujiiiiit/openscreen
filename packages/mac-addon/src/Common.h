@@ -74,6 +74,23 @@ struct RecordingOptions {
   // 24 / 30 / 60 set explicit frame rates. If both `fps` and `frameRate` are
   // present, `frameRate` wins.
   int frameRate = -1;  // -1 sentinel: fall back to `fps`.
+
+  // ── Input capture (Screen Studio-style sidecar metadata) ──────────────
+  //
+  // When `captureInput` is on, the session records mouse moves/drags/clicks
+  // (and, when `captureKeyStrokes` is also on AND Input Monitoring is granted,
+  // keystrokes) into streaming JSON sidecar files next to the screen video,
+  // using the same field schema Screen Studio's `.screenstudio` bundles use.
+  //
+  // `captureCursorShapes` additionally builds an NSCursor catalog
+  // (cursors.json + cursors/*.png) and resolves a semantic `cursorId` for
+  // every event, synthesising a move when the cursor shape changes without
+  // the pointer moving. None of these change the recorded video — they only
+  // emit sidecar data. To let an editor restyle the cursor, the caller should
+  // also set `includeCursor = false` so no cursor is baked into the frames.
+  bool captureInput = false;
+  bool captureKeyStrokes = false;
+  bool captureCursorShapes = false;
 };
 
 struct DisplayInfo {

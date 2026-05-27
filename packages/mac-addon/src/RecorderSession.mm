@@ -6,6 +6,7 @@
 #include "CameraPreview.h"
 #include "CameraTrack.h"
 #include "Events.h"
+#include "InputTrack.h"
 #include "MicrophoneTrack.h"
 #include "ScreenTrack.h"
 #include "SystemAudioTrack.h"
@@ -18,6 +19,7 @@
   CameraTrack *_camera;
   SystemAudioTrack *_systemAudio;
   MicrophoneTrack *_microphone;
+  InputTrack *_input;
   SCStream *_stream;
   NSDate *_startedAt;
   CMTime _hostStartTime;
@@ -35,6 +37,7 @@
     _camera = [[CameraTrack alloc] initWithOptions:options];
     _systemAudio = [[SystemAudioTrack alloc] initWithOptions:options screenTrack:_screen];
     _microphone = [[MicrophoneTrack alloc] initWithOptions:options screenTrack:_screen];
+    _input = [[InputTrack alloc] initWithOptions:options];
     _hostStartTime = kCMTimeInvalid;
   }
   return self;
@@ -86,6 +89,7 @@
   _manifestURL = [_outputDirectory URLByAppendingPathComponent:
       [self fileNameForSource:@"recording" extension:@"json"]];
 
+  [_input setOutputDirectory:_outputDirectory];
   [_camera prepareWriter];
   return YES;
 }
@@ -192,6 +196,18 @@
   _hostStartTime = CMClockGetTime(CMClockGetHostTimeClock());
   _running = YES;
 
+  if ([_input isEnabled]) {
+    NSError *inputError = nil;
+    if (![_input startWithHostStartMs:TimeToMilliseconds(_hostStartTime)
+                      startedAtUnixMs:[_startedAt timeIntervalSince1970] * 1000.0
+                                error:&inputError]) {
+      // Input capture is auxiliary — a failure here must not abort the
+      // recording. Surface it as a non-fatal event and continue.
+      EmitEvent({"error", _options.sessionId, "input",
+                 ToStdString([inputError localizedDescription]), 0});
+    }
+  }
+
   if ([_camera hasCaptureSession]) [_camera startCapture];
 
   __block NSError *startError = nil;
@@ -228,6 +244,7 @@
   [_camera markStopping];
   [_systemAudio markStopping];
   [_microphone markStopping];
+  [_input markStopping];
   ClearActiveRecorder(self);
 
   __block NSError *streamStopError = nil;
@@ -257,6 +274,7 @@
   BOOL screenOk = [_screen finishWriterSync:&screenFinishError];
   NSError *cameraFinishError = nil;
   BOOL cameraOk = [_camera finishWriterSync:&cameraFinishError];
+  [_input finish];
 
   _running = NO;
   [self writeManifest];
@@ -285,6 +303,7 @@
   _paused = YES;
   [_screen setPaused:YES];
   [_camera setPaused:YES];
+  [_input setPaused:YES];
   EmitEvent({"paused", _options.sessionId, "", "", 0});
   return YES;
 }
@@ -301,6 +320,7 @@
   if (!_paused) return YES;
   [_screen setPaused:NO];
   [_camera setPaused:NO];
+  [_input setPaused:NO];
   _paused = NO;
   EmitEvent({"resumed", _options.sessionId, "", "", 0});
   return YES;
@@ -321,6 +341,10 @@
   [_camera markStopping];
   [_systemAudio markStopping];
   [_microphone markStopping];
+  [_input markStopping];
+  // Tear down the global monitor / cursor sampler now; the sidecar files are
+  // discarded along with the rest of this cancelled recording's output.
+  [_input finish];
   ClearActiveRecorder(self);
   if (_stream) {
     // Mirror the 10s deadline used in -stopSync. SCKit's stopCapture has been
@@ -364,6 +388,8 @@
     files[@"camera"] = [[_camera url] path];
   }
   files[@"manifest"] = [_manifestURL path];
+  NSDictionary *inputFiles = [_input filesDictionary];
+  if (inputFiles) [files addEntriesFromDictionary:inputFiles];
   return files;
 }
 
@@ -412,6 +438,8 @@
   if (systemAudioMeta) [outputs addObject:systemAudioMeta];
   NSDictionary *microphoneMeta = [_microphone metadata];
   if (microphoneMeta) [outputs addObject:microphoneMeta];
+  NSDictionary *inputMeta = [_input metadata];
+  if (inputMeta) [outputs addObject:inputMeta];
   return outputs;
 }
 

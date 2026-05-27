@@ -29,11 +29,28 @@ import type { CanvasVideoItem } from "@/types/editor-canvas"
 // Videos stay as live HTMLVideoElement sources: no canvas cache, no transcoding,
 // and no intermediate bitmap resize. Zoom preserves available source detail, but
 // it cannot invent pixels beyond the file's intrinsic resolution.
+type VideoFrameCallbackMetadata = {
+  mediaTime?: number
+  presentedFrames?: number
+}
 type VideoWithFrameCallback = HTMLVideoElement & {
   requestVideoFrameCallback?: (
-    callback: (now: number, metadata: unknown) => void
+    callback: (now: number, metadata: VideoFrameCallbackMetadata) => void
   ) => number
   cancelVideoFrameCallback?: (handle: number) => void
+}
+
+// Frame rates we snap a measured value to when it lands within tolerance, so a
+// jittery rVFC sample of ~59.7 reports a clean 60. Anything off-grid is kept as
+// the rounded raw rate.
+const COMMON_FRAME_RATES = [24, 25, 30, 48, 50, 60, 90, 120]
+const FPS_SAMPLE_TARGET = 8
+
+function snapToCommonFps(rawFps: number) {
+  for (const rate of COMMON_FRAME_RATES) {
+    if (Math.abs(rawFps - rate) <= rate * 0.05) return rate
+  }
+  return Math.round(rawFps)
 }
 
 type CanvasVideoNodeProps = {
@@ -48,6 +65,7 @@ type CanvasVideoNodeProps = {
     element: HTMLVideoElement,
     redrawLayer: () => void
   ) => void
+  onVideoFpsMeasured?: (id: string, fps: number) => void
 }
 
 function CanvasVideoNodeComponent({
@@ -58,6 +76,7 @@ function CanvasVideoNodeComponent({
   onNodeChange,
   onVideoElementChange,
   onVideoSeeked,
+  onVideoFpsMeasured,
 }: CanvasVideoNodeProps) {
   const imageRef = useRef<Konva.Image | null>(null)
   const videoElementRef = useRef<VideoWithFrameCallback | null>(null)
@@ -120,6 +139,39 @@ function CanvasVideoNodeComponent({
       : new Konva.Animation(() => undefined, layer)
     let cancelled = false
 
+    // Lazily measure the source frame rate from the presented-frame cadence
+    // during playback (the only time rVFC fires repeatedly). Report once a
+    // stable median emerges, then stop sampling. Drives frame-stepping; the
+    // provider keeps it session-only.
+    let fpsReported = false
+    let prevMediaTime: number | null = null
+    let prevPresentedFrames: number | null = null
+    const fpsSamples: number[] = []
+    const measureFps = (metadata: VideoFrameCallbackMetadata | undefined) => {
+      if (fpsReported || !onVideoFpsMeasured || !metadata) return
+      const { mediaTime, presentedFrames } = metadata
+      if (typeof mediaTime !== "number" || typeof presentedFrames !== "number") {
+        return
+      }
+      if (prevMediaTime !== null && prevPresentedFrames !== null) {
+        const dt = mediaTime - prevMediaTime
+        const df = presentedFrames - prevPresentedFrames
+        if (df > 0 && dt > 0) {
+          fpsSamples.push(df / dt)
+          if (fpsSamples.length >= FPS_SAMPLE_TARGET) {
+            const sorted = [...fpsSamples].sort((a, b) => a - b)
+            fpsReported = true
+            onVideoFpsMeasured(
+              video.id,
+              snapToCommonFps(sorted[Math.floor(sorted.length / 2)])
+            )
+          }
+        }
+      }
+      prevMediaTime = mediaTime
+      prevPresentedFrames = presentedFrames
+    }
+
     const stopRedrawLoop = () => {
       if (frameCallbackId !== null) {
         videoElement.cancelVideoFrameCallback?.(frameCallbackId)
@@ -139,10 +191,11 @@ function CanvasVideoNodeComponent({
       }
 
       frameCallbackId =
-        videoElement.requestVideoFrameCallback?.(() => {
+        videoElement.requestVideoFrameCallback?.((_now, metadata) => {
           frameCallbackId = null
           if (cancelled) return
 
+          measureFps(metadata)
           layer.batchDraw()
           scheduleFrameCallback()
         }) ?? null
@@ -153,8 +206,19 @@ function CanvasVideoNodeComponent({
     // (drop or paint), "this frame matches a hover target" (paint), or
     // "stale seek — drop". The provider triggers the layer redraw via the
     // callback so this component stays unaware of hover vs committed.
+    //
+    // When rVFC is available we drive the redraw from it rather than painting
+    // immediately, so the layer is composited in lockstep with the seeked frame
+    // actually being presented — this is what keeps a fast scrub from flashing
+    // the pre-seek frame for a tick before the new one lands.
     const redrawLayer = () => {
-      layer.batchDraw()
+      if (supportsFrameCallback && videoElement.requestVideoFrameCallback) {
+        videoElement.requestVideoFrameCallback(() => {
+          if (!cancelled) layer.batchDraw()
+        })
+      } else {
+        layer.batchDraw()
+      }
     }
     const drawGatedFrame = () => {
       onVideoSeeked(video.id, videoElement, redrawLayer)
@@ -194,7 +258,13 @@ function CanvasVideoNodeComponent({
       videoElement.removeEventListener("ended", handlePauseOrEnd)
       videoElement.removeEventListener("seeked", drawGatedFrame)
     }
-  }, [contentLayerRef, isVideoReady, onVideoSeeked, video.id])
+  }, [
+    contentLayerRef,
+    isVideoReady,
+    onVideoFpsMeasured,
+    onVideoSeeked,
+    video.id,
+  ])
 
   const setImageNode = useCallback(
     (node: Konva.Image | null) => {

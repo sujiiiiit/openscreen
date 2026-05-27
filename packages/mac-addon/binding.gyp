@@ -13,6 +13,8 @@
         "src/SystemAudioTrack.mm",
         "src/MicrophoneTrack.mm",
         "src/CameraPreview.mm",
+        "src/CursorTrack.mm",
+        "src/InputTrack.mm",
         "src/RecorderSession.mm",
         "src/RecordingWorkers.mm",
         "src/Bindings.mm"
@@ -48,7 +50,8 @@
               "-framework AudioToolbox",
               "-framework AppKit",
               "-framework Foundation",
-              "-framework Accelerate"
+              "-framework Accelerate",
+              "-framework IOKit"
             ]
           }
         }]

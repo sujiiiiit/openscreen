@@ -1,4 +1,11 @@
-export type PermissionKind = 'screen' | 'camera' | 'microphone' | 'systemAudio'
+export type PermissionKind =
+  | 'screen'
+  | 'camera'
+  | 'microphone'
+  | 'systemAudio'
+  // Input Monitoring (TCC ListenEvent). Required only to capture global
+  // keystrokes; mouse / cursor capture needs no permission.
+  | 'inputMonitoring'
 
 export type PermissionState =
   | 'granted'
@@ -102,6 +109,30 @@ export interface StartRecordingOptions {
   resolutionMode?: ResolutionMode
   /** Frame rate. `0` = native refresh. Default: `60`. */
   frameRate?: FrameRate
+
+  // ── Input capture (Screen Studio-style sidecar metadata) ─────────────
+  //
+  // When enabled, the session records mouse moves/drags/clicks (and, when
+  // `captureKeyStrokes` is also on AND Input Monitoring is granted,
+  // keystrokes) plus cursor-shape changes into streaming JSON sidecar files
+  // next to the screen video, using Screen Studio's field schema. None of
+  // these alter the recorded video — to let an editor restyle the cursor,
+  // also pass `includeCursor: false`.
+  /**
+   * Master switch for input capture. Implied by `captureKeyStrokes` /
+   * `captureCursorShapes`. Default: `false`.
+   */
+  captureInput?: boolean
+  /**
+   * Record keystrokes (`keystrokes-0.json`). Requires Input Monitoring
+   * permission; silently no-ops for keys if not granted. Default: `false`.
+   */
+  captureKeyStrokes?: boolean
+  /**
+   * Build the NSCursor catalog (`cursors.json` + `cursors/*.png`) and stamp a
+   * semantic `cursorId` onto every event. Default: `false`.
+   */
+  captureCursorShapes?: boolean
 }
 
 export interface Capabilities {
@@ -173,6 +204,12 @@ export interface RecordingFiles {
   screen: string
   camera?: string
   manifest: string
+  // Screen Studio-style input sidecars, present only when captureInput is on.
+  // Coordinates are display-relative logical points, top-left origin.
+  mouseMoves?: string
+  mouseClicks?: string
+  keyStrokes?: string
+  cursors?: string
 }
 
 export interface RecordingSession {
@@ -180,9 +217,34 @@ export interface RecordingSession {
   files: RecordingFiles
 }
 
+export interface InputSessionMetadata {
+  processTimeStartMs: number
+  processTimeEndMs: number
+  unixStartMs: number
+  unixEndMs: number
+  durationMs: number
+  mouseMovesCount: number
+  mouseClicksCount: number
+  keyStrokesCount: number
+}
+
 export interface RecordingOutputMetadata {
-  source: 'screen' | 'camera' | 'systemAudio' | 'microphone'
+  source: 'screen' | 'camera' | 'systemAudio' | 'microphone' | 'input'
   path?: string
+
+  // ── Input track only (source === 'input') ───────────────────────────
+  // Whether keystroke capture was actually active (requested AND Input
+  // Monitoring granted) and whether the cursor catalog was built.
+  captureKeyStrokes?: boolean
+  captureCursorShapes?: boolean
+  mouseMovesFilename?: string
+  mouseClicksFilename?: string
+  keyStrokesFilename?: string
+  cursorsInfoFile?: string
+  cursorImagesFolder?: string
+  displayId?: number
+  displayBoundsPoints?: { x: number; y: number; width: number; height: number }
+  session?: InputSessionMetadata
   // True once SCRecordingOutput / AVAssetWriter has actually accepted a sample
   // (per-source; camera reports its writer state, screen reports the
   // SCRecordingOutput didStartRecordingAtFileURL callback).

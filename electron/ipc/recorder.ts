@@ -73,6 +73,11 @@ export interface RecorderSettings {
   // Sticky across recordings; the user manages the list manually via the
   // system audio menu.
   systemAudioApplications: string[]
+  // Opt-in keystroke capture. Mouse + cursor metadata is always recorded
+  // (Screen Studio-style sidecars); keystrokes are sensitive (plaintext typed
+  // text, incl. passwords) and additionally require macOS Input Monitoring
+  // permission, so they are off by default and gated behind this toggle.
+  captureKeystrokes: boolean
   // Screen-recording quality (codec / container / resolution / etc.).
   // Persisted to a JSON file in userData so settings survive app restarts.
   // See RecordingQualitySettings for field meanings.
@@ -259,6 +264,7 @@ const state: RecorderState = {
     hideCursor: false,
     systemAudioScope: 'all',
     systemAudioApplications: [],
+    captureKeystrokes: false,
     recordingQuality: loadRecordingQualitySettings(),
   },
   sessionId: null,
@@ -527,6 +533,21 @@ function setHideCursor(hidden: boolean): void {
   emitState()
 }
 
+function setCaptureKeystrokes(enabled: boolean): void {
+  if (!canChangeSettings()) return
+  if (state.settings.captureKeystrokes === enabled) return
+
+  state.settings.captureKeystrokes = enabled
+  state.lastError = null
+  // Enabling keystroke capture needs macOS Input Monitoring. Surface the TCC
+  // prompt now so the grant is in place before the next recording; the native
+  // side independently no-ops key capture if the grant is still missing.
+  if (enabled && process.platform === 'darwin') {
+    addon.requestPermissions(['inputMonitoring']).catch(() => {})
+  }
+  emitState()
+}
+
 function microphoneMenuTemplate(devices: AudioDevice[]): MenuItemConstructorOptions[] {
   const enabled = canChangeSettings()
   const template: MenuItemConstructorOptions[] = [
@@ -676,6 +697,13 @@ function recorderSettingsMenuTemplate(): MenuItemConstructorOptions[] {
       checked: state.settings.hideCursor,
       enabled: canChangeSettings(),
       click: () => setHideCursor(!state.settings.hideCursor),
+    },
+    {
+      label: 'Capture keystrokes',
+      type: 'checkbox',
+      checked: state.settings.captureKeystrokes,
+      enabled: canChangeSettings(),
+      click: () => setCaptureKeystrokes(!state.settings.captureKeystrokes),
     },
     { type: 'separator' },
     {
@@ -838,6 +866,15 @@ export async function startRecording(targetOverride?: CaptureTarget): Promise<Re
       target,
       includeCursor: !state.settings.hideCursor,
       excludeOwnApp: true,
+      // Always capture Screen Studio-style input metadata (mouse + cursor
+      // shapes) alongside the video. This is intentionally INDEPENDENT of
+      // `hideCursor`/`includeCursor`: "Don't record cursor" only removes the
+      // cursor from the recorded video pixels — the cursor *metadata* is still
+      // captured so an editor can redraw a restyled cursor from it. Keystrokes
+      // are opt-in (and gated by Input Monitoring on the native side).
+      captureInput: true,
+      captureCursorShapes: true,
+      captureKeyStrokes: state.settings.captureKeystrokes,
       recordSystemAudio: systemAudioEnabled,
       recordMicrophone: state.settings.microphoneDeviceId !== null,
       microphoneDeviceId: state.settings.microphoneDeviceId ?? undefined,

@@ -88,6 +88,11 @@ const TIMELINE_PLAYBACK_DRIFT_SECONDS = 0.25
 // "displaying its last frame" so the canvas does not flash blank at the end.
 const TIMELINE_END_HOLD_EPSILON_SECONDS = 1e-3
 const TIMELINE_STATE_COMMIT_INTERVAL_MS = 80
+// Frame-step granularity. Source fps is measured per element during playback
+// via requestVideoFrameCallback (see `registerTimelineVideoFps`) and is
+// session-only — intentionally NOT persisted. Until a clip has played at least
+// once we step at this default, which matches the recorder's 60 fps output.
+const DEFAULT_TIMELINE_FPS = 60
 const TIMELINE_ZOOM_MIN = 0.35
 const TIMELINE_ZOOM_MAX = 4
 const TIMELINE_ZOOM_STEP = 1.25
@@ -122,6 +127,16 @@ type HoverSeekState = {
   targetSourceTime: number
   hoverTimelineTime: number
   issuedAt: number
+  timeoutId: number
+}
+
+// Committed (scrub / click / skip) seek coalescing. Mirrors the hover pipeline:
+// at most one seek per element is in flight at a time, and the completion
+// handler reissues toward the latest committed playhead. Keeps every expensive
+// long-GOP decode aimed at the newest target instead of thrashing the decoder
+// with a fresh `currentTime` write on every pointermove.
+type CommittedSeekState = {
+  targetSourceTime: number
   timeoutId: number
 }
 
@@ -198,6 +213,8 @@ type EditorCanvasContextValue = {
     direction: TimelineResizeDirection
   ) => void
   subscribeTimelineTicks: (subscriber: TimelineTickSubscriber) => () => void
+  stepTimelineFrame: (direction: number) => void
+  registerTimelineVideoFps: (id: string, fps: number) => void
 }
 
 type EditorCanvasMediaContextValue = Pick<
@@ -271,6 +288,8 @@ type EditorCanvasTimelineActionsContextValue = Pick<
   | "moveTimelineClip"
   | "resizeTimelineClip"
   | "subscribeTimelineTicks"
+  | "stepTimelineFrame"
+  | "registerTimelineVideoFps"
 >
 
 type EditorCanvasSaveStatusContextValue = {
@@ -630,6 +649,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const isTimelinePlayingRef = useRef(isTimelinePlaying)
   const timelineVideoElementsRef = useRef(new Map<string, HTMLVideoElement>())
   const timelineCanvasNodesRef = useRef(new Map<string, Konva.Image>())
+  // Per-element source frame rate, measured lazily during playback. Session-
+  // only: never persisted, cleared on project switch. Drives frame-stepping.
+  const videoFpsRef = useRef(new Map<string, number>())
   const timelineVisibleVideoIdsRef = useRef<ReadonlySet<string>>(new Set())
   const timelineVisibilityWindowRef = useRef<TimelineVisibilityWindow | null>(
     null
@@ -638,6 +660,15 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const timelinePlaybackFrameRef = useRef<number | null>(null)
   const timelinePreviousFrameMsRef = useRef<number | null>(null)
   const timelineLastStateCommitMsRef = useRef(0)
+  // Throttle for the React `timelineTime` state commit on the scrub path. The
+  // playhead itself moves imperatively via the tick subscribers every move, so
+  // the React mirror (consumed only by the time readout + disabled-state) can
+  // lag a frame; committing it on every pointermove would re-render every
+  // timeline consumer dozens of times a second and starve the seek/redraw.
+  const timelineStateCommitTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null)
+  const lastTimelineStateCommitMsRef = useRef(0)
   // Hover preview pipeline state. All refs so a stream of mouse moves doesn't
   // re-render the React tree; `isHoverPreviewActive` is the single observable
   // bit a consumer needs (for ghost-cursor mounting).
@@ -645,6 +676,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const hoverPreviewActiveRef = useRef(false)
   const hoverFrameRef = useRef<number | null>(null)
   const hoverSeekStateRef = useRef(new Map<string, HoverSeekState>())
+  const committedSeekStateRef = useRef(new Map<string, CommittedSeekState>())
   const hoverTimeSubscribersRef = useRef(new Set<HoverTimeSubscriber>())
   const primaryAudioVideoIdRef = useRef<string | null>(null)
   const selectedItemIdRef = useRef(selectedItemId)
@@ -985,6 +1017,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const objectUrls = objectUrlsRef.current
     const hoverSeekState = hoverSeekStateRef.current
+    const committedSeekState = committedSeekStateRef.current
     const hoverTimeSubscribers = hoverTimeSubscribersRef.current
 
     return () => {
@@ -996,10 +1029,18 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         cancelAnimationFrame(hoverFrameRef.current)
         hoverFrameRef.current = null
       }
+      if (timelineStateCommitTimerRef.current !== null) {
+        clearTimeout(timelineStateCommitTimerRef.current)
+        timelineStateCommitTimerRef.current = null
+      }
       hoverSeekState.forEach((entry) => {
         window.clearTimeout(entry.timeoutId)
       })
       hoverSeekState.clear()
+      committedSeekState.forEach((entry) => {
+        window.clearTimeout(entry.timeoutId)
+      })
+      committedSeekState.clear()
       hoverTimeSubscribers.clear()
       objectUrls.forEach((objectUrl) => {
         URL.revokeObjectURL(objectUrl)
@@ -1223,8 +1264,40 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  // Drops the in-flight committed-seek bookkeeping for a single element.
+  const clearCommittedEntry = useCallback((videoId: string) => {
+    const entry = committedSeekStateRef.current.get(videoId)
+    if (!entry) return
+    window.clearTimeout(entry.timeoutId)
+    committedSeekStateRef.current.delete(videoId)
+  }, [])
+
+  // Issues exactly one committed seek for one element; the caller must have
+  // confirmed there is no in-flight entry. A safety timeout force-clears the
+  // entry and repaints if `seeked` never fires (rare; e.g. the new currentTime
+  // resolved to the same frame the element already showed).
+  const issueCommittedSeek = useCallback(
+    (videoId: string, element: HTMLVideoElement, targetSourceTime: number) => {
+      const timeoutId = window.setTimeout(() => {
+        const stalled = committedSeekStateRef.current.get(videoId)
+        if (!stalled) return
+        committedSeekStateRef.current.delete(videoId)
+        timelineCanvasNodesRef.current.get(videoId)?.getLayer()?.batchDraw()
+      }, 250)
+      committedSeekStateRef.current.set(videoId, { targetSourceTime, timeoutId })
+      safeSeekElement(element, targetSourceTime)
+    },
+    [safeSeekElement]
+  )
+
   // Snap a single element to the timeline target. Used for explicit user
-  // actions (scrub, play, clip edits) and for clips that just became active.
+  // actions (scrub, click, skip, clip edits) and for clips that just became
+  // active. While paused this coalesces to a single in-flight seek per element
+  // (see `CommittedSeekState`): `onTimelineVideoSeeked` paints the landed frame
+  // and reissues toward the latest playhead, so each expensive long-GOP decode
+  // chases the newest target instead of being thrown away. When `shouldPlay` is
+  // set we skip coalescing — the element is about to play and the rAF loop owns
+  // the clock.
   const seekElementToTimeline = useCallback(
     (
       videoId: string,
@@ -1234,6 +1307,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     ) => {
       const frame = resolveTimelineFrame(videoId, time)
       if (!frame || !frame.active) {
+        clearCommittedEntry(videoId)
         if (!element.paused) element.pause()
         return
       }
@@ -1244,21 +1318,38 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         frame.sourceTime,
         frame.sourceDuration
       )
-      if (
-        Math.abs(element.currentTime - seekableTime) >
-        TIMELINE_FORCE_SEEK_EPSILON_SECONDS
-      ) {
-        safeSeekElement(element, seekableTime)
-      }
 
       if (shouldPlay) {
+        // Play-from-position: one precise seek, then play. No coalescing.
+        clearCommittedEntry(videoId)
+        if (
+          Math.abs(element.currentTime - seekableTime) >
+          TIMELINE_FORCE_SEEK_EPSILON_SECONDS
+        ) {
+          safeSeekElement(element, seekableTime)
+        }
         safePlayElement(element)
-      } else if (!element.paused) {
-        element.pause()
+        return
       }
+
+      if (!element.paused) element.pause()
+      if (
+        Math.abs(element.currentTime - seekableTime) <=
+        TIMELINE_FORCE_SEEK_EPSILON_SECONDS
+      ) {
+        // Already on target — nothing to decode; drop any stale in-flight entry.
+        clearCommittedEntry(videoId)
+        return
+      }
+      // A seek is already decoding for this element; its completion handler will
+      // reissue toward the latest playhead rather than thrash a fresh write.
+      if (committedSeekStateRef.current.has(videoId)) return
+      issueCommittedSeek(videoId, element, seekableTime)
     },
     [
+      clearCommittedEntry,
       getSeekableTimelineSourceTime,
+      issueCommittedSeek,
       resolveTimelineFrame,
       safePlayElement,
       safeSeekElement,
@@ -1614,12 +1705,45 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         return
       }
 
+      const committedEntry = committedSeekStateRef.current.get(videoId)
+      if (committedEntry) {
+        window.clearTimeout(committedEntry.timeoutId)
+        committedSeekStateRef.current.delete(videoId)
+        // Paint every landed committed frame — it is a real position along the
+        // scrub path, so showing it keeps the preview moving in step with the
+        // drag. We deliberately do not gate on an exact match (an exact
+        // `currentTime` seek can settle up to a frame from the request); the
+        // reissue below converges on the live playhead.
+        redrawLayer()
+
+        // While playing, the rAF loop owns currentTime — don't reissue.
+        if (isTimelinePlayingRef.current) return
+        const liveTime = timelineTimeRef.current
+        const frame = resolveTimelineFrame(videoId, liveTime)
+        if (!frame || !frame.active) return
+        const liveTarget = getSeekableTimelineSourceTime(
+          element,
+          frame.sourceTime,
+          frame.sourceDuration
+        )
+        if (
+          Math.abs(element.currentTime - liveTarget) <=
+          TIMELINE_FORCE_SEEK_EPSILON_SECONDS
+        ) {
+          return
+        }
+        if (committedSeekStateRef.current.has(videoId)) return
+        issueCommittedSeek(videoId, element, liveTarget)
+        return
+      }
+
       if (shouldDrawTimelineVideoFrame(videoId, element)) {
         redrawLayer()
       }
     },
     [
       getSeekableTimelineSourceTime,
+      issueCommittedSeek,
       issueHoverSeek,
       resolveTimelineFrame,
       shouldDrawTimelineVideoFrame,
@@ -1643,6 +1767,39 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     }
   }, [cancelInFlightHoverSeeks, notifyHoverTimeSubscribers, syncTimelineMedia])
 
+  // Commit the React `timelineTime` mirror at once, cancelling any pending
+  // throttled commit. Used by discrete transitions (play, pause, clamp) where
+  // the value must land immediately.
+  const commitTimelineTimeState = useCallback((time: number) => {
+    if (timelineStateCommitTimerRef.current !== null) {
+      clearTimeout(timelineStateCommitTimerRef.current)
+      timelineStateCommitTimerRef.current = null
+    }
+    lastTimelineStateCommitMsRef.current = performance.now()
+    setTimelineTimeState(time)
+  }, [])
+
+  // Commit the React mirror at most once per TIMELINE_STATE_COMMIT_INTERVAL_MS
+  // during a scrub: the first move commits immediately, subsequent moves inside
+  // the window schedule a single trailing commit of the latest value. Keeps the
+  // readout tracking the drag without a per-pointermove re-render storm; the
+  // playhead itself stays smooth via the tick subscribers regardless.
+  const scheduleTimelineTimeState = useCallback((time: number) => {
+    const now = performance.now()
+    const elapsed = now - lastTimelineStateCommitMsRef.current
+    if (elapsed >= TIMELINE_STATE_COMMIT_INTERVAL_MS) {
+      lastTimelineStateCommitMsRef.current = now
+      setTimelineTimeState(time)
+      return
+    }
+    if (timelineStateCommitTimerRef.current !== null) return
+    timelineStateCommitTimerRef.current = setTimeout(() => {
+      timelineStateCommitTimerRef.current = null
+      lastTimelineStateCommitMsRef.current = performance.now()
+      setTimelineTimeState(timelineTimeRef.current)
+    }, TIMELINE_STATE_COMMIT_INTERVAL_MS - elapsed)
+  }, [])
+
   useEffect(() => {
     const clampedTime = clampTimelineTime(
       timelineTimeRef.current,
@@ -1651,10 +1808,15 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     if (clampedTime === timelineTimeRef.current) return
 
     timelineTimeRef.current = clampedTime
-    setTimelineTimeState(clampedTime)
+    commitTimelineTimeState(clampedTime)
     notifyTimelineSubscribers(clampedTime)
     syncTimelineMedia(clampedTime, isTimelinePlayingRef.current)
-  }, [notifyTimelineSubscribers, syncTimelineMedia, timelineDuration])
+  }, [
+    commitTimelineTimeState,
+    notifyTimelineSubscribers,
+    syncTimelineMedia,
+    timelineDuration,
+  ])
 
   const setTimelineTime = useCallback(
     (time: number) => {
@@ -1668,11 +1830,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       }
 
       timelineTimeRef.current = clampedTime
-      setTimelineTimeState(clampedTime)
+      scheduleTimelineTimeState(clampedTime)
       notifyTimelineSubscribers(clampedTime)
       syncTimelineMedia(clampedTime, isTimelinePlayingRef.current)
     },
-    [notifyTimelineSubscribers, syncTimelineMedia]
+    [notifyTimelineSubscribers, scheduleTimelineTimeState, syncTimelineMedia]
   )
 
   const pauseTimeline = useCallback(() => {
@@ -1685,10 +1847,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     isTimelinePlayingRef.current = false
     setIsTimelinePlaying(false)
     const time = timelineTimeRef.current
-    setTimelineTimeState(time)
+    commitTimelineTimeState(time)
     notifyTimelineSubscribers(time)
     syncTimelineMedia(time, false)
-  }, [notifyTimelineSubscribers, syncTimelineMedia])
+  }, [commitTimelineTimeState, notifyTimelineSubscribers, syncTimelineMedia])
 
   const playTimeline = useCallback(() => {
     if (isTimelinePlayingRef.current) return
@@ -1700,7 +1862,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         : clampTimelineTime(timelineTimeRef.current, duration)
 
     timelineTimeRef.current = startTime
-    setTimelineTimeState(startTime)
+    commitTimelineTimeState(startTime)
     notifyTimelineSubscribers(startTime)
     isTimelinePlayingRef.current = true
     setIsTimelinePlaying(true)
@@ -1771,6 +1933,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
 
     timelinePlaybackFrameRef.current = requestAnimationFrame(tick)
   }, [
+    commitTimelineTimeState,
     getMasterPlaybackVideoId,
     notifyTimelineSubscribers,
     syncTimelineMedia,
@@ -1785,6 +1948,49 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
 
     playTimeline()
   }, [pauseTimeline, playTimeline])
+
+  // Source frame rate at a timeline position. Prefers the primary-audio clip
+  // under the playhead, then any clip under it; falls back to the recorder
+  // default until a clip has played and reported its measured fps.
+  const getTimelineFpsAt = useCallback((time: number) => {
+    const measured = videoFpsRef.current
+    const primaryId = primaryAudioVideoIdRef.current
+    if (primaryId) {
+      const clip = timelineClipByVideoIdRef.current.get(primaryId)
+      if (clip && time >= clip.start && time < clip.end) {
+        const fps = measured.get(primaryId)
+        if (fps) return fps
+      }
+    }
+    for (const clip of timelineClipsRef.current) {
+      if (time >= clip.start && time < clip.end) {
+        const fps = measured.get(clip.videoId)
+        if (fps) return fps
+      }
+    }
+    return DEFAULT_TIMELINE_FPS
+  }, [])
+
+  // Step the playhead by exactly one source frame. Snaps to the frame grid of
+  // the clip under the playhead first, so repeated steps land on frame
+  // boundaries regardless of where a free scrub left the cursor.
+  const stepTimelineFrame = useCallback(
+    (direction: number) => {
+      const duration = timelineDurationRef.current
+      if (duration <= 0) return
+      if (isTimelinePlayingRef.current) pauseTimeline()
+      const dir = direction < 0 ? -1 : 1
+      const time = timelineTimeRef.current
+      const frameDuration = 1 / getTimelineFpsAt(time)
+      const currentFrame = Math.round(time / frameDuration)
+      const nextTime = clampTimelineTime(
+        (currentFrame + dir) * frameDuration,
+        duration
+      )
+      setTimelineTime(nextTime)
+    },
+    [getTimelineFpsAt, pauseTimeline, setTimelineTime]
+  )
 
   const zoomTimelineIn = useCallback(() => {
     setIsTimelineFit(false)
@@ -1819,9 +2025,19 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       }
 
       timelineVideoElementsRef.current.delete(id)
+      clearCommittedEntry(id)
+      videoFpsRef.current.delete(id)
     },
-    [seekElementToTimeline]
+    [clearCommittedEntry, seekElementToTimeline]
   )
+
+  // Records a measured source frame rate for an element (see the canvas video
+  // node's playback frame-callback sampler). Session-only: held in a ref, never
+  // persisted, read only by frame-stepping. Tolerant of bad inputs.
+  const registerTimelineVideoFps = useCallback((id: string, fps: number) => {
+    if (!Number.isFinite(fps) || fps <= 0) return
+    videoFpsRef.current.set(id, fps)
+  }, [])
 
   const registerTimelineCanvasNode = useCallback(
     (id: string, node: Konva.Image | null) => {
@@ -2976,6 +3192,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       moveTimelineClip,
       resizeTimelineClip,
       subscribeTimelineTicks,
+      stepTimelineFrame,
+      registerTimelineVideoFps,
     }),
     [
       fitTimelineToWidth,
@@ -2993,6 +3211,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       moveTimelineClip,
       resizeTimelineClip,
       subscribeTimelineTicks,
+      stepTimelineFrame,
+      registerTimelineVideoFps,
     ]
   )
 
@@ -3015,6 +3235,18 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         cancelAnimationFrame(timelinePlaybackFrameRef.current)
         timelinePlaybackFrameRef.current = null
       }
+      // Tear down the previous project's seek pipeline: cancel any in-flight
+      // committed scrub seeks + the pending readout commit, and drop measured
+      // fps (session-only) so the new project re-measures from its own clips.
+      if (timelineStateCommitTimerRef.current !== null) {
+        clearTimeout(timelineStateCommitTimerRef.current)
+        timelineStateCommitTimerRef.current = null
+      }
+      committedSeekStateRef.current.forEach((entry) => {
+        window.clearTimeout(entry.timeoutId)
+      })
+      committedSeekStateRef.current.clear()
+      videoFpsRef.current.clear()
       if (autosaveTimerRef.current !== null) {
         clearTimeout(autosaveTimerRef.current)
         autosaveTimerRef.current = null

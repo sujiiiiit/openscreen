@@ -3,6 +3,8 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { HugeiconsIcon } from "@hugeicons/react"
 import {
+  ArrowLeft01Icon,
+  ArrowRight01Icon,
   CameraVideoIcon,
   ComputerVideoIcon,
   FitToScreenIcon,
@@ -349,7 +351,7 @@ function TimelineClipRender(action: TimelineAction) {
 export function EditorTimelineControls() {
   const { timelineClips, timelineTime, timelineDuration, isTimelinePlaying } =
     useEditorCanvasTimeline()
-  const { setTimelineTime, toggleTimelinePlayback } =
+  const { setTimelineTime, toggleTimelinePlayback, stepTimelineFrame } =
     useEditorCanvasTimelineActions()
   const hasTimeline = timelineClips.length > 0
   const skipTimeline = useCallback(
@@ -380,6 +382,17 @@ export function EditorTimelineControls() {
         type="button"
         variant="ghost"
         size="icon-sm"
+        onClick={() => stepTimelineFrame(-1)}
+        disabled={!hasTimeline || timelineTime <= 0}
+        aria-label="Previous frame"
+        title="Previous frame (,)"
+      >
+        <HugeiconsIcon icon={ArrowLeft01Icon} size={16} color="currentColor" />
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
         onClick={toggleTimelinePlayback}
         disabled={!hasTimeline}
         aria-label={isTimelinePlaying ? "Pause timeline" : "Play timeline"}
@@ -390,6 +403,17 @@ export function EditorTimelineControls() {
           color="currentColor"
           fill="currentColor"
         />
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        onClick={() => stepTimelineFrame(1)}
+        disabled={!hasTimeline || timelineTime >= timelineDuration}
+        aria-label="Next frame"
+        title="Next frame (.)"
+      >
+        <HugeiconsIcon icon={ArrowRight01Icon} size={16} color="currentColor" />
       </Button>
       <Button
         type="button"

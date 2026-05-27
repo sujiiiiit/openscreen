@@ -45,6 +45,15 @@ static RecordingOptions ParseRecordingOptions(const Napi::CallbackInfo &info) {
   options.microphoneDeviceId = GetStringProp(object, "microphoneDeviceId");
   options.cameraDeviceId = GetStringProp(object, "cameraDeviceId");
 
+  // Input capture (mouse / keystrokes / cursor shapes) → Screen Studio-style
+  // sidecar JSON. captureKeyStrokes / captureCursorShapes imply captureInput.
+  options.captureInput = GetBoolProp(object, "captureInput", false);
+  options.captureKeyStrokes = GetBoolProp(object, "captureKeyStrokes", false);
+  options.captureCursorShapes = GetBoolProp(object, "captureCursorShapes", false);
+  if (options.captureKeyStrokes || options.captureCursorShapes) {
+    options.captureInput = true;
+  }
+
   // Screen video quality settings (all optional; ScreenTrack coerces invalid
   // combinations before recording starts so AVAssetWriter never sees a
   // configuration it would reject).

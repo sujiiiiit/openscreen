@@ -47,6 +47,9 @@ Use this table when discussion language and implementation language differ. Pref
 | Frozen clip frame           | Inactive clip visibility        | Hide a media node outside its active timeline clip range instead of holding a frame.                        |
 | Total timeline length       | Timeline duration               | The playback duration, initially longest source asset and then furthest clip end.                           |
 | Sync with canvas            | Playback sync                   | Keep media element source times aligned with the committed timeline playhead and Konva redraws.             |
+| Step-and-step scrub / jumpy preview | Committed seek coalescing | One in-flight committed (scrub/click/skip) seek per element that paints each landed frame and reissues toward the latest playhead, so the preview tracks the drag instead of lagging in chunks. Tracked in `committedSeekStateRef`. |
+| Step one frame / nudge the playhead | Frame step                | Move the playhead by exactly one source frame (`stepTimelineFrame`); bound to `,` / `.` and the inner transport chevrons, and snapped to the clip's frame grid. |
+| Clip frame rate / fps       | Source fps (measured)           | Per-clip source frame rate measured during playback via `requestVideoFrameCallback`; session-only (`videoFpsRef`), drives frame-step granularity, defaults to 60. |
 | Pink line during drag       | Snap guide                      | Pink dashed line drawn while a node snaps to an artboard or peer edge.                                      |
 | Smart guides                | Alignment guides                | Snap guides drawn between a dragged node and other nodes on the artboard.                                   |
 | Even-spacing arrows         | Distance guides                 | Equal-spacing segments shown when the dragged node lands between neighbors.                                 |

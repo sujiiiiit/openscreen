@@ -227,6 +227,8 @@ export default function EditorWorkspace() {
     registerTimelineCanvasNode,
     registerTimelineVideoElement,
     onTimelineVideoSeeked,
+    registerTimelineVideoFps,
+    stepTimelineFrame,
   } = useEditorCanvasTimelineActions()
   const { undo, redo } = useEditorHistory()
   const { selectTab: selectSidebarTab, open: openSidebar } =
@@ -893,6 +895,18 @@ export default function EditorWorkspace() {
         }
       }
 
+      // Frame-step the timeline playhead. `,` / `.` mirror common NLE bindings
+      // and don't collide with the selection nudge (arrows) or zoom shortcuts.
+      if (
+        !hasZoomModifier(event) &&
+        !event.shiftKey &&
+        (event.code === "Comma" || event.code === "Period")
+      ) {
+        event.preventDefault()
+        stepTimelineFrame(event.code === "Comma" ? -1 : 1)
+        return
+      }
+
       if (event.shiftKey && !event.metaKey && !event.ctrlKey) {
         if (event.code === "KeyF") {
           event.preventDefault()
@@ -987,6 +1001,7 @@ export default function EditorWorkspace() {
     fitArtboardToViewport,
     redo,
     setVideoLocked,
+    stepTimelineFrame,
     undo,
     updateVideoTransform,
     viewportSize.height,
@@ -1293,6 +1308,7 @@ export default function EditorWorkspace() {
                     onNodeChange={registerVideoNode}
                     onVideoElementChange={registerTimelineVideoElement}
                     onVideoSeeked={onTimelineVideoSeeked}
+                    onVideoFpsMeasured={registerTimelineVideoFps}
                   />
                 ))}
               </Group>

@@ -41,6 +41,7 @@ const EMPTY_STATE: RecorderState = {
     hideCursor: false,
     systemAudioScope: "all",
     systemAudioApplications: [],
+    captureKeystrokes: false,
     // Initial placeholder for renderer hydration. The real values are
     // streamed in by recorder:changed once the main process loads them.
     recordingQuality: {

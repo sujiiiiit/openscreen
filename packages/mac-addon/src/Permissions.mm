@@ -2,6 +2,7 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <IOKit/hidsystem/IOHIDLib.h>
 
 #include <atomic>
 
@@ -19,6 +20,21 @@ static std::string ScreenCapturePermissionString() {
       : "notDetermined";
 }
 
+// Input Monitoring (TCC ListenEvent) — required to capture global keystrokes.
+// IOHIDCheckAccess distinguishes notDetermined / denied / granted, mapping
+// cleanly onto our PermissionState vocabulary.
+static std::string InputMonitoringPermissionString() {
+  if (@available(macOS 10.15, *)) {
+    switch (IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)) {
+      case kIOHIDAccessTypeGranted: return "granted";
+      case kIOHIDAccessTypeDenied: return "denied";
+      case kIOHIDAccessTypeUnknown:
+      default: return "notDetermined";
+    }
+  }
+  return "granted";
+}
+
 Napi::Object GetPermissionsObject(Napi::Env env) {
   Napi::Object permissions = Napi::Object::New(env);
   std::string screenState = ScreenCapturePermissionString();
@@ -30,6 +46,7 @@ Napi::Object GetPermissionsObject(Napi::Env env) {
   permissions.Set("microphone",
                   PermissionStateString(
                       [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio]));
+  permissions.Set("inputMonitoring", InputMonitoringPermissionString());
   return permissions;
 }
 
@@ -63,6 +80,12 @@ void RequestPermissionsWorker::Execute() {
         RequestAVAccess(AVMediaTypeVideo);
       } else if (kind == "microphone") {
         RequestAVAccess(AVMediaTypeAudio);
+      } else if (kind == "inputMonitoring") {
+        if (@available(macOS 10.15, *)) {
+          // Prompts on first call when notDetermined; no-op once decided. The
+          // updated state is read back via GetPermissionsObject in OnOK.
+          IOHIDRequestAccess(kIOHIDRequestTypeListenEvent);
+        }
       }
     }
   }
