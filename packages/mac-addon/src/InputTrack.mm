@@ -1,11 +1,13 @@
 #include "InputTrack.h"
 
 #import <AppKit/AppKit.h>
+#import <CoreGraphics/CGEvent.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreMedia/CoreMedia.h>
 #import <IOKit/hidsystem/IOHIDLib.h>
 
 #include <atomic>
+#include <os/lock.h>
 
 #include "CursorTrack.h"
 
@@ -37,6 +39,17 @@ static NSArray<NSString *> *ModifierStrings(NSEventModifierFlags flags) {
   if (flags & NSEventModifierFlagCommand) [mods addObject:@"command"];
   if (flags & NSEventModifierFlagCapsLock) [mods addObject:@"capsLock"];
   if (flags & NSEventModifierFlagFunction) [mods addObject:@"function"];
+  return mods;
+}
+
+static NSArray<NSString *> *CGModifierStrings(CGEventFlags flags) {
+  NSMutableArray<NSString *> *mods = [NSMutableArray array];
+  if (flags & kCGEventFlagMaskShift) [mods addObject:@"shift"];
+  if (flags & kCGEventFlagMaskControl) [mods addObject:@"control"];
+  if (flags & kCGEventFlagMaskAlternate) [mods addObject:@"option"];
+  if (flags & kCGEventFlagMaskCommand) [mods addObject:@"command"];
+  if (flags & kCGEventFlagMaskAlphaShift) [mods addObject:@"capsLock"];
+  if (flags & kCGEventFlagMaskSecondaryFn) [mods addObject:@"function"];
   return mods;
 }
 
@@ -120,11 +133,21 @@ static NSArray<NSString *> *ModifierStrings(NSEventModifierFlags flags) {
 
 #pragma mark - InputTrack
 
+// Declared up front so the C tap callback (a free function) can message it.
+@interface InputTrack ()
+- (void)handleCGEvent:(CGEventRef)event type:(CGEventType)type;
+@end
+
 @implementation InputTrack {
   RecordingOptions _options;
   NSURL *_outputDirectory;
 
-  id _monitor;
+  id _monitor;  // NSEvent fallback monitor (used only if the tap can't be made)
+  CFMachPortRef _eventTap;
+  CFRunLoopSourceRef _tapSource;
+  CFRunLoopRef _tapRunLoop;
+  NSThread *_tapThread;
+  dispatch_semaphore_t _tapReady;  // signalled once the tap thread's loop is live
   dispatch_source_t _sampler;
   dispatch_queue_t _writeQueue;
 
@@ -137,12 +160,14 @@ static NSArray<NSString *> *ModifierStrings(NSEventModifierFlags flags) {
   CGDirectDisplayID _displayId;
 
   double _hostStartMs;
+  double _videoStartHostMs;  // first-frame host time; cursor timeline origin
   double _startedAtUnixMs;
   double _unixOffset;
   double _endProcessMs;
 
-  NSString *_currentCursorId;
-  double _lastRealMoveMs;
+  NSString *_currentCursorId;  // guarded by _cursorIdLock (read on tap thread)
+  os_unfair_lock _cursorIdLock;
+  std::atomic<double> _lastRealMoveMs;
   BOOL _keyStrokesActive;
 
   std::atomic<bool> _paused;
@@ -155,6 +180,8 @@ static NSArray<NSString *> *ModifierStrings(NSEventModifierFlags flags) {
   if (self) {
     _options = options;
     _currentCursorId = @"arrow";
+    _cursorIdLock = OS_UNFAIR_LOCK_INIT;
+    _tapReady = dispatch_semaphore_create(0);
     _paused = false;
     _stopping = false;
     _finished = false;
@@ -207,23 +234,47 @@ static BOOL InputMonitoringGranted() {
                                               queue:_writeQueue];
   }
 
-  // AppKit (NSEvent monitor, NSCursor catalog) must be touched on the main
-  // thread; -start runs on a background worker.
-  dispatch_block_t setup = ^{
-    if (_options.captureCursorShapes) {
-      _cursorCatalog = [[CursorCatalog alloc] init];
-      [_cursorCatalog buildIntoImagesDirectory:[self urlForFile:kCursorImagesFolder]];
-      _currentCursorId = [_cursorCatalog resolveCurrentCursorId];
-      [self startCursorSampler];
+  // Primary: a listen-only HID-level CGEventTap on a dedicated thread. It
+  // captures every movement system-wide — including over our own recorder UI,
+  // before coalescing, and independent of the main run loop — so tracking is
+  // live the instant recording starts. Falls back to an NSEvent global monitor
+  // (with coalescing disabled) only if the tap can't be created.
+  if (![self startEventTap]) {
+    dispatch_block_t installNow = ^{
+      [NSEvent setMouseCoalescingEnabled:NO];
+      [self installMonitor];
+    };
+    if ([NSThread isMainThread]) {
+      installNow();
+    } else {
+      dispatch_sync(dispatch_get_main_queue(), installNow);
     }
-    [self installMonitor];
-  };
-  if ([NSThread isMainThread]) {
-    setup();
-  } else {
-    dispatch_sync(dispatch_get_main_queue(), setup);
+  }
+
+  // The NSCursor catalog build (38 cursors → render all reps + PNG-encode +
+  // disk-write) is slow and main-thread-bound. Doing it inline before
+  // installing the monitor previously delayed capture by ~2 s and dropped the
+  // opening movements, so it now runs asynchronously *after* the monitor is
+  // live. Until it completes, moves are stamped with the default cursorId.
+  if (_options.captureCursorShapes) {
+    __weak InputTrack *weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [weakSelf buildCursorCatalogAndStartSampler];
+    });
   }
   return YES;
+}
+
+- (void)buildCursorCatalogAndStartSampler {
+  // A very short recording may stop before this runs — skip if so.
+  if (_finished.load(std::memory_order_relaxed) ||
+      _stopping.load(std::memory_order_relaxed)) {
+    return;
+  }
+  _cursorCatalog = [[CursorCatalog alloc] init];
+  [_cursorCatalog buildIntoImagesDirectory:[self urlForFile:kCursorImagesFolder]];
+  [self setSafeCursorId:[_cursorCatalog resolveCurrentCursorId]];
+  [self startCursorSampler];
 }
 
 - (void)installMonitor {
@@ -283,75 +334,253 @@ static BOOL InputMonitoringGranted() {
          !_stopping.load(std::memory_order_relaxed);
 }
 
+// _currentCursorId is written by the sampler (main thread) and read by the
+// event handlers (the tap runs on its own thread), so guard it.
+- (NSString *)safeCursorId {
+  os_unfair_lock_lock(&_cursorIdLock);
+  NSString *value = _currentCursorId;
+  os_unfair_lock_unlock(&_cursorIdLock);
+  return value;
+}
+
+- (void)setSafeCursorId:(NSString *)cursorId {
+  os_unfair_lock_lock(&_cursorIdLock);
+  _currentCursorId = cursorId;
+  os_unfair_lock_unlock(&_cursorIdLock);
+}
+
 - (NSMutableDictionary *)baseEventWithType:(NSString *)type
-                                  modifiers:(NSEventModifierFlags)flags
+                                  modifiers:(NSArray<NSString *> *)mods
                                   timestamp:(double)processTimeMs {
   NSMutableDictionary *dict = [NSMutableDictionary dictionary];
   dict[@"type"] = type;
-  dict[@"activeModifiers"] = ModifierStrings(flags);
+  dict[@"activeModifiers"] = mods;
   dict[@"processTimeMs"] = @(processTimeMs);
   dict[@"unixTimeMs"] = @(processTimeMs + _unixOffset);
   return dict;
 }
 
-- (void)handleEvent:(NSEvent *)event {
+// Shared record helpers — both the CGEventTap callback (primary) and the
+// NSEvent monitor fallback funnel through these. `point` is already
+// display-relative (top-left logical points). May run on the tap thread.
+- (void)appendMovePoint:(CGPoint)point
+                dragged:(BOOL)dragged
+                 button:(NSString *)button
+              modifiers:(NSArray<NSString *> *)mods
+                     ts:(double)processTimeMs {
+  NSMutableDictionary *dict =
+      [self baseEventWithType:(dragged ? @"mouseDragged" : @"mouseMoved")
+                    modifiers:mods
+                    timestamp:processTimeMs];
+  dict[@"x"] = @(point.x);
+  dict[@"y"] = @(point.y);
+  if (_options.captureCursorShapes) dict[@"cursorId"] = [self safeCursorId];
+  if (dragged && button) dict[@"button"] = button;
+  _lastRealMoveMs.store(processTimeMs, std::memory_order_relaxed);
+  [_moves appendObject:dict];
+}
+
+- (void)appendClickPoint:(CGPoint)point
+                    down:(BOOL)down
+                  button:(NSString *)button
+               modifiers:(NSArray<NSString *> *)mods
+                      ts:(double)processTimeMs {
+  NSMutableDictionary *dict = [self baseEventWithType:(down ? @"mouseDown" : @"mouseUp")
+                                            modifiers:mods
+                                            timestamp:processTimeMs];
+  dict[@"button"] = button ?: @"left";
+  dict[@"x"] = @(point.x);
+  dict[@"y"] = @(point.y);
+  if (_options.captureCursorShapes) dict[@"cursorId"] = [self safeCursorId];
+  [_clicks appendObject:dict];
+}
+
+- (void)appendKeyCharacter:(NSString *)character
+                      down:(BOOL)down
+                    repeat:(BOOL)repeat
+                 modifiers:(NSArray<NSString *> *)mods
+                        ts:(double)processTimeMs {
+  if (!_keys) return;
+  NSMutableDictionary *dict = [self baseEventWithType:(down ? @"keyDown" : @"keyUp")
+                                            modifiers:mods
+                                            timestamp:processTimeMs];
+  dict[@"character"] = character ?: @"";
+  dict[@"isARepeat"] = @(down ? repeat : NO);
+  [_keys appendObject:dict];
+}
+
+#pragma mark - CGEventTap capture (primary; dedicated thread)
+
+static CGEventRef InputEventTapCallback(CGEventTapProxy proxy, CGEventType type,
+                                        CGEventRef event, void *refcon) {
+  InputTrack *track = (__bridge InputTrack *)refcon;
+  [track handleCGEvent:event type:type];
+  return event;  // listen-only — never modify the stream
+}
+
+- (void)handleCGEvent:(CGEventRef)event type:(CGEventType)type {
+  // The system disables a tap that blocks too long or on a fast user switch;
+  // re-enable and carry on.
+  if (type == kCGEventTapDisabledByTimeout ||
+      type == kCGEventTapDisabledByUserInput) {
+    if (_eventTap) CGEventTapEnable(_eventTap, true);
+    return;
+  }
   if (![self isAcceptingEvents]) return;
 
-  double processTimeMs = event.timestamp * 1000.0;
-  NSEventType type = event.type;
+  double processTimeMs = HostNowMs();
+  CGPoint point = [self displayPointFromGlobal:CGEventGetLocation(event)];
+  NSArray<NSString *> *mods = CGModifierStrings(CGEventGetFlags(event));
 
   switch (type) {
-    case NSEventTypeMouseMoved:
-    case NSEventTypeLeftMouseDragged:
-    case NSEventTypeRightMouseDragged:
-    case NSEventTypeOtherMouseDragged: {
-      CGPoint point = [self displayPointForEvent:event];
-      BOOL dragged = (type != NSEventTypeMouseMoved);
-      NSMutableDictionary *dict =
-          [self baseEventWithType:(dragged ? @"mouseDragged" : @"mouseMoved")
-                        modifiers:event.modifierFlags
-                        timestamp:processTimeMs];
-      dict[@"x"] = @(point.x);
-      dict[@"y"] = @(point.y);
-      if (_cursorCatalog) dict[@"cursorId"] = _currentCursorId;
-      if (dragged) dict[@"button"] = [self buttonStringForType:type];
-      _lastRealMoveMs = processTimeMs;
-      [_moves appendObject:dict];
+    case kCGEventMouseMoved:
+      [self appendMovePoint:point dragged:NO button:nil modifiers:mods ts:processTimeMs];
+      break;
+    case kCGEventLeftMouseDragged:
+      [self appendMovePoint:point dragged:YES button:@"left" modifiers:mods ts:processTimeMs];
+      break;
+    case kCGEventRightMouseDragged:
+      [self appendMovePoint:point dragged:YES button:@"right" modifiers:mods ts:processTimeMs];
+      break;
+    case kCGEventOtherMouseDragged:
+      [self appendMovePoint:point dragged:YES button:@"other" modifiers:mods ts:processTimeMs];
+      break;
+    case kCGEventLeftMouseDown:
+      [self appendClickPoint:point down:YES button:@"left" modifiers:mods ts:processTimeMs];
+      break;
+    case kCGEventLeftMouseUp:
+      [self appendClickPoint:point down:NO button:@"left" modifiers:mods ts:processTimeMs];
+      break;
+    case kCGEventRightMouseDown:
+      [self appendClickPoint:point down:YES button:@"right" modifiers:mods ts:processTimeMs];
+      break;
+    case kCGEventRightMouseUp:
+      [self appendClickPoint:point down:NO button:@"right" modifiers:mods ts:processTimeMs];
+      break;
+    case kCGEventOtherMouseDown:
+      [self appendClickPoint:point down:YES button:@"other" modifiers:mods ts:processTimeMs];
+      break;
+    case kCGEventOtherMouseUp:
+      [self appendClickPoint:point down:NO button:@"other" modifiers:mods ts:processTimeMs];
+      break;
+    case kCGEventKeyDown:
+    case kCGEventKeyUp: {
+      if (!_keys) break;
+      BOOL down = (type == kCGEventKeyDown);
+      BOOL repeat = CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) != 0;
+      UniChar chars[8];
+      UniCharCount len = 0;
+      CGEventKeyboardGetUnicodeString(event, 8, &len, chars);
+      NSString *character =
+          len > 0 ? [NSString stringWithCharacters:chars length:len] : @"";
+      [self appendKeyCharacter:character down:down repeat:repeat modifiers:mods ts:processTimeMs];
       break;
     }
+    default:
+      break;
+  }
+}
+
+// Create a listen-only HID-level event tap: captures every movement
+// system-wide (including over our own UI), before coalescing, on a dedicated
+// thread independent of the main run loop. Returns NO if the tap can't be
+// created (e.g. Accessibility not granted) so the caller falls back to the
+// NSEvent monitor.
+- (BOOL)startEventTap {
+  CGEventMask mask = CGEventMaskBit(kCGEventMouseMoved) |
+                     CGEventMaskBit(kCGEventLeftMouseDragged) |
+                     CGEventMaskBit(kCGEventRightMouseDragged) |
+                     CGEventMaskBit(kCGEventOtherMouseDragged) |
+                     CGEventMaskBit(kCGEventLeftMouseDown) |
+                     CGEventMaskBit(kCGEventLeftMouseUp) |
+                     CGEventMaskBit(kCGEventRightMouseDown) |
+                     CGEventMaskBit(kCGEventRightMouseUp) |
+                     CGEventMaskBit(kCGEventOtherMouseDown) |
+                     CGEventMaskBit(kCGEventOtherMouseUp);
+  if (_keyStrokesActive) {
+    mask |= CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp);
+  }
+  _eventTap = CGEventTapCreate(kCGHIDEventTap, kCGHeadInsertEventTap,
+                               kCGEventTapOptionListenOnly, mask,
+                               InputEventTapCallback, (__bridge void *)self);
+  if (!_eventTap) return NO;
+
+  _tapThread = [[NSThread alloc] initWithTarget:self
+                                       selector:@selector(tapThreadMain)
+                                         object:nil];
+  _tapThread.name = @"com.openscreen.input.tap";
+  [_tapThread start];
+  return YES;
+}
+
+- (void)tapThreadMain {
+  @autoreleasepool {
+    _tapRunLoop = CFRunLoopGetCurrent();
+    _tapSource = CFMachPortCreateRunLoopSource(NULL, _eventTap, 0);
+    CFRunLoopAddSource(_tapRunLoop, _tapSource, kCFRunLoopCommonModes);
+    CGEventTapEnable(_eventTap, true);
+    // Signal that the run loop + tap are live so -finish can safely stop us.
+    dispatch_semaphore_signal(_tapReady);
+    CFRunLoopRun();  // returns once -finish calls CFRunLoopStop
+    CFRunLoopRemoveSource(_tapRunLoop, _tapSource, kCFRunLoopCommonModes);
+    if (_tapSource) { CFRelease(_tapSource); _tapSource = NULL; }
+    if (_eventTap) { CFRelease(_eventTap); _eventTap = NULL; }
+    _tapRunLoop = NULL;
+  }
+}
+
+#pragma mark - NSEvent monitor capture (fallback)
+
+- (void)handleEvent:(NSEvent *)event {
+  if (![self isAcceptingEvents]) return;
+  double processTimeMs = event.timestamp * 1000.0;
+  NSArray<NSString *> *mods = ModifierStrings(event.modifierFlags);
+  CGPoint point = [self displayPointForEvent:event];
+  switch (event.type) {
+    case NSEventTypeMouseMoved:
+      [self appendMovePoint:point dragged:NO button:nil modifiers:mods ts:processTimeMs];
+      break;
+    case NSEventTypeLeftMouseDragged:
+    case NSEventTypeRightMouseDragged:
+    case NSEventTypeOtherMouseDragged:
+      [self appendMovePoint:point
+                    dragged:YES
+                     button:[self buttonStringForType:event.type]
+                  modifiers:mods
+                         ts:processTimeMs];
+      break;
     case NSEventTypeLeftMouseDown:
     case NSEventTypeRightMouseDown:
     case NSEventTypeOtherMouseDown:
+      [self appendClickPoint:point
+                        down:YES
+                      button:[self buttonStringForType:event.type]
+                   modifiers:mods
+                          ts:processTimeMs];
+      break;
     case NSEventTypeLeftMouseUp:
     case NSEventTypeRightMouseUp:
-    case NSEventTypeOtherMouseUp: {
-      CGPoint point = [self displayPointForEvent:event];
-      BOOL isDown = (type == NSEventTypeLeftMouseDown ||
-                     type == NSEventTypeRightMouseDown ||
-                     type == NSEventTypeOtherMouseDown);
-      NSMutableDictionary *dict =
-          [self baseEventWithType:(isDown ? @"mouseDown" : @"mouseUp")
-                        modifiers:event.modifierFlags
-                        timestamp:processTimeMs];
-      dict[@"button"] = [self buttonStringForType:type];
-      dict[@"x"] = @(point.x);
-      dict[@"y"] = @(point.y);
-      if (_cursorCatalog) dict[@"cursorId"] = _currentCursorId;
-      [_clicks appendObject:dict];
+    case NSEventTypeOtherMouseUp:
+      [self appendClickPoint:point
+                        down:NO
+                      button:[self buttonStringForType:event.type]
+                   modifiers:mods
+                          ts:processTimeMs];
       break;
-    }
     case NSEventTypeKeyDown:
-    case NSEventTypeKeyUp: {
-      if (!_keys) break;
-      NSMutableDictionary *dict =
-          [self baseEventWithType:(type == NSEventTypeKeyDown ? @"keyDown" : @"keyUp")
-                        modifiers:event.modifierFlags
-                        timestamp:processTimeMs];
-      dict[@"character"] = event.characters ?: @"";
-      dict[@"isARepeat"] = @(type == NSEventTypeKeyDown ? event.isARepeat : NO);
-      [_keys appendObject:dict];
+      [self appendKeyCharacter:(event.characters ?: @"")
+                          down:YES
+                        repeat:event.isARepeat
+                     modifiers:mods
+                            ts:processTimeMs];
       break;
-    }
+    case NSEventTypeKeyUp:
+      [self appendKeyCharacter:(event.characters ?: @"")
+                          down:NO
+                        repeat:NO
+                     modifiers:mods
+                            ts:processTimeMs];
+      break;
     default:
       break;
   }
@@ -378,15 +607,17 @@ static BOOL InputMonitoringGranted() {
 - (void)sampleCursor {
   if (![self isAcceptingEvents] || !_cursorCatalog) return;
   NSString *resolved = [_cursorCatalog resolveCurrentCursorId];
-  if ([resolved isEqualToString:_currentCursorId]) return;
+  if ([resolved isEqualToString:[self safeCursorId]]) return;
 
-  _currentCursorId = resolved;
+  [self setSafeCursorId:resolved];
   double now = HostNowMs();
-  if (now - _lastRealMoveMs <= kSynthesizedMoveGapMs) return;  // a real move carried it
+  if (now - _lastRealMoveMs.load(std::memory_order_relaxed) <= kSynthesizedMoveGapMs) {
+    return;  // a real move carried it
+  }
 
   CGPoint point = [self currentDisplayPoint];
   NSMutableDictionary *dict = [self baseEventWithType:@"mouseMoved"
-                                            modifiers:NSEvent.modifierFlags
+                                            modifiers:ModifierStrings(NSEvent.modifierFlags)
                                             timestamp:now];
   dict[@"x"] = @(point.x);
   dict[@"y"] = @(point.y);
@@ -395,6 +626,10 @@ static BOOL InputMonitoringGranted() {
 }
 
 #pragma mark - Lifecycle
+
+- (void)setVideoStartHostMs:(double)hostMs {
+  _videoStartHostMs = hostMs;
+}
 
 - (void)setPaused:(BOOL)paused {
   _paused.store(paused, std::memory_order_relaxed);
@@ -410,10 +645,22 @@ static BOOL InputMonitoringGranted() {
   _stopping.store(true, std::memory_order_relaxed);
   _endProcessMs = HostNowMs();
 
+  // Stop the event tap on its dedicated thread. Wait until the thread reported
+  // its run loop is live (bounded), then disable the tap and stop the loop;
+  // the tap thread itself releases the tap + source as the loop returns.
+  if (_tapThread) {
+    dispatch_semaphore_wait(_tapReady,
+                            dispatch_time(DISPATCH_TIME_NOW, 2LL * NSEC_PER_SEC));
+    if (_eventTap) CGEventTapEnable(_eventTap, false);
+    if (_tapRunLoop) CFRunLoopStop(_tapRunLoop);
+  }
+
   // Tear down AppKit-affine resources on the main thread. dispatch_sync here
   // serialises against any in-flight handler/sampler (both on main), so no
   // append can race the close below.
   dispatch_block_t teardown = ^{
+    // Restore the process-wide coalescing default we disabled in -start.
+    [NSEvent setMouseCoalescingEnabled:YES];
     if (_monitor) {
       [NSEvent removeMonitor:_monitor];
       _monitor = nil;
@@ -473,13 +720,17 @@ static BOOL InputMonitoringGranted() {
     @"width" : @(_displayBounds.size.width),
     @"height" : @(_displayBounds.size.height),
   };
+  // Anchor the timeline to the screen video's first-frame host time so cursor
+  // source time 0 == video source time 0. Falls back to the stream-start host
+  // time when there's no video (e.g. it never started).
+  double anchorMs = _videoStartHostMs > 0 ? _videoStartHostMs : _hostStartMs;
   double endProcessMs = _endProcessMs > 0 ? _endProcessMs : HostNowMs();
   meta[@"session"] = @{
-    @"processTimeStartMs" : @(_hostStartMs),
+    @"processTimeStartMs" : @(anchorMs),
     @"processTimeEndMs" : @(endProcessMs),
-    @"unixStartMs" : @(_startedAtUnixMs),
+    @"unixStartMs" : @(_startedAtUnixMs + (anchorMs - _hostStartMs)),
     @"unixEndMs" : @(_startedAtUnixMs + (endProcessMs - _hostStartMs)),
-    @"durationMs" : @(endProcessMs - _hostStartMs),
+    @"durationMs" : @(endProcessMs - anchorMs),
     @"mouseMovesCount" : @([_moves count]),
     @"mouseClicksCount" : @([_clicks count]),
     @"keyStrokesCount" : @(_keys ? [_keys count] : 0),

@@ -15,6 +15,7 @@ import { Group, Layer, Rect, Stage } from "react-konva"
 import { ArtboardBackground } from "@/components/editor/canvas/artboard-background"
 import { ArtboardGrain } from "@/components/editor/canvas/artboard-grain"
 import { ArtboardPixelGrid } from "@/components/editor/canvas/artboard-pixel-grid"
+import { CanvasCursorOverlay } from "@/components/editor/canvas/canvas-cursor-overlay"
 import { CanvasVideoNode } from "@/components/editor/canvas/canvas-video-node"
 import {
   HOVER_OUTLINE_STROKE,
@@ -1311,6 +1312,7 @@ export default function EditorWorkspace() {
                     onVideoFpsMeasured={registerTimelineVideoFps}
                   />
                 ))}
+                <CanvasCursorOverlay />
               </Group>
               <Rect
                 x={0}

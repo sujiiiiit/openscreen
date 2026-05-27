@@ -38,6 +38,12 @@
               startedAtUnixMs:(double)startedAtUnixMs
                         error:(NSError **)error;
 
+// Anchor the cursor timeline's origin to the screen video's first-frame host
+// time (ScreenTrack -sessionStartHostMs) instead of the stream-start hostStartMs,
+// so the recorded cursor and the video share source time 0. Call before -finish
+// (i.e. before the manifest is written). 0 keeps the hostStartMs default.
+- (void)setVideoStartHostMs:(double)hostMs;
+
 // Drop events while paused / stopping.
 - (void)setPaused:(BOOL)paused;
 - (void)markStopping;

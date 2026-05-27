@@ -1342,6 +1342,10 @@ static CMSampleBufferRef ScreenTrackShiftedSampleBuffer(
 - (BOOL)hasWriter     { return _writer != nil; }
 - (BOOL)hasStarted    { return _started; }
 
+- (double)sessionStartHostMs {
+  return CMTIME_IS_VALID(_sessionStartTime) ? TimeToMilliseconds(_sessionStartTime) : 0;
+}
+
 - (NSString *)codecString {
   if ([_codec isEqualToString:AVVideoCodecTypeHEVC]) return @"hevc";
   if ([_codec isEqualToString:AVVideoCodecTypeH264]) return @"h264";

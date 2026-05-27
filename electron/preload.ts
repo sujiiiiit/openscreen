@@ -14,7 +14,7 @@ import type {
   RegionSelectionResult,
   WindowPickerSession,
 } from './ipc/window-picker'
-import type { ProjectSummary } from './ipc/projects'
+import type { CursorTrackData, ProjectSummary } from './ipc/projects'
 import type {
   ImportAssetPayload,
   ImportAssetResult,
@@ -107,6 +107,8 @@ const api = {
       payload: ImportAssetPayload,
     ): Promise<ImportAssetResult> =>
       ipcRenderer.invoke('projects:importAsset', folderPath, payload),
+    getCursorData: (folderPath: string): Promise<CursorTrackData | null> =>
+      ipcRenderer.invoke('projects:getCursorData', folderPath),
   },
   windowPicker: {
     confirm: (): Promise<void> => ipcRenderer.invoke('windowPicker:confirm'),

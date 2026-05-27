@@ -38,6 +38,8 @@ Use these names in code review, docs, comments, and new implementation plans. Th
 | Frozen clip frame                | Inactive clip visibility          | Playback sync rule that hides a canvas media node outside its active clip range instead of holding an edge frame.                     |
 | Border radius / rounded corners  | Corner radius (squircle)          | Per-node corner radius in artboard pixels, drawn as an iOS / macOS-style continuous-corner squircle.                                  |
 | iOS / macOS smooth corners       | Corner smoothing                  | Per-node 0–1 smoothing factor; 0 = circular arc, 0.6 = macOS look, 1 = fully continuous-curvature.                                    |
+| Custom / fake / SVG cursor       | Cursor overlay                    | Themed SVG cursor (`CanvasCursorOverlay`) drawn over the screen video from the recording's captured cursor track, replacing the OS cursor. |
+| Cursor click point               | Cursor hotspot                    | The point in a cursor SVG that sits on the recorded pointer position (0..1 fraction of the SVG box); drives the Konva offset. |
 
 ## Current Scope
 
@@ -62,6 +64,7 @@ Implemented:
 - Per-node video appearance via the Video sidebar tab: squircle corner radius + smoothing, a squircle-following border (width, color, alignment, offset), and a squircle-following drop shadow (color with baked alpha, X / Y, blur, spread).
 - Auto-routing of canvas / timeline selection to the Video tab via a `SidebarSelectionBridge`.
 - Non-destructive remove-from-canvas: deleting a video (recorded or imported) detaches it from the canvas/timeline but keeps it in the project; the Video tab lists it with an **Add** action to put it back.
+- Cursor overlay: a themed SVG cursor drawn over the screen recording, driven by captured cursor metadata, spring-smoothed and hotspot-accurate (Screen Studio-style). See [Cursor Overlay](#cursor-overlay).
 
 Not implemented yet:
 
@@ -91,6 +94,11 @@ Not implemented yet:
 | `components/editor/canvas/editor-workspace.tsx`           | Konva stage shell, layer composition, viewport sizing, zoom, pan, and keyboard shortcuts.                                                                       |
 | `components/editor/canvas/artboard-pixel-grid.tsx`        | Custom non-listening pixel grid renderer for high zoom inside the artboard.                                                                                     |
 | `components/editor/canvas/canvas-video-node.tsx`          | Live video node rendering, frame callbacks, object URL playback, cover crop attrs, squircle sceneFunc with passes for drop shadow (off-canvas-cast technique) and per-node border, hitFunc kept at the node body, and Konva node registration.   |
+| `components/editor/canvas/canvas-cursor-overlay.tsx`     | `CanvasCursorOverlay` — one Konva `Image` in the artboard clip group that samples the captured cursor track by playback source time and draws the themed SVG at its hotspot. Imperative on the hot path. See [Cursor Overlay](#cursor-overlay). |
+| `lib/cursors/cursor-track.ts`                            | Pure cursor-data processing: raw samples → deterministic pre-integrated spring (`buildSmoothedTrack`) → `sampleCursorAtTime`. |
+| `lib/cursors/cursor-set.ts`                              | Maps a captured `cursorId` (NSCursor name) → themed SVG asset + hotspot, with base-set fallback. |
+| `lib/cursors/cursor-manifest.ts`                         | Generated cursor index (hotspot + size per asset). Built by `scripts/generate-cursor-manifest.mjs`. |
+| `electron/ipc/projects.ts` (`projects:getCursorData`)    | Read-only IPC that loads a recording's cursor track (`mousemoves-0.json` + `input` manifest entry) into `CursorTrackData`. |
 | `components/editor/video-panel.tsx`                       | Video tab UI: file-card list of every project video — on-canvas videos (action: **Select**) followed by detached videos (action: **Add**) — with the appearance controls (Corners — radius + smoothing; Border — width, color, alignment, offset; Shadow — color with baked alpha, X, Y, blur, spread) shown when a card is selected.              |
 | `lib/rgba-color.ts`                                       | Minimal rgba parser / formatter shared by `CanvasVideoNode` and the Shadow color picker. Accepts `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb(...)`, `rgba(...)`, and `transparent`; emits a normalised `rgba(R, G, B, A)` string.                                                                |
 | `components/editor/sidebar/selection-bridge.tsx`          | Subscribes to canvas selection and switches the sidebar to the Video tab + opens the sidebar whenever a video is selected.                                      |
@@ -507,6 +515,45 @@ Performance notes:
 - Hover preview and committed scrubbing share the same visibility cache and seek primitives (`safeSeekElement`, `getSeekableTimelineSourceTime`, `resolveTimelineFrame`, `syncTimelineVisibility`) and both coalesce to a single in-flight seek per element. They differ only in bookkeeping (`hoverSeekStateRef` vs `committedSeekStateRef`) and the completion decision: hover drops a near-miss landing, committed paints it and reissues toward the live playhead.
 - The implementation keeps the existing constant Konva layer count and does not add DOM overlays per canvas node.
 
+## Cursor Overlay
+
+A themed SVG cursor drawn on top of the screen recording, driven by the cursor metadata the mac-addon captured into the recording's input sidecars (`mousemoves-0.json` + the `input` manifest entry). It replaces the OS cursor baked into the video with a crisp, restylable, hotspot-accurate pointer (Screen Studio-style). See `docs/screen-recording-addon.md` → Input capture for the capture side.
+
+Files:
+
+- `lib/cursors/cursor-manifest.ts` — **generated** by `scripts/generate-cursor-manifest.mjs`. A typed index of every cursor SVG (24 sets) with its hotspot (0..1 fraction, parsed from the `<asset>-<variant>__<hotXpct>-<hotYpct>.svg` filename) and intrinsic size. Re-run the script after adding/replacing assets in `public/assets/cursors/`.
+- `lib/cursors/cursor-set.ts` — maps a captured `cursorId` (NSCursor name) → themed asset via `NS_NAME_TO_ASSET` (mirrors Screen Studio's `macos/index.ts`), with fallback to the base set for incomplete custom sets. Helpers: `resolveCursorAsset`, `cursorDrawOrigin`, `cursorRenderSize`.
+- `lib/cursors/cursor-track.ts` — pure processing: `rawSamplesFromMoves` → `buildSmoothedTrack` (a deterministic, pre-integrated critically-damped spring over a fixed 120 Hz timestep) → `sampleCursorAtTime`. Deterministic so playback, backward scrub, and export all agree.
+- `components/editor/canvas/canvas-cursor-overlay.tsx` — `CanvasCursorOverlay`, one `Konva.Image` inside the artboard clip group, above the videos.
+- `public/assets/cursors/` — the SVG/PNG assets extracted from Screen Studio (166 files, sets `macos`, `macos-tahoe`, `touch`, `halloween`, `custom-1..20`). Default render set is `macos`.
+
+Data flow:
+
+- `projects:getCursorData(folder)` (read-only IPC, `electron/ipc/projects.ts`) reads the recording's `mousemoves-0.json` + the `input` output's `session.processTimeStartMs` / `displayBoundsPoints` and returns `CursorTrackData`. The overlay derives `folder` from the screen video's `file://` `objectUrl`, so the provider is untouched.
+- On load it builds the smoothed track once; on every playhead tick (`subscribeTimelineTicks`) it samples by **source time** and places the cursor imperatively.
+
+Time + coordinate mapping (the precise part):
+
+- **Time**: timeline seconds → screen recording source seconds via the screen clip (`t − clip.start + clip.sourceIn`), ×1000 = recording-relative ms = the cursor track's time base (= `processTimeMs − session.processTimeStartMs`). `session.processTimeStartMs` is anchored to the screen video's **first-frame** host time (not stream start), so cursor source time 0 lines up with video source time 0 — without this the cursor lags the video by ScreenCaptureKit's ~100–200 ms startup delay. Sampling by source time makes trims/offsets free. Outside the captured range → cursor hidden.
+- **Position**: display-relative logical point → display fraction (`x / displayWidth`) → source pixel (`× intrinsicWidth`) → cover-crop (`getVideoCoverCrop`) → node-local px → rotate by the node rotation and offset by the node `(x, y)` → artboard coords. Off-crop points hide the cursor.
+- **Hotspot**: the cursor SVG is placed via Konva `offset = hotspot × renderSize`, so the hotspot pixel lands exactly on the artboard point and rotation/scale pivot on it.
+- **Size**: `CURSOR_BOX_HEIGHT_POINTS × CURSOR_SCALE` (display points) × the uniform px-per-display-point scale; cosmetic only (position/hotspot are exact). Tune the two constants in `canvas-cursor-overlay.tsx`.
+
+Performance posture:
+
+- One constant Konva node, no extra layer (rides the content layer's `batchDraw`). Scales to the 5000-node stress case trivially.
+- No per-frame React state: position/size/offset/visibility are imperative; only the cursor *bitmap* is React state and changes only when the cursor *shape* changes. The smoothed track is pre-integrated once, so per-tick work is one binary search + constant math.
+- Cursor SVGs are cached in a module-level `Map` shared across mounts.
+
+This state is **session-only / derived** — the cursor track is loaded from the recording sidecars on demand and is never written to `project.json` (see Project Persistence). Cursor set + size are constants today; promoting them to per-project settings would make them persistable.
+
+Known limitations / v2:
+
+- Full-display recordings only. Region/window captures would need the source-rect offset folded into the display→source mapping.
+- Custom app cursors (`cursorId = custom-N` from the addon) fall back to the pointer; using the captured PNG from the recording's `cursors/` folder is future work.
+- Click effects, cursor click-spring scale, "hide when idle", and shake removal (Screen Studio cursor options) are not implemented.
+- Cursor set + size are not user-configurable yet (constants in `canvas-cursor-overlay.tsx`).
+
 ## Interaction Model
 
 Selection:
@@ -676,7 +723,7 @@ Schema (`electron/ipc/project-schema.ts`):
 - `timelineClips: ProjectTimelineClip[]` — `start`, `end`, `sourceIn`, `sourceOut` per clip. Only on-canvas videos have a clip; detached videos carry none.
 - `updatedAtUnixMs` — refreshed by main on every successful write.
 
-Not persisted: selection, playhead time, timeline zoom/scroll, viewport transform, hover preview state, measured per-clip source fps (`videoFpsRef`, re-measured each session for frame-stepping), the in-memory undo/redo history (`historyRef`), the session-only imported URL cache (`sessionImportedUrlsRef`), runtime `objectUrl` strings, all `*Ref` runtime state. The view always re-fits the artboard on load.
+Not persisted: selection, playhead time, timeline zoom/scroll, viewport transform, hover preview state, measured per-clip source fps (`videoFpsRef`, re-measured each session for frame-stepping), the **cursor overlay track** (loaded on demand from the recording's input sidecars via `projects:getCursorData` and re-built each session — see [Cursor Overlay](#cursor-overlay)), the in-memory undo/redo history (`historyRef`), the session-only imported URL cache (`sessionImportedUrlsRef`), runtime `objectUrl` strings, all `*Ref` runtime state. The view always re-fits the artboard on load.
 
 Derived-on-load (not persisted, but reconstructed every hydration): a recording's `CanvasVideoItem.fileSize` is read back from `ProjectAsset.fileSize`, not from `project.json`. Both hydration paths (fast-path restore and slow-path synthesis) and both undo/redo restores route through `resolveFileSizeForRestore`. Imported videos keep their persisted `source.fileSize` instead.
 

@@ -274,6 +274,11 @@
   BOOL screenOk = [_screen finishWriterSync:&screenFinishError];
   NSError *cameraFinishError = nil;
   BOOL cameraOk = [_camera finishWriterSync:&cameraFinishError];
+  // Anchor the cursor timeline to the screen video's first-frame host time so
+  // the recorded cursor and the video share source time 0 (otherwise the
+  // ScreenCaptureKit startup delay makes the cursor lag the video). Must run
+  // before -finish writes the input session block.
+  [_input setVideoStartHostMs:[_screen sessionStartHostMs]];
   [_input finish];
 
   _running = NO;

@@ -354,6 +354,22 @@ export interface ProjectSummary {
   assetUrlsByVideoId: Record<string, string>
 }
 
+// Mirrors `electron/ipc/projects.ts`.
+export interface CursorMoveSample {
+  processTimeMs: number
+  x: number
+  y: number
+  cursorId?: string
+  type?: string
+}
+
+export interface CursorTrackData {
+  moves: CursorMoveSample[]
+  processTimeStartMs: number
+  displayWidth: number
+  displayHeight: number
+}
+
 export interface Api {
   recorder: {
     getState: () => Promise<RecorderState>
@@ -410,6 +426,7 @@ export interface Api {
       folderPath: string,
       payload: ImportAssetPayload,
     ) => Promise<ImportAssetResult>
+    getCursorData: (folderPath: string) => Promise<CursorTrackData | null>
   }
   windowPicker: {
     confirm: () => Promise<void>

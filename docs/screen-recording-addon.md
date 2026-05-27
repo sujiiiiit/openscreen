@@ -38,8 +38,8 @@ The Electron main process validates settings against this set before each `start
 A second capture path, **independent of the video**, records mouse, keystroke, and cursor-shape metadata into Screen Studio-shaped sidecar JSON files next to the screen video. Owned by `InputTrack` (events) + `CursorCatalog` (cursor shapes); wired into `RecorderSession` alongside the screen/camera/audio tracks. None of this alters the recorded frames — it's pure sidecar data an editor can use for cursor smoothing, click-driven auto-zoom, keystroke overlays, etc.
 
 ```
-NSEvent global monitor (main run loop) ──► InputTrack ──► mousemoves-0.json / mouseclicks-0.json / keystrokes-0.json
-CVDisplayLink-equivalent main-queue timer ─► CursorCatalog ─► cursors.json + cursors/<id>.png
+CGEventTap (HID, listen-only, dedicated thread) ──► InputTrack ──► mousemoves-0.json / mouseclicks-0.json / keystrokes-0.json
+main-queue timer (display-refresh) ─► CursorCatalog ─► cursors.json + cursors/<id>.png
 ```
 
 **Options** (`StartRecordingOptions`, parsed in `Bindings.mm`):
@@ -59,7 +59,7 @@ CVDisplayLink-equivalent main-queue timer ─► CursorCatalog ─► cursors.js
 | `keystrokes-0.json` | `{activeModifiers[], character, isARepeat, processTimeMs, type:"keyDown"\|"keyUp", unixTimeMs}` |
 | `cursors.json` + `cursors/<id>.png` | `{hotSpot{x,y}, id, standardSize{width,height}, systemCursor}` per shape; PNGs at native asset resolution |
 
-**Clock model** — events carry the same dual clock the rest of the session uses: `processTimeMs = NSEvent.timestamp × 1000` (seconds-since-boot, the `CMClockGetHostTimeClock` domain) and `unixTimeMs = processTimeMs + (startedAtUnixMs − hostStartMs)`. Unlike Screen Studio (whose `processTimeMs` is *process*-relative, ~444 ms at start), ours is *boot*-relative — the absolute origin differs but the editor-relevant relationship `event.processTimeMs − session.processTimeStartMs` and the `unixTimeMs` epoch are identical.
+**Clock model** — events carry host-clock timestamps (`processTimeMs`, `CMClockGetHostTimeClock` domain in ms) plus `unixTimeMs`. The CGEventTap path stamps `processTimeMs` with the host clock at callback time; the NSEvent fallback uses `NSEvent.timestamp × 1000` (same domain). The input `session.processTimeStartMs` is **anchored to the screen video's first written frame** (`ScreenTrack -sessionStartHostMs`, passed via `RecorderSession -setVideoStartHostMs:`), **not** the stream-start `hostStartMs`. This matters: ScreenCaptureKit delivers the first frame ~100–200 ms after the stream starts, and the `.mov`'s source time 0 is that first frame — so anchoring the cursor timeline to `hostStartMs` instead would make the cursor lag the video by that startup delay. With the anchor, `event.processTimeMs − session.processTimeStartMs` equals the video's source time, so cursor and video share origin 0. Moves captured before the first frame get a negative relative time and are dropped by the renderer.
 
 **Coordinates** — display-relative **logical points**, top-left origin: `CGEventGetLocation(event.CGEvent) − CGDisplayBounds(displayId).origin`. Map point → video pixel with the manifest's `scaleFactor` (Retina backing scale). The recorded display is `target.displayId` (or main display).
 
@@ -67,7 +67,9 @@ CVDisplayLink-equivalent main-queue timer ─► CursorCatalog ─► cursors.js
 
 **Manifest** — `RecorderSession` adds an `input`-source entry to `outputs[]` (filenames, `captureKeyStrokes`/`captureCursorShapes`, `displayId`, `displayBoundsPoints`, and a `session` block with the dual-clock window + per-stream counts), and merges the sidecar paths into the `files` map (`mouseMoves`/`mouseClicks`/`keyStrokes`/`cursors`).
 
-**Threading & performance** — the `NSEvent` monitor handler and cursor sampler both run on the main thread (single-threaded, no locks on the cursor cache); event serialization + file I/O are dispatched to a private serial queue via `StreamingJSONArray`, so the high-frequency move stream (~120 Hz) never blocks the main thread or routes through per-event IPC. `start`/`finish` marshal their AppKit work (monitor install/remove, catalog build) to the main thread with `dispatch_sync`, so they're safe to call from the background `StartRecordingWorker`.
+**Capture mechanism** — a **listen-only `CGEventTap` at `kCGHIDEventTap`** on a dedicated `CFRunLoop` thread is the primary path. It's chosen over an `NSEvent` global monitor for three reasons the global monitor can't satisfy: (1) it captures moves **over our own recorder UI** (global `NSEvent` monitors only see *other* apps' events — the cause of the multi-second opening gap), (2) it sees **every HID sample before coalescing**, and (3) it's **independent of the main run loop** so main-thread load can't throttle capture. It relies on the **Accessibility** permission, which the app already requires (`REQUIRED_PERMISSIONS` in `electron/ipc/permissions.ts`); keystroke events additionally need Input Monitoring (gated by `_keyStrokesActive`). If `CGEventTapCreate` fails (e.g. Accessibility revoked), `InputTrack` falls back to an `NSEvent` global monitor with mouse coalescing disabled. The tap callback runs on the tap thread, so `_currentCursorId` (written by the main-thread cursor sampler) is guarded by an `os_unfair_lock`; a `dispatch_semaphore` handshake makes `-finish` stop the tap thread without racing its setup/teardown.
+
+**Threading & performance** — event serialization + file I/O are dispatched to a private serial queue via `StreamingJSONArray`, so the high-frequency move stream (~120 Hz) never blocks the capture thread or routes through per-event IPC. The cursor sampler + catalog build run on the main thread (NSCursor is main-thread-affine); the catalog build is kicked off **asynchronously after** the tap/monitor is live so it never delays the first captured movement.
 
 ## Color-fidelity philosophy
 
@@ -198,7 +200,7 @@ ls <session>/cursors/ | wc -l   # 38 system cursors on a normal session
 - Per-app audio scoping (`audioApplications`) is **macOS 15+** for `display` and `region` capture modes. On `window` mode pre-15, `SCContentFilter` implicitly scopes audio to the targeted window's owning app.
 - SCK microphone capture is **macOS 15+**; older macOS receives no microphone track. The mic toggle remains in the UI but produces no audio on 13/14.
 - SCK delivers frames only when content changes. The `frameRate` setting is a *minimum interval* — actual delivered rates are typically below 120 fps even on a ProMotion display when the screen is static.
-- **Input capture sees only other apps' events.** `NSEvent` *global* monitors don't receive events delivered to the recorder's own windows, so interaction with OpenScreen's own UI isn't captured (matches Screen Studio; you record other apps).
+- **Input capture requires Accessibility.** The primary `CGEventTap` needs the Accessibility grant (already a `REQUIRED_PERMISSIONS` entry). Without it, capture falls back to an `NSEvent` global monitor, which does **not** see moves over our own recorder UI (causing a multi-second opening gap) and only delivers ~refresh-rate coalesced moves.
 - **Cursor-shape resolution depends on `[NSCursor currentSystemCursor]`.** Validated to resolve all 38 system cursors correctly under an initialized `NSApplication` (always true in Electron). A bare non-GUI process returns no images for `arrow`/`iBeam` — a test-harness artifact, not a runtime concern.
 - **Keystroke capture records typed text in plaintext** (including passwords) when enabled. It is off by default, opt-in via the settings menu, and additionally gated by the Input Monitoring TCC permission.
 - The input path does **not** capture scroll-wheel events (neither does Screen Studio in the inspected format).

@@ -760,12 +760,12 @@ export function EditorTimelinePanel() {
                 "after:absolute after:right-0 after:bottom-0 after:size-1 after:translate-x-1/2 after:rounded-full after:bg-white/35 after:content-['']",
               timeUnitScale:
                 "text-[10px] font-medium tabular-nums text-white/45",
-              timeAreaInteract: "cursor-crosshair",
+              timeAreaInteract: "cursor-default",
               editArea: "mt-3 bg-transparent",
               editRow: "bg-transparent [background-image:none!important]",
               action: "bg-transparent p-1",
-              cursor: "border-sky-300",
-              cursorTop: "drop-shadow",
+              cursor: "border-sky-400",
+              cursorTop: "text-sky-400 drop-shadow-[0_1px_2px_rgba(8,47,73,0.45)]",
               cursorArea: "cursor-ew-resize",
               dragLine: "border-sky-300/80",
             }}
@@ -841,8 +841,24 @@ const TimelineHoverGhostCursor = memo(function TimelineHoverGhostCursor({
     <div
       ref={ghostRef}
       aria-hidden="true"
-      className="pointer-events-none absolute top-8 left-0 bottom-0 z-10 w-px border-l border-dashed border-white/40"
+      className="pointer-events-none absolute top-8 left-0 bottom-0 z-10 w-px border-l border-white/70"
       style={{ visibility: "hidden" }}
-    />
+    >
+      {/* Same teardrop pin as the committed playhead, in white to distinguish a
+          preview position from the committed one. Centred on the line's left
+          edge so the point sits on the hover line. */}
+      <svg
+        className="absolute top-0 left-0 -translate-x-1/2 text-white/70 drop-shadow-[0_1px_2px_rgba(0,0,0,0.5)]"
+        width="12"
+        height="22"
+        viewBox="0 0 12 22"
+        fill="none"
+      >
+        <path
+          d="M6 22C5.5 17 0 8.5 0 6C0 2.6863 2.6863 0 6 0C9.3137 0 12 2.6863 12 6C12 8.5 6.5 17 6 22Z"
+          fill="currentColor"
+        />
+      </svg>
+    </div>
   )
 })

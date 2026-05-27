@@ -272,6 +272,61 @@ async function readManifest(manifestPath: string): Promise<RecordingManifest | n
   }
 }
 
+async function readJsonArray<T>(filePath: string): Promise<T[] | null> {
+  try {
+    const raw = await fs.readFile(filePath, 'utf8')
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? (parsed as T[]) : null
+  } catch {
+    return null
+  }
+}
+
+// One captured pointer-move sample from `mousemoves-0.json` (Screen
+// Studio-shaped). Only the fields the cursor overlay needs are typed.
+export interface CursorMoveSample {
+  processTimeMs: number
+  x: number
+  y: number
+  cursorId?: string
+  type?: string
+}
+
+// Cursor metadata for one recording, resolved from its `recording.json` +
+// input sidecars. Coordinates are display-relative logical points; sample by
+// the screen video's source time (currentTime × 1000 ≈ processTimeMs − start).
+export interface CursorTrackData {
+  moves: CursorMoveSample[]
+  processTimeStartMs: number
+  displayWidth: number
+  displayHeight: number
+}
+
+async function loadCursorTrackData(folder: string): Promise<CursorTrackData | null> {
+  const manifestPath = await findManifestPath(folder)
+  if (!manifestPath) return null
+  const manifest = await readManifest(manifestPath)
+  if (!manifest) return null
+
+  const input = (manifest.outputs ?? []).find((output) => output.source === 'input')
+  if (!input) return null
+
+  const movesPath = resolveAssetPath(
+    folder,
+    manifest.files?.mouseMoves ?? input.mouseMovesFilename,
+  )
+  if (!movesPath) return null
+  const moves = await readJsonArray<CursorMoveSample>(movesPath)
+  if (!moves || moves.length === 0) return null
+
+  return {
+    moves,
+    processTimeStartMs: input.session?.processTimeStartMs ?? manifest.hostStartMs ?? 0,
+    displayWidth: input.displayBoundsPoints?.width ?? 0,
+    displayHeight: input.displayBoundsPoints?.height ?? 0,
+  }
+}
+
 function resolveAssetPath(folder: string, candidate: string | undefined): string | null {
   if (!candidate) return null
   return path.isAbsolute(candidate) ? candidate : path.join(folder, candidate)
@@ -522,6 +577,16 @@ export function registerProjectsHandlers(options: RegisterProjectsHandlersOption
     // new project snaps back to whatever was active before.
     return setActiveProjectFromFolder(result.filePaths[0])
   })
+
+  // Read-only: load a recording's captured cursor track (mouse moves + display
+  // bounds) from its input sidecars. Never promotes the active project.
+  ipcMain.handle(
+    'projects:getCursorData',
+    async (_event, folderPath: string): Promise<CursorTrackData | null> => {
+      if (typeof folderPath !== 'string' || !folderPath) return null
+      return loadCursorTrackData(folderPath)
+    },
+  )
 
   ipcMain.handle(
     'projects:saveState',
