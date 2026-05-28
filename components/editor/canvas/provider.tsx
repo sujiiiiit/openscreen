@@ -56,9 +56,11 @@ import {
   type HistoryCommitTag,
 } from "@/components/editor/canvas/history"
 import {
+  CURSOR_MOTION_BLUR_DEFAULT,
   CURSOR_SIZE_DEFAULT,
   CURSOR_SIZE_MAX,
   CURSOR_SIZE_MIN,
+  clampCursorMotionBlur,
 } from "@/components/editor/canvas/cursor-scene"
 
 const DEFAULT_VIEWPORT_SIZE: CanvasSize = { width: 0, height: 0 }
@@ -71,6 +73,7 @@ const DEFAULT_ARTBOARD: EditorArtboard = {
   grain: 0,
   padding: 0,
   cursorSizeMultiplier: CURSOR_SIZE_DEFAULT,
+  cursorMotionBlur: CURSOR_MOTION_BLUR_DEFAULT,
 }
 const ARTBOARD_PADDING_MAX = 500
 const DEFAULT_VIEW_TRANSFORM = getFitViewTransform(
@@ -191,6 +194,7 @@ type EditorCanvasContextValue = {
   setArtboardGrain: (grain: number) => void
   setArtboardPadding: (padding: number) => void
   setCursorSizeMultiplier: (multiplier: number) => void
+  setCursorMotionBlur: (intensity: number) => void
   setViewportSize: (size: CanvasSize) => void
   setViewTransform: (transform: ViewTransform) => void
   fitArtboardToViewport: () => void
@@ -277,6 +281,7 @@ type EditorCanvasActionsContextValue = Pick<
   | "setArtboardGrain"
   | "setArtboardPadding"
   | "setCursorSizeMultiplier"
+  | "setCursorMotionBlur"
   | "setViewportSize"
   | "setViewTransform"
   | "fitArtboardToViewport"
@@ -2246,6 +2251,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const prevGrain = artboardRef.current.grain
       const prevPadding = artboardRef.current.padding
       const prevCursorSize = artboardRef.current.cursorSizeMultiplier
+      const prevCursorMotionBlur = artboardRef.current.cursorMotionBlur
       let nextArtboard: EditorArtboard
       if (id === AUTO_ARTBOARD_PRESET_ID) {
         const auto = resolveAutoArtboard(sourceVideoDimsRef.current)
@@ -2257,6 +2263,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           grain: prevGrain,
           padding: prevPadding,
           cursorSizeMultiplier: prevCursorSize,
+          cursorMotionBlur: prevCursorMotionBlur,
         }
       } else {
         const preset = getArtboardPreset(id)
@@ -2268,6 +2275,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           grain: prevGrain,
           padding: prevPadding,
           cursorSizeMultiplier: prevCursorSize,
+          cursorMotionBlur: prevCursorMotionBlur,
         }
       }
 
@@ -2712,6 +2720,22 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     setArtboard(nextArtboard)
   }, [])
 
+  // Cursor motion-blur intensity (0..1). The blur velocity is derived from
+  // cursor speed (see cursor-scene.ts `computeCursorBlur`); this is the single
+  // user-facing amount. Applied identically by the editor overlay and export.
+  const setCursorMotionBlur = useCallback((intensity: number) => {
+    const current = artboardRef.current
+    const clamped = clampCursorMotionBlur(intensity)
+    if (current.cursorMotionBlur === clamped) return
+    historyCommitTagRef.current = "cursor-motion-blur"
+    const nextArtboard: EditorArtboard = {
+      ...current,
+      cursorMotionBlur: clamped,
+    }
+    artboardRef.current = nextArtboard
+    setArtboard(nextArtboard)
+  }, [])
+
   const setArtboardPadding = useCallback(
     (padding: number) => {
       const current = artboardRef.current
@@ -3071,6 +3095,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         padding: savedState.artboard.padding,
         cursorSizeMultiplier:
           savedState.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT,
+        cursorMotionBlur:
+          savedState.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT,
       }
       const toCanvasVideo = (video: ProjectStateV1["videos"][number]) =>
         projectVideoToCanvasVideo(
@@ -3279,6 +3305,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setArtboardGrain,
       setArtboardPadding,
       setCursorSizeMultiplier,
+      setCursorMotionBlur,
       setViewportSize,
       setViewTransform,
       fitArtboardToViewport,
@@ -3300,6 +3327,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setArtboardGrain,
       setArtboardPadding,
       setCursorSizeMultiplier,
+      setCursorMotionBlur,
       setViewportSize,
       setViewTransform,
       fitArtboardToViewport,
@@ -3448,6 +3476,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         padding: savedState.artboard.padding,
         cursorSizeMultiplier:
           savedState.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT,
+        cursorMotionBlur:
+          savedState.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT,
       }
       artboardRef.current = savedArtboard
       // Hydration is a one-shot synchronization from disk into React state —
@@ -3566,6 +3596,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const previousGrain = artboardRef.current.grain
       const previousPadding = artboardRef.current.padding
       const previousCursorSize = artboardRef.current.cursorSizeMultiplier
+      const previousCursorMotionBlur = artboardRef.current.cursorMotionBlur
       const nextArtboard: EditorArtboard = useAuto
         ? (() => {
             const auto = resolveAutoArtboard(sourceVideoDimsRef.current)
@@ -3577,6 +3608,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               grain: previousGrain,
               padding: previousPadding,
               cursorSizeMultiplier: previousCursorSize,
+              cursorMotionBlur: previousCursorMotionBlur,
             }
           })()
         : (() => {
@@ -3589,6 +3621,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               grain: previousGrain,
               padding: previousPadding,
               cursorSizeMultiplier: previousCursorSize,
+              cursorMotionBlur: previousCursorMotionBlur,
             }
           })()
       artboardRef.current = nextArtboard

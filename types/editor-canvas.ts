@@ -18,6 +18,10 @@ export type EditorArtboard = CanvasSize & {
   // See cursor-scene.ts CURSOR_SIZE_MIN/MAX. Project-level: one screen
   // recording per project, so the cursor size is global to the artboard.
   cursorSizeMultiplier: number
+  // Cursor motion-blur intensity, 0..1 (0 = off). The blur velocity is derived
+  // from cursor speed; this is the single user-facing amount. See cursor-scene.ts
+  // CURSOR_MOTION_BLUR_DEFAULT / computeCursorBlur.
+  cursorMotionBlur: number
 }
 
 export const ARTBOARD_SELECTION_ID = "__artboard__"

@@ -18,7 +18,10 @@ import type {
   ProjectTimelineClip,
 } from "@/types/api"
 import { exportResolutionPixels } from "@/lib/editor-project/export-settings"
-import { placeCursor } from "@/components/editor/canvas/cursor-scene"
+import {
+  computeCursorBlur,
+  placeCursor,
+} from "@/components/editor/canvas/cursor-scene"
 import { formatToVideoCodec } from "./codec-probe"
 import { buildExportStage } from "./build-stage"
 import { streamTimelineAudio } from "./decode-audio"
@@ -338,8 +341,16 @@ export async function runExport(
         // only shows while the screen clip is active). Same placement math as
         // the live editor's CanvasCursorOverlay.
         if (handles.cursor) {
-          const { node, track, video, screenVideoId, sizeMultiplier, images } =
-            handles.cursor
+          const {
+            node,
+            track,
+            video,
+            screenVideoId,
+            sizeMultiplier,
+            motionBlur,
+            renderer,
+            images,
+          } = handles.cursor
           const screenEntry = active.find(
             (entry) => entry.videoId === screenVideoId,
           )
@@ -349,10 +360,37 @@ export async function runExport(
               })
             : null
           const image = placement ? images.get(placement.url) : undefined
-          if (placement && placement.onScreen && image) {
-            node.image(image)
-            node.size({ width: placement.width, height: placement.height })
-            node.offset({ x: placement.offsetX, y: placement.offsetY })
+          if (placement && placement.onScreen && image && screenEntry) {
+            // Motion blur — same derivation + GPU/CPU renderer as the editor
+            // preview, injected via node.image(), so the exported smear matches
+            // frame-for-frame.
+            const blur = computeCursorBlur(
+              track,
+              video,
+              screenEntry.sourceTimeSec,
+              { intensity: motionBlur, sizeMultiplier },
+            )
+            if (blur) {
+              const { canvas, padding } = renderer.render(
+                image,
+                placement.width,
+                placement.height,
+                blur,
+              )
+              node.image(canvas)
+              node.size({
+                width: placement.width + 2 * padding,
+                height: placement.height + 2 * padding,
+              })
+              node.offset({
+                x: placement.offsetX + padding,
+                y: placement.offsetY + padding,
+              })
+            } else {
+              node.image(image)
+              node.size({ width: placement.width, height: placement.height })
+              node.offset({ x: placement.offsetX, y: placement.offsetY })
+            }
             node.position({ x: placement.x, y: placement.y })
             node.rotation(placement.rotation)
             node.visible(true)

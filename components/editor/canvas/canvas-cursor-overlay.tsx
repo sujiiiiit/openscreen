@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef } from "react"
 import { Image as KonvaImage } from "react-konva"
 import type Konva from "konva"
 
@@ -8,7 +8,13 @@ import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
 import type { CanvasVideoItem } from "@/types/editor-canvas"
 
 import {
+  createSpriteMotionBlurRenderer,
+  type SpriteMotionBlurRenderer,
+} from "@/lib/motion-blur/sprite-motion-blur"
+
+import {
   buildCursorTrack,
+  computeCursorBlur,
   placeCursor,
   projectFolderFromObjectUrl,
 } from "./cursor-scene"
@@ -46,6 +52,7 @@ export function CanvasCursorOverlay() {
     useEditorCanvasTimelineActions()
 
   const cursorSizeMultiplier = artboard.cursorSizeMultiplier
+  const cursorMotionBlur = artboard.cursorMotionBlur
 
   const screenVideo = videos.find((video) => video.role === "screen") ?? null
   const screenClip = screenVideo
@@ -53,25 +60,34 @@ export function CanvasCursorOverlay() {
     : null
 
   const imageRef = useRef<Konva.Image | null>(null)
-  // The cursor bitmap is React state (it changes only when the cursor *shape*
-  // changes — infrequent — so it never touches the per-frame hot path).
-  // Position / size / offset / visibility are driven imperatively below.
-  const [image, setImage] = useState<HTMLImageElement | undefined>(undefined)
+  // The cursor node's image (sharp SVG or GPU-blurred canvas), its size, offset,
+  // position and visibility are all driven imperatively in `place()` — nothing
+  // about the cursor touches React on the per-frame hot path.
+  const rendererRef = useRef<SpriteMotionBlurRenderer | null>(null)
+  // Latest `place` for the SVG-load redraw closure (avoids `place` referencing
+  // itself). Kept current via an effect below.
+  const placeRef = useRef<(seconds: number) => void>(() => {})
   const trackRef = useRef<SmoothedCursorTrack | null>(null)
   const videoRef = useRef<CanvasVideoItem | null>(screenVideo)
   const clipRef = useRef(screenClip)
   const sizeRef = useRef(cursorSizeMultiplier)
+  const motionBlurRef = useRef(cursorMotionBlur)
   const currentUrlRef = useRef<string | null>(null)
   // Last committed playhead time the cursor was placed at. Lets the ruler
   // hover-scrub preview restore the exact committed position when the hover
   // ends, independent of the debounced `timelineTime` React state.
   const lastCommittedTimeRef = useRef(timelineTime)
 
-  // Keep the geometry/clip/size the tick closure reads current without
-  // re-subscribing.
-  videoRef.current = screenVideo
-  clipRef.current = screenClip
-  sizeRef.current = cursorSizeMultiplier
+  // Keep the geometry/clip/size/blur the tick closure reads current without
+  // re-subscribing. Synced in an effect (not during render) so it satisfies the
+  // refs rule; it has no deps so it runs after every commit, ahead of the tick
+  // subscription and the paused re-place effect declared below.
+  useEffect(() => {
+    videoRef.current = screenVideo
+    clipRef.current = screenClip
+    sizeRef.current = cursorSizeMultiplier
+    motionBlurRef.current = cursorMotionBlur
+  })
 
   // Map a display-relative point (logical points, top-left origin) to artboard
   // coordinates, through the screen video's cover-crop and transform. Returns
@@ -113,18 +129,73 @@ export function CanvasCursorOverlay() {
       return
     }
 
-    if (currentUrlRef.current !== placement.url) {
-      currentUrlRef.current = placement.url
-      setImage(loadCursorImage(placement.url))
+    const svg = loadCursorImage(placement.url)
+    currentUrlRef.current = placement.url
+    // An SVG fetched this frame may not be decoded yet; redraw once it loads so
+    // it (and any blur) appears without waiting for the next tick.
+    if (!svg.complete) {
+      svg.addEventListener(
+        "load",
+        () => placeRef.current(lastCommittedTimeRef.current),
+        { once: true },
+      )
     }
-    node.size({ width: placement.width, height: placement.height })
-    // Offset so the hotspot pixel sits exactly on the artboard point; rotation
-    // then pivots around the hotspot, matching the recorded pointer.
-    node.offset({ x: placement.offsetX, y: placement.offsetY })
+
+    // Motion blur: derive the smear from how fast the cursor moved, then render
+    // it on the GPU (CPU fallback) and inject the result via `node.image()`.
+    // No per-frame `node.cache()` / Konva filter — that was the lag. A still
+    // pointer (or no renderer / undecoded svg) just draws the sharp SVG.
+    const blur =
+      placement.onScreen
+        ? computeCursorBlur(track, video, sourceSeconds, {
+            intensity: motionBlurRef.current,
+            sizeMultiplier: sizeRef.current,
+          })
+        : null
+    const renderer = rendererRef.current
+    if (blur && renderer && svg.complete) {
+      const { canvas, padding } = renderer.render(
+        svg,
+        placement.width,
+        placement.height,
+        blur,
+      )
+      node.image(canvas)
+      node.size({
+        width: placement.width + 2 * padding,
+        height: placement.height + 2 * padding,
+      })
+      // Shift the hotspot offset by the blur margin so the pointer stays pinned.
+      node.offset({
+        x: placement.offsetX + padding,
+        y: placement.offsetY + padding,
+      })
+    } else {
+      node.image(svg)
+      node.size({ width: placement.width, height: placement.height })
+      // Offset so the hotspot pixel sits exactly on the artboard point; rotation
+      // then pivots around the hotspot, matching the recorded pointer.
+      node.offset({ x: placement.offsetX, y: placement.offsetY })
+    }
     node.position({ x: placement.x, y: placement.y })
     node.rotation(placement.rotation)
     node.visible(placement.onScreen)
     layer?.batchDraw()
+  }, [])
+
+  useEffect(() => {
+    placeRef.current = place
+  }, [place])
+
+  // One persistent sprite-blur renderer (GPU, CPU fallback) for the cursor's
+  // lifetime. Created on the client; torn down on unmount.
+  useEffect(() => {
+    const renderer = createSpriteMotionBlurRenderer()
+    rendererRef.current = renderer
+    return () => {
+      renderer.destroy()
+      rendererRef.current = null
+    }
   }, [])
 
   // Load + pre-spring the cursor track whenever the screen recording changes.
@@ -182,6 +253,7 @@ export function CanvasCursorOverlay() {
     place,
     timelineTime,
     cursorSizeMultiplier,
+    cursorMotionBlur,
     screenVideo?.x,
     screenVideo?.y,
     screenVideo?.width,
@@ -192,9 +264,11 @@ export function CanvasCursorOverlay() {
   if (!screenVideo) return null
 
   return (
+    // `image` is driven imperatively in `place()` (sharp SVG or blurred canvas),
+    // so the prop is intentionally undefined (cast to satisfy the required type).
     <KonvaImage
       ref={imageRef}
-      image={image as CanvasImageSource}
+      image={undefined as unknown as CanvasImageSource}
       listening={false}
       perfectDrawEnabled={false}
     />

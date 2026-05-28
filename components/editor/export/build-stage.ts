@@ -9,13 +9,19 @@ import {
 } from "@/components/editor/canvas/video-scene-draw"
 import {
   buildCursorTrack,
+  clampCursorMotionBlur,
   clampCursorSize,
+  CURSOR_MOTION_BLUR_DEFAULT,
   CURSOR_SET,
   CURSOR_SIZE_DEFAULT,
   projectFolderFromObjectUrl,
   type CursorVideoGeometry,
 } from "@/components/editor/canvas/cursor-scene"
 import { getVideoCoverCrop } from "@/components/editor/canvas/video-cover-crop"
+import {
+  createSpriteMotionBlurRenderer,
+  type SpriteMotionBlurRenderer,
+} from "@/lib/motion-blur/sprite-motion-blur"
 import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
 import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
 import {
@@ -58,6 +64,11 @@ export interface ExportCursorHandle {
   /** User-chosen render-size multiplier (artboard-level); 1 = recorded-accurate
    * minimum. Threaded into `placeCursor` so the export matches the preview. */
   sizeMultiplier: number
+  /** Cursor motion-blur intensity (0..1); fed to `computeCursorBlur` per frame
+   * so the exported smear matches the preview. */
+  motionBlur: number
+  /** GPU (CPU-fallback) sprite-blur renderer, reused across frames. */
+  renderer: SpriteMotionBlurRenderer
   /** Decoded cursor SVGs keyed by asset URL (the shape changes across frames). */
   images: Map<string, HTMLImageElement>
 }
@@ -214,6 +225,7 @@ export async function buildExportStage(
   const dispose = () => {
     stage.destroy()
     nodesByVideoId.clear()
+    cursor?.renderer.destroy()
     cursor?.images.clear()
   }
 
@@ -304,6 +316,9 @@ async function buildCursorOverlay(opts: {
   const sizeMultiplier = clampCursorSize(
     state.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT,
   )
+  const motionBlur = clampCursorMotionBlur(
+    state.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT,
+  )
 
   return {
     node,
@@ -311,6 +326,8 @@ async function buildCursorOverlay(opts: {
     video,
     screenVideoId: screenVideo.id,
     sizeMultiplier,
+    motionBlur,
+    renderer: createSpriteMotionBlurRenderer(),
     images,
   }
 }

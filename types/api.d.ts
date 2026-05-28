@@ -208,6 +208,9 @@ export interface ProjectArtboard {
   // Optional on disk: older project.json files predate it and the validator
   // supplies the default, so they keep loading. See electron/ipc/project-schema.ts.
   cursorSizeMultiplier?: number
+  // Cursor motion-blur intensity, 0..1 (0 = off). Optional on disk for the same
+  // back-compat reason; validator defaults + clamps. See project-schema.ts.
+  cursorMotionBlur?: number
 }
 
 export type ProjectVideoRole = 'screen' | 'camera' | 'media'

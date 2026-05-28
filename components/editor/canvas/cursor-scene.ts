@@ -1,5 +1,6 @@
 import type { CursorTrackData } from "@/types/api"
 import type { CursorSetId } from "@/lib/cursors/cursor-manifest"
+import type { MotionBlurOptions } from "@/lib/motion-blur/types"
 import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
 import {
   buildRawTrack,
@@ -51,6 +52,45 @@ export function clampCursorSize(multiplier: number): number {
 // captured sample (no transition/lag) so you can judge raw capture accuracy;
 // flip to true to re-enable Screen Studio-style smoothing.
 export const CURSOR_SMOOTHING = false
+
+// --- Cursor motion blur ---------------------------------------------------
+// Screen-Studio-style directional blur on the moving cursor. A single user
+// "intensity" (0..1) is the only exposed knob; the blur *velocity* is derived
+// from how fast the cursor actually moves, so it "inherits" the motion. The
+// derivation lives here (not in the overlay) so the export pipeline produces
+// byte-for-byte the same blur as the live preview — same single-source-of-truth
+// rationale as `placeCursor` and `video-scene-draw.ts`.
+//
+// New projects (and legacy project.json files that predate the setting) open at
+// 0.6 — a tasteful, clearly-visible amount.
+export const CURSOR_MOTION_BLUR_DEFAULT = 0.6
+
+// Tuning knobs (not user-facing):
+// - finite-difference window for estimating cursor speed; small + fixed so the
+//   estimate is identical in the editor preview and any export fps.
+const CURSOR_BLUR_SAMPLE_DT_SEC = 1 / 120
+// - intensity 1.0 ⇒ smear ≈ the distance the cursor travels in one 30fps frame
+//   (a "full shutter" exposure). Scales linearly with intensity.
+const CURSOR_BLUR_SHUTTER_SEC = 1 / 30
+// - cap the smear length (px). Bounds both the look (no screen-long streaks) and
+//   the per-frame cache size / cost.
+const CURSOR_BLUR_MAX_SMEAR_PX = 200
+// - below this the cursor is drawn sharp (no cache/filter): nearly-still pointer.
+const CURSOR_BLUR_MIN_SMEAR_PX = 1.5
+const CURSOR_BLUR_KERNEL_MIN = 5
+const CURSOR_BLUR_KERNEL_MAX = 25
+
+/** Clamp the user motion-blur intensity into [0, 1], defaulting on bad input. */
+export function clampCursorMotionBlur(value: number): number {
+  if (!Number.isFinite(value)) return CURSOR_MOTION_BLUR_DEFAULT
+  return Math.min(1, Math.max(0, value))
+}
+
+function oddKernel(value: number): number {
+  let k = Math.round(value)
+  if (k % 2 === 0) k += 1
+  return Math.min(CURSOR_BLUR_KERNEL_MAX, Math.max(CURSOR_BLUR_KERNEL_MIN, k))
+}
 
 /** Build the time-indexed cursor track from raw IPC data, applying the shared
  * smoothing choice. Returns null when there's no usable cursor data. */
@@ -164,6 +204,70 @@ export function placeCursor(
     y: artboardY,
     rotation: video.rotation,
     onScreen,
+  }
+}
+
+/**
+ * Derive the motion-blur options for the cursor at `sourceSeconds` from how fast
+ * it is moving, or null when no blur should be drawn (intensity 0, cursor still,
+ * or no placement). Pure + shared, so the editor preview and the exporter blur
+ * the cursor identically.
+ *
+ * The velocity is the cursor's displacement over a fixed finite-difference
+ * window, converted to a smear length via a fixed shutter scaled by `intensity`,
+ * and rotated into the cursor's LOCAL frame (the Konva filter runs on the cached
+ * bitmap before the node's rotation transform). `offset: 0` keeps the smear
+ * centred on the pointer. The returned shape feeds `konvaMotionBlurFilter`
+ * directly; the caller sizes the cache margin with `motionBlurPadding`.
+ */
+export function computeCursorBlur(
+  track: SmoothedCursorTrack,
+  video: CursorVideoGeometry,
+  sourceSeconds: number,
+  options: { intensity: number; sizeMultiplier?: number; cursorSet?: CursorSetId },
+): MotionBlurOptions | null {
+  const intensity = clampCursorMotionBlur(options.intensity)
+  if (intensity <= 0) return null
+
+  const placeOpts = {
+    sizeMultiplier: options.sizeMultiplier,
+    cursorSet: options.cursorSet,
+  }
+  const cur = placeCursor(track, video, sourceSeconds, placeOpts)
+  const prev = placeCursor(
+    track,
+    video,
+    sourceSeconds - CURSOR_BLUR_SAMPLE_DT_SEC,
+    placeOpts,
+  )
+  if (!cur || !prev) return null
+
+  // Displacement in artboard px, rotated into the cursor's local (unrotated)
+  // frame so the directional blur points the right way under video rotation.
+  const dxArt = cur.x - prev.x
+  const dyArt = cur.y - prev.y
+  const rad = (-video.rotation * Math.PI) / 180
+  const cos = Math.cos(rad)
+  const sin = Math.sin(rad)
+  const dxL = dxArt * cos - dyArt * sin
+  const dyL = dxArt * sin + dyArt * cos
+
+  const dist = Math.hypot(dxL, dyL)
+  if (dist <= 0) return null
+  const speed = dist / CURSOR_BLUR_SAMPLE_DT_SEC // px/s
+  const smear = Math.min(
+    speed * CURSOR_BLUR_SHUTTER_SEC * intensity,
+    CURSOR_BLUR_MAX_SMEAR_PX,
+  )
+  if (smear < CURSOR_BLUR_MIN_SMEAR_PX) return null
+
+  const ux = dxL / dist
+  const uy = dyL / dist
+  return {
+    velocityX: ux * smear,
+    velocityY: uy * smear,
+    kernelSize: oddKernel(smear / 2),
+    offset: 0,
   }
 }
 

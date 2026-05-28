@@ -34,6 +34,9 @@ export interface ProjectArtboard {
   // Optional: absent in pre-feature project.json files, defaulted by
   // `parseArtboard` so old projects keep loading without a version bump.
   cursorSizeMultiplier?: number
+  // Cursor motion-blur intensity, 0..1 (0 = off). Optional + defaulted by
+  // `parseArtboard`, same back-compat rationale as cursorSizeMultiplier.
+  cursorMotionBlur?: number
 }
 
 export type ProjectVideoRole = 'screen' | 'camera' | 'media'
@@ -212,6 +215,16 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     return Math.min(4, Math.max(1, raw))
   })()
 
+  // Cursor motion-blur intensity is optional + defaulted (same back-compat
+  // rationale). Default (absent/invalid) mirrors cursor-scene.ts
+  // CURSOR_MOTION_BLUR_DEFAULT (0.6); clamp to [0, 1] (hand-synced — the
+  // renderer module can't be imported into the main process).
+  const cursorMotionBlur = (() => {
+    const raw = value['cursorMotionBlur']
+    if (!isFiniteNumber(raw)) return 0.6
+    return Math.min(1, Math.max(0, raw))
+  })()
+
   return {
     presetId: presetId as ProjectArtboardPresetId,
     width: value['width'] as number,
@@ -220,6 +233,7 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     padding: value['padding'] as number,
     grain: value['grain'] as number,
     cursorSizeMultiplier,
+    cursorMotionBlur,
   }
 }
 
