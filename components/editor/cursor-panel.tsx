@@ -47,14 +47,12 @@ export function CursorPanel() {
       <header className="space-y-2">
         <h3 className="text-sm font-semibold select-none">Cursor</h3>
         <p className="text-xs text-muted-foreground select-none">
-          Resize the recorded pointer for emphasis. 100% is the recorded-
-          accurate size; larger values magnify the cursor while keeping its
-          position and timing exact.
+          Adjust how the cursor appears in your recording.
         </p>
       </header>
 
       <div className="w-full space-y-2">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center">
           <h4
             className={cn(
               "text-xs font-semibold transition-opacity select-none",
@@ -63,14 +61,6 @@ export function CursorPanel() {
           >
             Size
           </h4>
-          <span
-            className={cn(
-              "text-xs text-muted-foreground tabular-nums select-none",
-              !hasScreenVideo && "opacity-50"
-            )}
-          >
-            {sizePct}%
-          </span>
         </div>
         <div className="flex w-full items-center gap-3">
           <Slider
