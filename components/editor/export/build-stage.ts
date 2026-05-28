@@ -7,7 +7,15 @@ import {
   computeSquircleParams,
   drawCanvasVideoFrame,
 } from "@/components/editor/canvas/video-scene-draw"
+import {
+  buildCursorTrack,
+  CURSOR_SET,
+  projectFolderFromObjectUrl,
+  type CursorVideoGeometry,
+} from "@/components/editor/canvas/cursor-scene"
 import { getVideoCoverCrop } from "@/components/editor/canvas/video-cover-crop"
+import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
+import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
 import {
   getWallpaperFullUrl,
   isWallpaperId,
@@ -25,7 +33,28 @@ export interface ExportStageHandles {
   nodesByVideoId: Map<string, Konva.Image>
   /** Output dimensions of the stage in pixels. */
   outputSize: { width: number; height: number }
+  /**
+   * Recorded-cursor overlay, or null when the composition has no screen
+   * recording / no captured cursor data. When present the render loop places
+   * it per frame from `track` using the screen clip's source time — the same
+   * code path as the live editor's `CanvasCursorOverlay`, so the cursor in the
+   * exported video matches the on-screen preview.
+   */
+  cursor: ExportCursorHandle | null
   dispose: () => void
+}
+
+export interface ExportCursorHandle {
+  /** Cursor image node, added on top of the video nodes in the content layer. */
+  node: Konva.Image
+  /** Pre-integrated cursor trajectory, sampled by screen source time. */
+  track: SmoothedCursorTrack
+  /** Screen video geometry the placement maps through. */
+  video: CursorVideoGeometry
+  /** Which video id the cursor follows — used to find the active screen clip. */
+  screenVideoId: string
+  /** Decoded cursor SVGs keyed by asset URL (the shape changes across frames). */
+  images: Map<string, HTMLImageElement>
 }
 
 export interface BuildStageOptions {
@@ -167,9 +196,20 @@ export async function buildExportStage(
     nodesByVideoId.set(video.id, node)
   }
 
+  // ─── cursor ──────────────────────────────────────────────────────────────
+  // The recorded cursor is part of the output video, so it is composed here
+  // on top of the video nodes (same z-order as the editor, where
+  // CanvasCursorOverlay sits after the video nodes in the content layer).
+  const cursor = await buildCursorOverlay({
+    state,
+    assetUrlsByVideoId,
+    contentLayer,
+  })
+
   const dispose = () => {
     stage.destroy()
     nodesByVideoId.clear()
+    cursor?.images.clear()
   }
 
   return {
@@ -178,8 +218,93 @@ export async function buildExportStage(
     contentLayer,
     nodesByVideoId,
     outputSize,
+    cursor,
     dispose,
   }
+}
+
+/**
+ * Load the recorded cursor track for the composition's screen recording and
+ * build a Konva.Image node for it (added on top of the video nodes). Returns
+ * null — and composes no cursor — when there is no screen recording, no
+ * captured cursor sidecar, or the asset URL doesn't resolve to a project
+ * folder. All cursor SVG shapes that appear in the track are pre-decoded so
+ * the per-frame render loop only swaps `node.image(...)`, never awaits a load.
+ */
+async function buildCursorOverlay(opts: {
+  state: ProjectStateV1
+  assetUrlsByVideoId: Record<string, string>
+  contentLayer: Konva.Layer
+}): Promise<ExportCursorHandle | null> {
+  const { state, assetUrlsByVideoId, contentLayer } = opts
+
+  const screenVideo = state.videos.find(
+    (video) => video.role === "screen" && (video.onCanvas ?? true),
+  )
+  if (!screenVideo) return null
+
+  const url = assetUrlsByVideoId[screenVideo.id]
+  if (!url) return null
+  const folder = projectFolderFromObjectUrl(url)
+  if (!folder) return null
+
+  // getCursorData is exposed on the same preload bridge the export window
+  // already uses; it reads the recording's input sidecar and returns null when
+  // the recording captured no cursor.
+  const data = await window.api?.projects.getCursorData(folder)
+  const track = buildCursorTrack(data ?? null)
+  if (!track) return null
+
+  // Pre-decode every distinct cursor shape the track will show. Bounded and
+  // tiny (a handful of SVGs), so awaiting them all up front is cheap and keeps
+  // the per-frame loop allocation-free.
+  const urls = new Set<string>()
+  for (const cursorId of track.cursorIds) {
+    const asset = resolveCursorAsset(cursorId, CURSOR_SET)
+    if (asset) urls.add(asset.url)
+  }
+  const images = new Map<string, HTMLImageElement>()
+  await Promise.all(
+    Array.from(urls).map(async (assetUrl) => {
+      try {
+        images.set(assetUrl, await loadHtmlImage(assetUrl))
+      } catch {
+        // A missing/undecodable cursor SVG just means that shape won't draw;
+        // the render loop hides the node for those frames rather than failing
+        // the whole export.
+      }
+    }),
+  )
+  if (images.size === 0) return null
+
+  const node = new Konva.Image({
+    image: undefined,
+    listening: false,
+    perfectDrawEnabled: false,
+    shadowForStrokeEnabled: false,
+    visible: false,
+  })
+  contentLayer.add(node)
+
+  const video: CursorVideoGeometry = {
+    x: screenVideo.x,
+    y: screenVideo.y,
+    width: screenVideo.width,
+    height: screenVideo.height,
+    rotation: screenVideo.rotation,
+    intrinsicWidth: screenVideo.intrinsicWidth,
+    intrinsicHeight: screenVideo.intrinsicHeight,
+  }
+
+  return { node, track, video, screenVideoId: screenVideo.id, images }
+}
+
+async function loadHtmlImage(url: string): Promise<HTMLImageElement> {
+  const img = new window.Image()
+  img.decoding = "async"
+  img.src = url
+  await img.decode()
+  return img
 }
 
 function buildVideoNode(

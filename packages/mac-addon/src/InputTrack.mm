@@ -159,6 +159,9 @@ static NSArray<NSString *> *CGModifierStrings(CGEventFlags flags) {
   CGRect _displayBounds;
   CGDirectDisplayID _displayId;
 
+  CGPoint _startPoint;   // pointer location sampled at recording start
+  BOOL _haveStartPoint;
+
   double _hostStartMs;
   double _videoStartHostMs;  // first-frame host time; cursor timeline origin
   double _startedAtUnixMs;
@@ -221,6 +224,13 @@ static BOOL InputMonitoringGranted() {
 
   _displayId = _options.target.displayId ? _options.target.displayId : CGMainDisplayID();
   _displayBounds = CGDisplayBounds(_displayId);
+
+  // Sample where the pointer sits the instant recording starts. Event-based
+  // capture emits nothing until the mouse first moves, so without this a
+  // stationary opening leaves the cursor with no sample at t=0. Read directly
+  // from CoreGraphics (independent of the tap, which may not be live yet).
+  _startPoint = [self currentDisplayPoint];
+  _haveStartPoint = YES;
 
   _writeQueue = dispatch_queue_create("com.openscreen.input.write", DISPATCH_QUEUE_SERIAL);
   _moves = [[StreamingJSONArray alloc] initWithURL:[self urlForFile:kMouseMovesFilename]
@@ -377,6 +387,21 @@ static BOOL InputMonitoringGranted() {
   if (_options.captureCursorShapes) dict[@"cursorId"] = [self safeCursorId];
   if (dragged && button) dict[@"button"] = button;
   _lastRealMoveMs.store(processTimeMs, std::memory_order_relaxed);
+  [_moves appendObject:dict];
+}
+
+// Emit a `mouseMoved` at an explicit point/time/shape, bypassing the
+// stationary-coalescing logic. Used to bookend the stream at session start/end
+// (see -finish) so the recorded data spans the whole recording.
+- (void)appendSyntheticMoveAt:(CGPoint)point
+                     cursorId:(NSString *)cursorId
+                           ts:(double)processTimeMs {
+  NSMutableDictionary *dict = [self baseEventWithType:@"mouseMoved"
+                                            modifiers:@[]
+                                            timestamp:processTimeMs];
+  dict[@"x"] = @(point.x);
+  dict[@"y"] = @(point.y);
+  if (_options.captureCursorShapes) dict[@"cursorId"] = cursorId ?: @"arrow";
   [_moves appendObject:dict];
 }
 
@@ -628,7 +653,19 @@ static CGEventRef InputEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 #pragma mark - Lifecycle
 
 - (void)setVideoStartHostMs:(double)hostMs {
+  BOOL firstAnchor = _videoStartHostMs <= 0;
   _videoStartHostMs = hostMs;
+  // Re-sample the pointer at the cursor-timeline origin (the first video
+  // frame), since that — not recording start — is the timestamp the start
+  // bookend is stamped with (anchorMs). Sampling here keeps the held opening
+  // position correct even if the pointer moved during the brief gap between
+  // recording start and the first frame. Only on the first anchor; the early
+  // sample in -startWithHostStartMs is the fallback when no frame ever anchors
+  // the timeline.
+  if (firstAnchor) {
+    _startPoint = [self currentDisplayPoint];
+    _haveStartPoint = YES;
+  }
 }
 
 - (void)setPaused:(BOOL)paused {
@@ -674,6 +711,24 @@ static CGEventRef InputEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     teardown();
   } else {
     dispatch_sync(dispatch_get_main_queue(), teardown);
+  }
+
+  // Bookend the move stream so the recorded cursor data covers the whole
+  // session even when the pointer was stationary at the very start (mouse not
+  // yet moved) or end (parked on the Stop button). The start sample is stamped
+  // at the cursor timeline origin (the video's first-frame anchor) so it maps
+  // to source time 0; the end sample is stamped at the session-end host time.
+  // Appends run on _writeQueue and the close below dispatch_syncs that queue,
+  // so they are flushed in order before finalize. The renderer sorts by time,
+  // so out-of-order insertion (start has the smallest t) is fine.
+  if (_options.captureInput) {
+    double anchorMs = _videoStartHostMs > 0 ? _videoStartHostMs : _hostStartMs;
+    if (_haveStartPoint) {
+      [self appendSyntheticMoveAt:_startPoint cursorId:@"arrow" ts:anchorMs];
+    }
+    [self appendSyntheticMoveAt:[self currentDisplayPoint]
+                       cursorId:[self safeCursorId]
+                             ts:_endProcessMs];
   }
 
   [_moves close];

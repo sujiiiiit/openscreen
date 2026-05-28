@@ -17,6 +17,7 @@ import { ArtboardGrain } from "@/components/editor/canvas/artboard-grain"
 import { ArtboardPixelGrid } from "@/components/editor/canvas/artboard-pixel-grid"
 import { CanvasCursorOverlay } from "@/components/editor/canvas/canvas-cursor-overlay"
 import { CanvasVideoNode } from "@/components/editor/canvas/canvas-video-node"
+import { PreviewControls } from "@/components/editor/canvas/preview-controls"
 import {
   HOVER_OUTLINE_STROKE,
   HOVER_OUTLINE_STROKE_WIDTH,
@@ -47,6 +48,7 @@ import {
 } from "@/components/editor/canvas/view-transform-utils"
 import {
   clampWorkspaceView,
+  getPreviewFillTransform,
   getZoomedViewTransform,
   PIXEL_GRID_SETTINGS,
   WORKSPACE_PINCH_ZOOM_DELTA,
@@ -203,6 +205,8 @@ export default function EditorWorkspace() {
   const hoverOutlineRef = useRef<Konva.Rect | null>(null)
   const hoveredIdRef = useRef<string | null>(null)
   const isPanModeRef = useRef(false)
+  const isPreviewModeRef = useRef(false)
+  const prevPreviewModeRef = useRef(false)
   const guideOverlayRef = useRef<SnapGuideOverlayHandle | null>(null)
   const snapCacheRef = useRef<SnapCache | null>(null)
   const isSnapDisabledRef = useRef(false)
@@ -213,7 +217,7 @@ export default function EditorWorkspace() {
   const { primaryAudioVideoId, timelineVisibleVideoIds } =
     useEditorCanvasTimeline()
   const { artboard } = useEditorCanvasArtboard()
-  const { viewportSize, viewTransform } = useEditorCanvasView()
+  const { viewportSize, viewTransform, isPreviewMode } = useEditorCanvasView()
   const {
     fitArtboardToViewport,
     deleteVideo,
@@ -223,6 +227,7 @@ export default function EditorWorkspace() {
     setViewportSize,
     setViewTransform,
     updateVideoTransform,
+    exitPreview,
   } = useEditorCanvasActions()
   const {
     registerTimelineCanvasNode,
@@ -230,6 +235,10 @@ export default function EditorWorkspace() {
     onTimelineVideoSeeked,
     registerTimelineVideoFps,
     stepTimelineFrame,
+    setTimelineTime,
+    playTimeline,
+    pauseTimeline,
+    toggleTimelinePlayback,
   } = useEditorCanvasTimelineActions()
   const { undo, redo } = useEditorHistory()
   const { selectTab: selectSidebarTab, open: openSidebar } =
@@ -248,7 +257,7 @@ export default function EditorWorkspace() {
     const toolbar = selectionToolbarRef.current
     if (!toolbar) return
 
-    if (isRotatingSelectedNodeRef.current) {
+    if (isRotatingSelectedNodeRef.current || isPreviewModeRef.current) {
       toolbar.style.visibility = "hidden"
       return
     }
@@ -476,6 +485,10 @@ export default function EditorWorkspace() {
   useLayoutEffect(() => {
     viewTransformRef.current = viewTransform
 
+    // Fullscreen preview owns the stage transform imperatively (a fill-fit). Keep
+    // the user transform in the ref for restore-on-exit, but don't paint it.
+    if (isPreviewMode) return
+
     const last = lastAppliedTransformRef.current
     if (
       last &&
@@ -487,7 +500,7 @@ export default function EditorWorkspace() {
     }
 
     applyStageViewTransform(viewTransform)
-  }, [applyStageViewTransform, viewTransform])
+  }, [applyStageViewTransform, isPreviewMode, viewTransform])
 
   useEffect(() => {
     viewportSizeRef.current = viewportSize
@@ -497,6 +510,65 @@ export default function EditorWorkspace() {
       scheduleSelectionToolbarPosition()
     }
   }, [scheduleSelectionToolbarPosition, updateRotationReadout, viewportSize])
+
+  // A dropped fullscreen (Esc, OS gesture) while still in preview means the user
+  // wants out — mirror that back into provider state. Mount-once; reads the ref.
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      if (isPreviewModeRef.current && document.fullscreenElement == null) {
+        exitPreview()
+      }
+    }
+    document.addEventListener("fullscreenchange", handleFullscreenChange)
+    return () =>
+      document.removeEventListener("fullscreenchange", handleFullscreenChange)
+  }, [exitPreview])
+
+  // Preview enter/exit side effects. Enter → fullscreen the workspace + play from
+  // 0. Exit → leave fullscreen, pause, and repaint the user's saved view. The
+  // exit branch is guarded so initial mount (isPreviewMode already false) is a
+  // no-op rather than a spurious pause.
+  useEffect(() => {
+    isPreviewModeRef.current = isPreviewMode
+    const wasPreview = prevPreviewModeRef.current
+    prevPreviewModeRef.current = isPreviewMode
+
+    if (isPreviewMode) {
+      const container = containerRef.current
+      if (container && document.fullscreenElement !== container) {
+        const request = container.requestFullscreen?.()
+        if (request && typeof request.catch === "function") {
+          request.catch(() => exitPreview())
+        }
+      }
+      setTimelineTime(0)
+      playTimeline()
+      return
+    }
+
+    if (!wasPreview) return
+
+    pauseTimeline()
+    if (document.fullscreenElement) {
+      void document.exitFullscreen?.()
+    }
+    applyStageViewTransform(viewTransformRef.current)
+  }, [
+    applyStageViewTransform,
+    exitPreview,
+    isPreviewMode,
+    pauseTimeline,
+    playTimeline,
+    setTimelineTime,
+  ])
+
+  // While in preview the stage fills the (fullscreen) viewport with a zero-padding
+  // contain-fit. Recomputes on the fullscreen resize and any artboard change.
+  useLayoutEffect(() => {
+    if (!isPreviewMode) return
+    if (viewportSize.width <= 0 || viewportSize.height <= 0) return
+    applyStageViewTransform(getPreviewFillTransform(viewportSize, artboard))
+  }, [applyStageViewTransform, artboard, isPreviewMode, viewportSize])
 
   useLayoutEffect(() => {
     selectedItemIdRef.current = selectedItemId
@@ -734,6 +806,17 @@ export default function EditorWorkspace() {
       }
 
       if (isEditableTarget(event.target)) return
+
+      // In fullscreen preview the workspace is a player: Space toggles play/pause
+      // and every editor shortcut (undo, nudge, zoom, frame-step, pan) is muted.
+      // Esc is handled by the browser exiting fullscreen.
+      if (isPreviewModeRef.current) {
+        if (event.code === "Space") {
+          event.preventDefault()
+          toggleTimelinePlayback()
+        }
+        return
+      }
 
       // Undo / redo. Lives above the selection branch so the shortcut works
       // even when nothing is selected. Blocked during active rotation,
@@ -1003,6 +1086,7 @@ export default function EditorWorkspace() {
     redo,
     setVideoLocked,
     stepTimelineFrame,
+    toggleTimelinePlayback,
     undo,
     updateVideoTransform,
     viewportSize.height,
@@ -1019,6 +1103,7 @@ export default function EditorWorkspace() {
   }, [flushPendingViewTransform])
 
   const handleWheel: ComponentProps<typeof Stage>["onWheel"] = (event) => {
+    if (isPreviewModeRef.current) return
     event.evt.preventDefault()
 
     const stage = stageRef.current
@@ -1052,6 +1137,7 @@ export default function EditorWorkspace() {
   const handleMouseDown: ComponentProps<typeof Stage>["onMouseDown"] = (
     event
   ) => {
+    if (isPreviewModeRef.current) return
     const stage = stageRef.current
     const pointer = stage?.getPointerPosition()
     if (!stage || !pointer) return
@@ -1085,6 +1171,7 @@ export default function EditorWorkspace() {
   }
 
   const handleTap: ComponentProps<typeof Stage>["onTap"] = (event) => {
+    if (isPreviewModeRef.current) return
     if (isSpacePressedRef.current) return
 
     const stage = stageRef.current
@@ -1109,6 +1196,7 @@ export default function EditorWorkspace() {
   const handleMouseMove: ComponentProps<typeof Stage>["onMouseMove"] = (
     event
   ) => {
+    if (isPreviewModeRef.current) return
     if (!isPanningRef.current) {
       updateHoverFromTarget(event.target)
       return
@@ -1133,6 +1221,7 @@ export default function EditorWorkspace() {
   const handleDragStart: ComponentProps<typeof Stage>["onDragStart"] = (
     event
   ) => {
+    if (isPreviewModeRef.current) return
     const videoNode = getVideoNodeFromTarget(event.target)
     if (!videoNode) return
 
@@ -1238,21 +1327,27 @@ export default function EditorWorkspace() {
     <div
       ref={containerRef}
       onContextMenu={handleContextMenu}
-      className={`relative h-full w-full overflow-hidden bg-editor-workspace ${cursorClassName}`}
+      className={
+        isPreviewMode
+          ? "relative h-full w-full overflow-hidden bg-black"
+          : `relative h-full w-full overflow-hidden bg-editor-workspace ${cursorClassName}`
+      }
     >
       {viewportSize.width > 0 && viewportSize.height > 0 ? (
         <>
-          <div
-            ref={artboardBackdropRef}
-            aria-hidden="true"
-            className="pointer-events-none absolute top-0 left-0 z-0 bg-white shadow-[0_18px_40px_rgba(0,0,0,0.14)]"
-            style={{
-              width: artboard.width,
-              height: artboard.height,
-              transformOrigin: "0 0",
-              willChange: "transform",
-            }}
-          />
+          {!isPreviewMode && (
+            <div
+              ref={artboardBackdropRef}
+              aria-hidden="true"
+              className="pointer-events-none absolute top-0 left-0 z-0 bg-white shadow-[0_18px_40px_rgba(0,0,0,0.14)]"
+              style={{
+                width: artboard.width,
+                height: artboard.height,
+                transformOrigin: "0 0",
+                willChange: "transform",
+              }}
+            />
+          )}
           <Stage
             ref={stageRef}
             width={viewportSize.width}
@@ -1285,10 +1380,12 @@ export default function EditorWorkspace() {
                 fill="rgba(255,255,255,0)"
                 perfectDrawEnabled={false}
                 onMouseDown={(event) => {
+                  if (isPreviewModeRef.current) return
                   event.cancelBubble = true
                   selectArtboard()
                 }}
                 onTap={(event) => {
+                  if (isPreviewModeRef.current) return
                   event.cancelBubble = true
                   selectArtboard()
                 }}
@@ -1348,7 +1445,7 @@ export default function EditorWorkspace() {
               width={artboard.width}
               height={artboard.height}
               listening={false}
-              visible={selectedItemId === ARTBOARD_SELECTION_ID}
+              visible={selectedItemId === ARTBOARD_SELECTION_ID && !isPreviewMode}
               stroke={HOVER_OUTLINE_STROKE}
               strokeWidth={HOVER_OUTLINE_STROKE_WIDTH}
               strokeScaleEnabled={false}
@@ -1357,7 +1454,9 @@ export default function EditorWorkspace() {
             />
             <SelectedVideoTransformer
               selectedItemId={
-                selectedVideoIsTimelineVisible ? selectedItemId : null
+                selectedVideoIsTimelineVisible && !isPreviewMode
+                  ? selectedItemId
+                  : null
               }
               selectedVideo={selectedTimelineVideo}
               isLocked={selectedTimelineVideo?.locked ?? false}
@@ -1392,6 +1491,7 @@ export default function EditorWorkspace() {
         aria-hidden="true"
         className="pointer-events-none invisible absolute bottom-4 left-1/2 z-50 min-w-16 -translate-x-1/2 rounded-full border border-border/70 bg-popover px-3 py-1.5 text-center text-sm leading-none font-medium text-foreground shadow-lg ring-1 ring-border/40"
       />
+      {isPreviewMode && <PreviewControls />}
     </div>
   )
 }

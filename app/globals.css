@@ -193,30 +193,6 @@ html:has([data-window="window-picker"]) body {
   overflow: hidden;
 }
 
-/*
- * Indeterminate progress bar used by the export window while the pipeline
- * is in a phase we can't measure per-frame (preparing / decoding-audio /
- * muxing-audio / finalizing). A 40%-wide segment slides across the track
- * instead of the previous full-width pulse — which read as "100% full" to
- * the user and then "reset to 0%" the moment the determinate bar took
- * over for the encoding phase.
- */
-@keyframes export-indeterminate {
-  0% {
-    transform: translateX(-100%);
-  }
-  100% {
-    transform: translateX(350%);
-  }
-}
-
-.export-indeterminate-bar {
-  position: absolute;
-  inset: 0;
-  width: 40%;
-  animation: export-indeterminate 1.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
-}
-
 [data-window="window-picker"],
 [data-window="window-picker"] * {
   transition-delay: 0ms !important;

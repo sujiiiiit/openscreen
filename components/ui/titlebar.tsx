@@ -21,6 +21,7 @@ import { DRAG, NO_DRAG } from "@/lib/window-drag"
 import { useProject } from "@/components/editor/project/provider"
 import { HistoryControls } from "@/components/editor/history-controls"
 import { SaveStatusIndicator } from "@/components/editor/save-status-indicator"
+import { TitleBarPreviewButton } from "@/components/editor/title-bar-preview-button"
 import { TitleBarExportButton } from "@/components/editor/title-bar-export-button"
 
 export function Titlebar() {
@@ -100,9 +101,10 @@ export function Titlebar() {
       </div>
 
       <div
-        className="ml-auto flex items-center gap-1 pr-2 pl-2"
+        className="ml-auto flex items-center gap-2 pr-2 pl-2"
         style={NO_DRAG}
       >
+        <TitleBarPreviewButton />
         <TitleBarExportButton />
       </div>
 

@@ -115,11 +115,10 @@ export function buildSmoothedTrack(
   displayHeight: number,
   spring: SpringParams = DEFAULT_CURSOR_SPRING,
 ): SmoothedCursorTrack {
-  // Start the smoothed timeline at the FIRST captured sample, not at t=0. If
-  // capture began before the user first moved (a leading gap), this keeps the
-  // track empty there so `sampleCursorAtTime` returns null and the overlay
-  // hides the cursor — rather than freezing it at the first position until the
-  // gap ends.
+  // Start the smoothed timeline at the FIRST captured sample, not at t=0. A
+  // leading gap (mouse still until the first move) carries no samples; the
+  // spring is seeded at the first sample so `sampleCursorAtTime` holds that
+  // position back to t=0 instead of springing in from the origin.
   const startMs = samples.length ? samples[0].t : 0;
   const endMs = samples.length ? samples[samples.length - 1].t : 0;
   const durationMs = endMs;
@@ -207,8 +206,13 @@ export interface CursorSample {
 
 /**
  * Sample the smoothed track at recording-relative time `tMs` (= screen video
- * currentTime × 1000). Returns null before the first / after the last sample
- * so the overlay can hide the cursor outside the captured range.
+ * currentTime × 1000). The pointer is physically on screen for the entire
+ * recording, but event-based capture writes nothing while it is stationary — so
+ * a leading gap (mouse still at start) or trailing gap (mouse parked on the Stop
+ * button) leaves no samples at the ends. We therefore HOLD the first / last
+ * known position across those gaps rather than hiding the cursor: the position
+ * is correct precisely because the mouse wasn't moving there. Returns null only
+ * for an empty track; the overlay's own crop test handles off-screen hiding.
  */
 export function sampleCursorAtTime(
   track: SmoothedCursorTrack,
@@ -216,17 +220,18 @@ export function sampleCursorAtTime(
 ): CursorSample | null {
   const n = track.t.length;
   if (n === 0) return null;
-  if (tMs < track.t[0] || tMs > track.durationMs) return null;
+  const clampedT =
+    tMs < track.t[0] ? track.t[0] : tMs > track.t[n - 1] ? track.t[n - 1] : tMs;
 
   let lo = 0;
   let hi = n - 1;
   while (hi - lo > 1) {
     const mid = (lo + hi) >> 1;
-    if (track.t[mid] <= tMs) lo = mid;
+    if (track.t[mid] <= clampedT) lo = mid;
     else hi = mid;
   }
   const span = track.t[hi] - track.t[lo] || 1;
-  const f = (tMs - track.t[lo]) / span;
+  const f = (clampedT - track.t[lo]) / span;
   return {
     x: track.x[lo] + (track.x[hi] - track.x[lo]) * f,
     y: track.y[lo] + (track.y[hi] - track.y[lo]) * f,

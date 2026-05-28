@@ -18,6 +18,7 @@ import type {
   ProjectTimelineClip,
 } from "@/types/api"
 import { exportResolutionPixels } from "@/lib/editor-project/export-settings"
+import { placeCursor } from "@/components/editor/canvas/cursor-scene"
 import { formatToVideoCodec } from "./codec-probe"
 import { buildExportStage } from "./build-stage"
 import { streamTimelineAudio } from "./decode-audio"
@@ -331,6 +332,31 @@ export async function runExport(
             decodedSourceIds.add(entry.videoId)
           }),
         )
+
+        // Place the recorded cursor for this frame, using the screen clip's
+        // source time straight from the plan (so it tracks trims/splits and
+        // only shows while the screen clip is active). Same placement math as
+        // the live editor's CanvasCursorOverlay.
+        if (handles.cursor) {
+          const { node, track, video, screenVideoId, images } = handles.cursor
+          const screenEntry = active.find(
+            (entry) => entry.videoId === screenVideoId,
+          )
+          const placement = screenEntry
+            ? placeCursor(track, video, screenEntry.sourceTimeSec)
+            : null
+          const image = placement ? images.get(placement.url) : undefined
+          if (placement && placement.onScreen && image) {
+            node.image(image)
+            node.size({ width: placement.width, height: placement.height })
+            node.offset({ x: placement.offsetX, y: placement.offsetY })
+            node.position({ x: placement.x, y: placement.y })
+            node.rotation(placement.rotation)
+            node.visible(true)
+          } else {
+            node.visible(false)
+          }
+        }
 
         // Only the content layer changes per frame; background stays as
         // drawn above. ~10–30% faster than stage.draw() at every iteration.

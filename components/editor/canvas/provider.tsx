@@ -169,6 +169,7 @@ type EditorCanvasContextValue = {
   viewportSize: CanvasSize
   artboard: EditorArtboard
   viewTransform: ViewTransform
+  isPreviewMode: boolean
   importError: string | null
   addVideoFile: (file: File) => Promise<void>
   addRemoteVideo: (input: AddRemoteVideoInput) => Promise<string | null>
@@ -186,6 +187,8 @@ type EditorCanvasContextValue = {
   setViewportSize: (size: CanvasSize) => void
   setViewTransform: (transform: ViewTransform) => void
   fitArtboardToViewport: () => void
+  enterPreview: () => void
+  exitPreview: () => void
   registerTimelineVideoElement: (
     id: string,
     element: HTMLVideoElement | null
@@ -233,7 +236,7 @@ type EditorCanvasArtboardContextValue = Pick<
 
 type EditorCanvasViewContextValue = Pick<
   EditorCanvasContextValue,
-  "viewportSize" | "viewTransform"
+  "viewportSize" | "viewTransform" | "isPreviewMode"
 >
 
 type EditorCanvasTimelineContextValue = Pick<
@@ -269,6 +272,8 @@ type EditorCanvasActionsContextValue = Pick<
   | "setViewportSize"
   | "setViewTransform"
   | "fitArtboardToViewport"
+  | "enterPreview"
+  | "exitPreview"
 >
 
 type EditorCanvasTimelineActionsContextValue = Pick<
@@ -616,6 +621,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const [viewTransform, setViewTransformState] = useState<ViewTransform>(
     DEFAULT_VIEW_TRANSFORM
   )
+  // Session-only fullscreen preview flag. Not persisted, not in undo history.
+  const [isPreviewMode, setIsPreviewMode] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
   const [timelineClips, setTimelineClips] = useState<CanvasTimelineClip[]>([])
   const [timelineTime, setTimelineTimeState] = useState(0)
@@ -647,6 +654,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const timelineTimeRef = useRef(timelineTime)
   const timelineDurationRef = useRef(0)
   const isTimelinePlayingRef = useRef(isTimelinePlaying)
+  const isPreviewModeRef = useRef(isPreviewMode)
   const timelineVideoElementsRef = useRef(new Map<string, HTMLVideoElement>())
   const timelineCanvasNodesRef = useRef(new Map<string, Konva.Image>())
   // Per-element source frame rate, measured lazily during playback. Session-
@@ -731,12 +739,25 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const historyRef = useRef<EditorHistory>(createEmptyHistory())
   const historyCommitTagRef = useRef<HistoryCommitTag | null>(null)
   const restoringFromHistoryRef = useRef(false)
-  // Maps imported video ids to their `file://` URLs returned by main on
-  // import. Used to re-attach the URL when undo restores a previously
-  // deleted imported video whose id is no longer in `videos` or in
-  // `project.assetUrlsByVideoId` (which is computed at project open).
-  // Holds only strings — no blob memory pinned by undo.
-  const sessionImportedUrlsRef = useRef(new Map<string, string>())
+  // Slow-path hydration (fresh recording) only. While set, `pushHistoryFromAutosave`
+  // drops every push — the auto-added recording is the document's starting
+  // point, not an undoable edit, so undoing it (back to a blank canvas) is
+  // exactly the step we suppress. The seed effect clears this flag by turning
+  // the first committed recording state into the cursor-0 baseline, so the
+  // blank canvas is never an undo step and the user's first edit lands at
+  // cursor 1.
+  const hydrationSeedPendingRef = useRef(false)
+  // Maps video ids to their `file://` URLs for the lifetime of the session,
+  // for both imported sources (URL returned by main on import) and recording
+  // sources (the asset `fileUrl` passed to `addRemoteVideo`). Used to
+  // re-attach the URL when undo/redo restores a video whose id is no longer
+  // in `videos`/`detachedVideos`. This is the only URL source for a freshly
+  // recorded project: `project.assetUrlsByVideoId` is empty until a
+  // `project.json` exists (it is computed from the saved state at project
+  // open), so without this cache a restore rebuilds the recording with an
+  // empty `objectUrl` and it renders blank. Holds only strings — no blob
+  // memory pinned by undo.
+  const sessionVideoUrlsRef = useRef(new Map<string, string>())
 
   // `capturedTag` must be captured at the same instant as `snapshot` and
   // passed in — never re-read from `historyCommitTagRef.current` here.
@@ -760,6 +781,15 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       // a new history entry on top of the restored cursor.
       if (restoringFromHistoryRef.current) {
         restoringFromHistoryRef.current = false
+      }
+      if (hydrationSeedPendingRef.current) {
+        // Slow-path hydration: drop every autosave push until the cursor-0
+        // baseline is seeded (eagerly, the moment the recording commits — see
+        // the seed effect below). This swallows the empty pre-add snapshots
+        // (the destructive flush inside `addRemoteVideo` captures them before
+        // its `setVideos` commits) so the auto-add never becomes a blank-canvas
+        // undo step. Disk writes are unaffected; only the history ledger waits.
+        return
       }
       const tag: HistoryCommitTag = capturedTag ?? "unknown"
       const { next, didPush } = applyHistoryCommit(
@@ -967,6 +997,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     isTimelinePlayingRef.current = isTimelinePlaying
   }, [isTimelinePlaying])
+
+  useEffect(() => {
+    isPreviewModeRef.current = isPreviewMode
+  }, [isPreviewMode])
 
   useEffect(() => {
     selectedItemIdRef.current = selectedItemId
@@ -2079,9 +2113,37 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     []
   )
 
+  // Slow-path hydration: seed the undo baseline the instant the auto-added
+  // recording commits to canvas state, rather than waiting for its debounced
+  // autosave. Seeding here (not in `pushHistoryFromAutosave`) guarantees the
+  // baseline is the recording-ready state before the user can interact, so
+  // their very first edit lands at cursor 1 and is undoable — without ever
+  // exposing the blank-canvas state as an undo step. The recording-add's own
+  // autosave then matches this fingerprint and refreshes rather than appends.
   useEffect(() => {
-    syncTimelineMedia(timelineTimeRef.current, isTimelinePlayingRef.current)
-  }, [syncTimelineMedia, timelineClips, videos])
+    if (!hydrationSeedPendingRef.current) return
+    if (videosRef.current.length === 0) return
+    const snapshot = serializeProjectState(
+      artboardRef.current,
+      videosRef.current,
+      timelineClipsRef.current,
+      detachedVideosRef.current
+    )
+    historyRef.current = {
+      past: [
+        {
+          state: snapshot,
+          fingerprint: fingerprintProjectState(snapshot),
+          tag: "unknown",
+          timestamp: Date.now(),
+        },
+      ],
+      cursor: 0,
+    }
+    hydrationSeedPendingRef.current = false
+    setCanUndo(false)
+    setCanRedo(false)
+  }, [videos, timelineClips])
 
   const setViewportSize = useCallback((size: CanvasSize) => {
     const nextSize = {
@@ -2103,6 +2165,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     )
 
     viewportSizeRef.current = nextSize
+
+    // In fullscreen preview the workspace owns the view transform imperatively
+    // (a zero-padding fill-fit). Leave the persisted user transform untouched so
+    // it can be restored on exit, and don't fight the imperative preview fit.
+    if (isPreviewModeRef.current) return
+
     if (!hasCustomViewRef.current) {
       const fitTransform = getFitViewTransform(nextSize, artboardRef.current)
       viewTransformRef.current = fitTransform
@@ -2144,6 +2212,19 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     )
     viewTransformRef.current = fitTransform
     setViewTransformState(fitTransform)
+  }, [])
+
+  // Pure session-state toggles. All side effects (fullscreen request/exit,
+  // playback start, fill-fit transform, restore) live in the workspace effects
+  // that key on `isPreviewMode`, so the provider stays DOM-free.
+  const enterPreview = useCallback(() => {
+    isPreviewModeRef.current = true
+    setIsPreviewMode(true)
+  }, [])
+
+  const exitPreview = useCallback(() => {
+    isPreviewModeRef.current = false
+    setIsPreviewMode(false)
   }, [])
 
   const setArtboardPreset = useCallback(
@@ -2432,7 +2513,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
 
       // Remember the file:// URL so a later undo of a delete can re-attach
       // it without a new IPC round-trip. The map only ever holds strings.
-      sessionImportedUrlsRef.current.set(id, importResult.fileUrl)
+      sessionVideoUrlsRef.current.set(id, importResult.fileUrl)
       // Add is destructive — flush any pending non-destructive edits as
       // their own history entry first, then tag this mutation so the next
       // autosave creates a separate entry for the add itself.
@@ -2557,13 +2638,14 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         ...createVideoAppearanceDefaults(role, placement),
       }
 
-      // Same treatment as `addVideoFile`: cache the URL for future undo of
-      // a delete (recording sources come from `assetUrlsByVideoId`; imported
-      // sources from session state), and bracket the mutation with a
-      // destructive flush + tag.
-      if (input.source.kind === "imported") {
-        sessionImportedUrlsRef.current.set(desiredId, input.url)
-      }
+      // Same treatment as `addVideoFile`: cache the URL so undo/redo can
+      // re-attach it. Recordings need this too — a freshly recorded project
+      // has no `project.json` yet, so `assetUrlsByVideoId` is empty and this
+      // session cache is the only thing that survives a restore onto a snapshot
+      // whose video is briefly off the canvas (e.g. delete then redo). Without
+      // it the recording rebuilds with an empty URL and the canvas renders
+      // blank. Then bracket the mutation with a destructive flush + tag.
+      sessionVideoUrlsRef.current.set(desiredId, input.url)
       flushAutosaveNow()
       historyCommitTagRef.current = "add"
       setVideos((current) => {
@@ -2904,10 +2986,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       if (existing && existing.objectUrl) return existing.objectUrl
       const fromProject = currentProject?.assetUrlsByVideoId[video.id]
       if (fromProject) return fromProject
-      if (video.source.kind === "imported") {
-        const cached = sessionImportedUrlsRef.current.get(video.id)
-        if (cached) return cached
-      }
+      // Session URL cache covers both imported and recording sources. For a
+      // freshly recorded project this is the only place the URL lives —
+      // `assetUrlsByVideoId` stays empty until a `project.json` exists.
+      const cached = sessionVideoUrlsRef.current.get(video.id)
+      if (cached) return cached
       return ""
     },
     []
@@ -3034,6 +3117,14 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         setTimelineTimeState(clamped)
       }
 
+      // Re-sync timeline media so the canvas reflects the restored clip timing
+      // immediately. Mounted elements (same id + objectUrl across a trim/split/
+      // move undo) don't re-seek on their own — `CanvasVideoNode` only seeks on
+      // mount — and `syncTimelineMedia` is no longer fired by a videos/clips
+      // effect, so the restore must drive it explicitly or the canvas strands a
+      // stale frame and stale clip visibility until the next scrub.
+      syncTimelineMedia(timelineTimeRef.current, isTimelinePlayingRef.current)
+
       setCanUndo(canUndoHistory(historyRef.current))
       setCanRedo(canRedoHistory(historyRef.current))
     },
@@ -3043,6 +3134,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       commitVideosRef,
       resolveObjectUrlForRestore,
       resolveFileSizeForRestore,
+      syncTimelineMedia,
     ]
   )
 
@@ -3103,8 +3195,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     () => ({
       viewportSize,
       viewTransform,
+      isPreviewMode,
     }),
-    [viewTransform, viewportSize]
+    [isPreviewMode, viewTransform, viewportSize]
   )
 
   const timelineValue = useMemo<EditorCanvasTimelineContextValue>(
@@ -3154,6 +3247,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setViewportSize,
       setViewTransform,
       fitArtboardToViewport,
+      enterPreview,
+      exitPreview,
     }),
     [
       addVideoFile,
@@ -3172,6 +3267,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setViewportSize,
       setViewTransform,
       fitArtboardToViewport,
+      enterPreview,
+      exitPreview,
     ]
   )
 
@@ -3269,7 +3366,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       historyRef.current = createEmptyHistory()
       historyCommitTagRef.current = null
       restoringFromHistoryRef.current = false
-      sessionImportedUrlsRef.current.clear()
+      hydrationSeedPendingRef.current = false
+      sessionVideoUrlsRef.current.clear()
       setCanUndo(false)
       setCanRedo(false)
       commitVideosRef([])
@@ -3283,12 +3381,14 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       commitTimelineVisibleVideoIds(new Set())
       timelineTimeRef.current = 0
       isTimelinePlayingRef.current = false
+      isPreviewModeRef.current = false
       selectedItemIdRef.current = null
       setVideos([])
       setDetachedVideos([])
       setTimelineClips([])
       setTimelineTimeState(0)
       setIsTimelinePlaying(false)
+      setIsPreviewMode(false)
       setSelectedItemId(null)
     }
 
@@ -3458,13 +3558,16 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setViewTransformState(fit)
     }
 
-    // Seed the slow-path baseline before any auto-add runs so the
-    // synthesized artboard + empty video/clip state lands at cursor 0. The
-    // first addRemoteVideo's autosave pushes the auto-added state at
-    // cursor 1, and the user's first edit pushes cursor 2 — Cmd+Z walks
-    // back through both. We also seed `lastWrittenSerializedRef` to avoid
-    // a redundant IPC write of the still-empty state when the destructive
-    // flush inside `addRemoteVideo` fires before its own setVideos.
+    // Defer the slow-path history baseline until the auto-added recording is
+    // on the canvas. Seeding it here (with the still-empty video/clip state)
+    // is what produced a blank-canvas undo step: the recording-add then
+    // landed at cursor 1 and Cmd+Z walked back to the empty canvas. Instead we
+    // arm `hydrationSeedPendingRef`; the seed effect above turns the first
+    // committed recording state into the cursor-0 baseline, and undo only
+    // starts once the user makes a change on top of it. We still seed
+    // `lastWrittenSerializedRef` to avoid a redundant IPC write of the
+    // still-empty state when the destructive flush inside `addRemoteVideo`
+    // fires before its own setVideos.
     {
       const baselineSnapshot = serializeProjectState(
         artboardRef.current,
@@ -3472,16 +3575,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         timelineClipsRef.current,
         detachedVideosRef.current
       )
-      const baselineFingerprint = fingerprintProjectState(baselineSnapshot)
-      lastWrittenSerializedRef.current = baselineFingerprint
-      const seeded = applyHistoryCommit(
-        historyRef.current,
-        baselineSnapshot,
-        baselineFingerprint,
-        "unknown",
-        Date.now()
-      )
-      historyRef.current = seeded.next
+      lastWrittenSerializedRef.current = fingerprintProjectState(baselineSnapshot)
+      hydrationSeedPendingRef.current = true
       setCanUndo(false)
       setCanRedo(false)
     }

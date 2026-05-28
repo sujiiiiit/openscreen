@@ -4,35 +4,19 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { Image as KonvaImage } from "react-konva"
 import type Konva from "konva"
 
-import type { CursorSetId } from "@/lib/cursors/cursor-manifest"
-import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
-import {
-  buildRawTrack,
-  buildSmoothedTrack,
-  rawSamplesFromMoves,
-  sampleCursorAtTime,
-  type SmoothedCursorTrack,
-} from "@/lib/cursors/cursor-track"
+import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
 import type { CanvasVideoItem } from "@/types/editor-canvas"
 
+import {
+  buildCursorTrack,
+  placeCursor,
+  projectFolderFromObjectUrl,
+} from "./cursor-scene"
 import {
   useEditorCanvasMedia,
   useEditorCanvasTimeline,
   useEditorCanvasTimelineActions,
 } from "./provider"
-import { getVideoCoverCrop } from "./video-cover-crop"
-
-// Cursor set + size. `macos` per the chosen default; the box height is the
-// rendered SVG height in *display points* (the cursor coordinate space) before
-// it is scaled into artboard pixels — purely cosmetic, tune to taste. Position
-// and hotspot alignment are exact regardless of this value.
-const CURSOR_SET: CursorSetId = "macos"
-const CURSOR_BOX_HEIGHT_POINTS = 52
-const CURSOR_SCALE = 1
-// Spring easing of the cursor path. OFF = the cursor lands exactly on every
-// captured sample (no transition/lag) so you can judge raw capture accuracy;
-// flip to true to re-enable Screen Studio-style smoothing.
-const CURSOR_SMOOTHING = false
 
 // Module-level image cache shared across mounts — cursor SVGs are tiny and
 // reused across every recording.
@@ -46,18 +30,6 @@ function loadCursorImage(url: string): HTMLImageElement {
   img.src = url
   imageCache.set(url, img)
   return img
-}
-
-/** Derive the project folder from a recording asset's file:// objectUrl. */
-function projectFolderFromObjectUrl(objectUrl: string): string | null {
-  if (!objectUrl.startsWith("file:")) return null
-  try {
-    const pathname = decodeURIComponent(new URL(objectUrl).pathname)
-    const slash = pathname.lastIndexOf("/")
-    return slash > 0 ? pathname.slice(0, slash) : null
-  } catch {
-    return null
-  }
 }
 
 /**
@@ -97,17 +69,16 @@ export function CanvasCursorOverlay() {
     const node = imageRef.current
     const video = videoRef.current
     const clip = clipRef.current
-    const track = trackRef.current
-    if (!node || !video || !track) return
+    if (!node || !video) return
 
     const layer = node.getLayer()
 
-    // Timeline time → screen recording source time → recording-relative ms.
-    const sourceSeconds = clip
-      ? timelineSeconds - clip.start + clip.sourceIn
-      : timelineSeconds
-    const sample = sampleCursorAtTime(track, sourceSeconds * 1000)
-    if (!sample) {
+    // No track means no usable cursor data (missing recording file, or data
+    // not yet loaded). Hide rather than leaving the node drawing its last
+    // bitmap at its natural size — otherwise a video whose source URL failed
+    // to resolve strands a static, mispositioned cursor on a blank canvas.
+    const track = trackRef.current
+    if (!track) {
       if (node.visible()) {
         node.visible(false)
         layer?.batchDraw()
@@ -115,57 +86,30 @@ export function CanvasCursorOverlay() {
       return
     }
 
-    const asset = resolveCursorAsset(sample.cursorId, CURSOR_SET)
-    if (!asset) {
-      node.visible(false)
-      layer?.batchDraw()
+    // Timeline time → screen recording source time → recording-relative ms.
+    const sourceSeconds = clip
+      ? timelineSeconds - clip.start + clip.sourceIn
+      : timelineSeconds
+    const placement = placeCursor(track, video, sourceSeconds)
+    if (!placement) {
+      if (node.visible()) {
+        node.visible(false)
+        layer?.batchDraw()
+      }
       return
     }
 
-    const iw = video.intrinsicWidth || 1
-    const ih = video.intrinsicHeight || 1
-    const dw = track.displayWidth || iw
-    const dh = track.displayHeight || ih
-
-    // Display point → source pixel → cover-crop → node-local → artboard.
-    const crop = getVideoCoverCrop(
-      { width: iw, height: ih },
-      { width: video.width, height: video.height },
-    )
-    const sx = (sample.x / dw) * iw
-    const sy = (sample.y / dh) * ih
-    const localX = ((sx - crop.cropX) / crop.cropWidth) * video.width
-    const localY = ((sy - crop.cropY) / crop.cropHeight) * video.height
-    const onScreen =
-      localX >= 0 && localX <= video.width && localY >= 0 && localY <= video.height
-
-    const rad = (video.rotation * Math.PI) / 180
-    const cos = Math.cos(rad)
-    const sin = Math.sin(rad)
-    const artboardX = video.x + localX * cos - localY * sin
-    const artboardY = video.y + localX * sin + localY * cos
-
-    // Uniform px-per-display-point scale (cover crop preserves aspect, so the
-    // x and y scales coincide).
-    const scale = (iw / dw) * (video.width / crop.cropWidth)
-    const renderHeight = CURSOR_BOX_HEIGHT_POINTS * CURSOR_SCALE * scale
-    const aspect = asset.size[1] > 0 ? asset.size[0] / asset.size[1] : 1
-    const renderWidth = renderHeight * aspect
-
-    if (currentUrlRef.current !== asset.url) {
-      currentUrlRef.current = asset.url
-      setImage(loadCursorImage(asset.url))
+    if (currentUrlRef.current !== placement.url) {
+      currentUrlRef.current = placement.url
+      setImage(loadCursorImage(placement.url))
     }
-    node.size({ width: renderWidth, height: renderHeight })
+    node.size({ width: placement.width, height: placement.height })
     // Offset so the hotspot pixel sits exactly on the artboard point; rotation
     // then pivots around the hotspot, matching the recorded pointer.
-    node.offset({
-      x: asset.hotspot[0] * renderWidth,
-      y: asset.hotspot[1] * renderHeight,
-    })
-    node.position({ x: artboardX, y: artboardY })
-    node.rotation(video.rotation)
-    node.visible(onScreen)
+    node.offset({ x: placement.offsetX, y: placement.offsetY })
+    node.position({ x: placement.x, y: placement.y })
+    node.rotation(placement.rotation)
+    node.visible(placement.onScreen)
     layer?.batchDraw()
   }, [])
 
@@ -180,11 +124,10 @@ export function CanvasCursorOverlay() {
 
     let cancelled = false
     void window.api?.projects.getCursorData(folder).then((data) => {
-      if (cancelled || !data || data.moves.length === 0) return
-      const samples = rawSamplesFromMoves(data.moves, data.processTimeStartMs)
-      trackRef.current = CURSOR_SMOOTHING
-        ? buildSmoothedTrack(samples, data.displayWidth, data.displayHeight)
-        : buildRawTrack(samples, data.displayWidth, data.displayHeight)
+      if (cancelled) return
+      const track = buildCursorTrack(data)
+      if (!track) return
+      trackRef.current = track
       place(timelineTime)
     })
     return () => {

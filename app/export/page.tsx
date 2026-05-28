@@ -504,15 +504,14 @@ function RunningView({
   // headline — never mid-sequence.
   const phrase = useCyclingPhrase(STAGE_PHRASES[stage], MICROPHRASE_INTERVAL_MS)
 
-  // During non-encoding phases we have no frame-level counter; show an
-  // indeterminate bar by holding the previous pct so it doesn't snap back
-  // to 0 at the boundary. Once encoding starts we drive it from progress.
-  const encodingPct =
-    progress.framesTotal > 0
-      ? Math.min(100, (progress.framesDone / progress.framesTotal) * 100)
-      : 0
-  const showIndeterminate =
-    stage !== "encoding" || progress.framesTotal === 0
+  // One monotonic bar across the whole pipeline. Every phase maps to a
+  // forward-only slice so the bar starts fresh at 0, advances through
+  // prepare → decode → encode → finalize, and NEVER resets or phantom-fills.
+  // (The old indeterminate sweep slid a segment to the track's right edge —
+  // which read as "100%" during the prep phases — and then the determinate
+  // encoding bar appeared at 0, reading as a reset to 0. A single weighted
+  // determinate bar removes both illusions.)
+  const overallPct = computeOverallPct(stage, progress)
 
   const etaLabel =
     progress.etaSeconds === null
@@ -530,14 +529,10 @@ function RunningView({
     <div className="flex flex-col gap-3 py-4">
       <span className="text-[13px]">{phrase ?? ""}…</span>
       <div className="bg-muted relative h-2 w-full overflow-hidden rounded">
-        {showIndeterminate ? (
-          <div className="export-indeterminate-bar bg-primary rounded" />
-        ) : (
-          <div
-            className="bg-primary h-full rounded transition-[width] duration-150"
-            style={{ width: `${encodingPct}%` }}
-          />
-        )}
+        <div
+          className="bg-primary h-full rounded transition-[width] duration-300 ease-out"
+          style={{ width: `${overallPct}%` }}
+        />
       </div>
       {showEncodingMeta ? (
         <div className="text-muted-foreground flex items-center justify-between text-[11px] tabular-nums">
@@ -698,6 +693,34 @@ function Select<T extends string | number>({
       </DropdownMenuContent>
     </DropdownMenu>
   )
+}
+
+// Weighted, monotonic progress across the whole export pipeline. Encoding is
+// the dominant phase, so it owns the bulk of the bar (4%→96%); the bracketing
+// phases get small fixed slices that only ever move the bar forward. The bar
+// therefore starts at 0 ("fresh"), climbs once during the real render, and
+// holds near full through finalize — it never jumps to 100% early nor resets.
+function computeOverallPct(
+  stage: ExportStage,
+  progress: ExportProgress,
+): number {
+  const ENCODE_START = 4
+  const ENCODE_END = 96
+  switch (stage) {
+    case "preparing":
+      return 0
+    case "decoding-audio":
+      return ENCODE_START
+    case "encoding": {
+      if (progress.framesTotal <= 0) return ENCODE_START
+      const frac = Math.min(1, progress.framesDone / progress.framesTotal)
+      return ENCODE_START + frac * (ENCODE_END - ENCODE_START)
+    }
+    case "muxing-audio":
+      return 98
+    case "finalizing":
+      return 99
+  }
 }
 
 function formatEta(seconds: number): string {

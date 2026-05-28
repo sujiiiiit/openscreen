@@ -207,3 +207,33 @@ export function getFitViewTransform(
     y: (viewportSize.height - artboardSize.height * scale) / 2,
   }
 }
+
+// Like getFitViewTransform but with zero padding: the artboard fills as much of
+// the viewport as it can while preserving aspect ratio. Used by fullscreen
+// preview, where letterbox bars (not a fixed margin) frame the composition.
+export function getPreviewFillTransform(
+  viewportSize: CanvasSize,
+  artboardSize: CanvasSize
+): ViewTransform {
+  if (
+    viewportSize.width <= 0 ||
+    viewportSize.height <= 0 ||
+    artboardSize.width <= 0 ||
+    artboardSize.height <= 0
+  ) {
+    return { scale: 1, x: 0, y: 0 }
+  }
+
+  const scale = clampWorkspaceZoom(
+    Math.min(
+      viewportSize.width / artboardSize.width,
+      viewportSize.height / artboardSize.height
+    )
+  )
+
+  return {
+    scale,
+    x: (viewportSize.width - artboardSize.width * scale) / 2,
+    y: (viewportSize.height - artboardSize.height * scale) / 2,
+  }
+}

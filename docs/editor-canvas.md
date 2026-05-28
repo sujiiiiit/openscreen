@@ -40,6 +40,8 @@ Use these names in code review, docs, comments, and new implementation plans. Th
 | iOS / macOS smooth corners       | Corner smoothing                  | Per-node 0–1 smoothing factor; 0 = circular arc, 0.6 = macOS look, 1 = fully continuous-curvature.                                    |
 | Custom / fake / SVG cursor       | Cursor overlay                    | Themed SVG cursor (`CanvasCursorOverlay`) drawn over the screen video from the recording's captured cursor track, replacing the OS cursor. |
 | Cursor click point               | Cursor hotspot                    | The point in a cursor SVG that sits on the recorded pointer position (0..1 fraction of the SVG box); drives the Konva offset. |
+| Fullscreen play / present mode   | Fullscreen preview                | A distraction-free mode that fullscreens the workspace, fill-fits the artboard, hides all editor chrome, and auto-plays the composition start-to-end like a video player. |
+| Fill the screen / no-padding fit | Fill-fit (preview contain-fit)    | Zero-padding contain-fit transform (`getPreviewFillTransform`) used only in fullscreen preview; letterbox bars frame the artboard, no crop. |
 
 ## Current Scope
 
@@ -65,6 +67,7 @@ Implemented:
 - Auto-routing of canvas / timeline selection to the Video tab via a `SidebarSelectionBridge`.
 - Non-destructive remove-from-canvas: deleting a video (recorded or imported) detaches it from the canvas/timeline but keeps it in the project; the Video tab lists it with an **Add** action to put it back.
 - Cursor overlay: a themed SVG cursor drawn over the screen recording, driven by captured cursor metadata, spring-smoothed and hotspot-accurate (Screen Studio-style). See [Cursor Overlay](#cursor-overlay).
+- Fullscreen preview: a "Preview" titlebar button plays the composition start-to-end in true fullscreen with native-style auto-hiding controls. See [Fullscreen Preview Mode](#fullscreen-preview-mode).
 
 Not implemented yet:
 
@@ -91,7 +94,9 @@ Not implemented yet:
 | `components/editor/timeline-panel.tsx`                    | Timeline UI, playback controls, playhead scrubbing, clip rendering, and move/resize handlers.                                                                   |
 | `components/editor/sidebar.tsx`                           | Left editor sidebar, tab rail, tab content panel, and fixed-width collapse/expand animation.                                                                    |
 | `components/editor/canvas/provider.tsx`                   | Editor canvas state, video import metadata, artboard state, viewport size, view transform, and actions.                                                         |
-| `components/editor/canvas/editor-workspace.tsx`           | Konva stage shell, layer composition, viewport sizing, zoom, pan, and keyboard shortcuts.                                                                       |
+| `components/editor/canvas/editor-workspace.tsx`           | Konva stage shell, layer composition, viewport sizing, zoom, pan, keyboard shortcuts, and the fullscreen-preview lifecycle (fullscreen request/exit, fill-fit transform, chrome/interaction gating).                                            |
+| `components/editor/canvas/preview-controls.tsx`          | `PreviewControls` — DOM overlay for fullscreen preview: click/Space-to-toggle surface, auto-hiding transport (play/pause, tick-driven scrub bar, clock), always-on Exit button, centered Replay at end. |
+| `components/editor/title-bar-preview-button.tsx`         | Titlebar "Preview" button (before Export) that calls `enterPreview()`; disabled until the timeline has a positive duration.                                      |
 | `components/editor/canvas/artboard-pixel-grid.tsx`        | Custom non-listening pixel grid renderer for high zoom inside the artboard.                                                                                     |
 | `components/editor/canvas/canvas-video-node.tsx`          | Live video node rendering, frame callbacks, object URL playback, cover crop attrs, squircle sceneFunc with passes for drop shadow (off-canvas-cast technique) and per-node border, hitFunc kept at the node body, and Konva node registration.   |
 | `components/editor/canvas/canvas-cursor-overlay.tsx`     | `CanvasCursorOverlay` — one Konva `Image` in the artboard clip group that samples the captured cursor track by playback source time and draws the themed SVG at its hotspot. Imperative on the hot path. See [Cursor Overlay](#cursor-overlay). |
@@ -111,7 +116,7 @@ Not implemented yet:
 | `components/editor/canvas/snap-guide-overlay.tsx`         | Imperative Konva overlay drawing the pink Figma-style alignment and distance guides from a fixed line pool.                                                     |
 | `components/editor/canvas/view-transform-utils.ts`        | Viewport interaction helpers for input target checks, modifier detection, and screen-pixel snapping.                                                            |
 | `components/ui/dropdown-menu.tsx`                         | Shared dropdown menu primitives used by artboard and zoom controls.                                                                                             |
-| `lib/editor-canvas.ts`                                    | Artboard presets, zoom/grid constants, fit transform, clamped view helpers, and pointer-centered zoom helper.                                                   |
+| `lib/editor-canvas.ts`                                    | Artboard presets, zoom/grid constants, fit transform (`getFitViewTransform`), zero-padding fill-fit transform (`getPreviewFillTransform`), clamped view helpers, and pointer-centered zoom helper.                                              |
 | `lib/editor-canvas-snap.ts`                               | Pure snap math: rotated AABB, snap-cache builder, drag-snap and resize-snap solvers, equal-spacing distance guides, grid snap helpers.                          |
 | `types/editor-canvas.ts`                                  | Canvas types: size, artboard, pixel grid settings, view transform, video item (incl. persistence `source`), transform patch.                                    |
 | `components/editor/canvas/persistence.ts`                 | Pure serialize / deserialize helpers between `CanvasVideoItem` + `EditorArtboard` + `CanvasTimelineClip` and the `ProjectStateV1` schema written to `project.json`. |
@@ -191,9 +196,10 @@ Important actions:
 - `deleteVideo(id)` — **non-destructive**: detaches the video from the canvas/timeline (moves it to `detachedVideos`, drops its clip) instead of removing it from the project. Despite the name, no project data or asset file is deleted.
 - `addVideoToCanvas(id)` — inverse of `deleteVideo`: re-attaches a detached video to the canvas with a fresh full-length timeline clip and selects it.
 - `setArtboardPreset(id)`
-- `setViewportSize(size)`
+- `setViewportSize(size)` — during fullscreen preview this updates the size state but skips its auto-fit/clamp transform mutation, so the user's saved view survives and the imperative fill-fit isn't fought.
 - `setViewTransform(transform)`
 - `fitArtboardToViewport()`
+- `enterPreview()`, `exitPreview()` — toggle the session-only `isPreviewMode` flag. Pure state toggles: every side effect (fullscreen request/exit, start playback from 0, fill-fit, restore the saved view) lives in `editor-workspace.tsx` effects that key on `isPreviewMode`, keeping the provider DOM-free.
 - `registerTimelineVideoElement(id, element | null)`
 - `registerTimelineCanvasNode(id, node | null)`
 - `setTimelineTime(time)`
@@ -207,7 +213,7 @@ Context hooks:
 
 - `useEditorCanvasMedia()`: `videos` (on canvas), `detachedVideos` (in project, removed from canvas), selection, selected video, import error.
 - `useEditorCanvasArtboard()`: current artboard.
-- `useEditorCanvasView()`: viewport size and viewport transform.
+- `useEditorCanvasView()`: viewport size, viewport transform, and `isPreviewMode`.
 - `useEditorCanvasTimeline()`: clips, selected clip, playhead time, duration, timeline zoom, fit mode, playback state, primary audio video id.
 - `useEditorCanvasActions()`: stable canvas actions.
 - `useEditorCanvasTimelineActions()`: stable timeline playback, clip-editing, and media-registration actions.
@@ -247,13 +253,15 @@ Storage:
 
 - `MAX_HISTORY_ENTRIES = 100`, FIFO eviction at the front.
 - In-memory `historyRef` in the provider. The state never touches disk.
-- The project-switch reset block (`useEffect` ~`provider.tsx:2581`) clears `historyRef`, `historyCommitTagRef`, `restoringFromHistoryRef`, `sessionImportedUrlsRef`, and both reactive flags.
-- Both hydration paths seed a baseline entry tagged `"unknown"` so the user's first edit becomes index 1 and `Cmd+Z` returns to the loaded state. The slow path also seeds `lastWrittenSerializedRef` so the destructive flush inside `addRemoteVideo` does not write the still-empty state to disk before the auto-add lands.
+- The project-switch reset block (`useEffect` ~`provider.tsx:2581`) clears `historyRef`, `historyCommitTagRef`, `restoringFromHistoryRef`, `hydrationSeedPendingRef`, `sessionVideoUrlsRef`, and both reactive flags.
+- Both hydration paths seed a cursor-0 baseline tagged `"unknown"` whose state is the **recording-ready** document (artboard preset + auto-added recording + its clip), so the user's first edit becomes index 1, `Cmd+Z` returns to that ready state, and the blank canvas is **never** an undo step.
+  - **Fast path** (`project.json` exists): the recording is already in the saved state, so the baseline is seeded synchronously from the hydrated snapshot.
+  - **Slow path** (fresh recording, no `project.json`): the recording is added asynchronously by `addRemoteVideo`, so the baseline cannot be seeded synchronously. Instead hydration arms `hydrationSeedPendingRef`; `pushHistoryFromAutosave` drops every push while it is set (swallowing the empty pre-add snapshots), and a dedicated seed effect (keyed on `videos`/`timelineClips`) turns the first committed non-empty state into the cursor-0 baseline and clears the flag. Seeding eagerly on commit — rather than waiting for the recording's debounced autosave — guarantees the baseline is in place before the user can interact, so even an immediate reposition of the recording is undoable. The recording-add's own autosave then matches the baseline fingerprint and refreshes the timestamp instead of appending. The slow path also seeds `lastWrittenSerializedRef` so the destructive flush inside `addRemoteVideo` does not write the still-empty state to disk before the auto-add lands.
 
 Object URL on restore:
 
-- Recording-source videos take their URL from `project.assetUrlsByVideoId[videoId]` (resolved by main at project open).
-- Imported-source videos take their URL from (in order): an existing in-state copy, `project.assetUrlsByVideoId`, or a `sessionImportedUrlsRef: Map<id, string>` cache populated when the file was first imported via `addVideoFile` / `addRemoteVideo`. The cache only ever holds `file://` URL strings — no blob memory is pinned by undo. A missing file falls back to an empty `objectUrl`, identical to hydration's broken-asset semantics.
+- `resolveObjectUrlForRestore` resolves a restored video's `objectUrl` for **both** recording and imported sources, in order: an existing in-state copy (`videoByIdRef` / `detachedVideos`), `project.assetUrlsByVideoId[videoId]`, then a `sessionVideoUrlsRef: Map<id, string>` cache. The cache is populated for every added video (`addVideoFile` / `addRemoteVideo`) and only ever holds `file://` URL strings — no blob memory is pinned by undo. A missing file falls back to an empty `objectUrl`, identical to hydration's broken-asset semantics.
+- The session cache is **load-bearing for fresh recordings**, not just imports. `project.assetUrlsByVideoId` is built by main from the saved `state.videos` (`resolveAssetUrlsForState` in `electron/ipc/projects.ts`) and is **empty until a `project.json` exists** — so a recording opened via the slow path has no entry there. If a restore lands on a state where the recording is briefly off the canvas (any redo onto a snapshot whose video is not currently in `videos`/`detachedVideos`) the live `videoByIdRef` lookup also misses, and without the session cache the recording would rebuild with an empty `objectUrl` and render blank (the canvas appears to "lose" the recording, while the cursor overlay — which reads geometry, not the video element — lingers). Caching recording URLs in `sessionVideoUrlsRef` closes that gap. (The slow-path undo baseline is now the recording-ready state, not a blank canvas — see the Storage notes above — so plain undo no longer triggers this, but the cache still guards delete/re-add and other off-canvas restore paths.)
 
 Keyboard:
 
@@ -524,20 +532,23 @@ Files:
 - `lib/cursors/cursor-manifest.ts` — **generated** by `scripts/generate-cursor-manifest.mjs`. A typed index of every cursor SVG (24 sets) with its hotspot (0..1 fraction, parsed from the `<asset>-<variant>__<hotXpct>-<hotYpct>.svg` filename) and intrinsic size. Re-run the script after adding/replacing assets in `public/assets/cursors/`.
 - `lib/cursors/cursor-set.ts` — maps a captured `cursorId` (NSCursor name) → themed asset via `NS_NAME_TO_ASSET` (mirrors Screen Studio's `macos/index.ts`), with fallback to the base set for incomplete custom sets. Helpers: `resolveCursorAsset`, `cursorDrawOrigin`, `cursorRenderSize`.
 - `lib/cursors/cursor-track.ts` — pure processing: `rawSamplesFromMoves` → `buildSmoothedTrack` (a deterministic, pre-integrated critically-damped spring over a fixed 120 Hz timestep) → `sampleCursorAtTime`. Deterministic so playback, backward scrub, and export all agree.
-- `components/editor/canvas/canvas-cursor-overlay.tsx` — `CanvasCursorOverlay`, one `Konva.Image` inside the artboard clip group, above the videos.
+- `components/editor/canvas/cursor-scene.ts` — **the single source of truth for cursor placement**, shared by the live editor and the exporter (same role `video-scene-draw.ts` plays for video appearance). Owns the render constants (`CURSOR_SET`, `CURSOR_BOX_HEIGHT_POINTS`, `CURSOR_SCALE`, `CURSOR_SMOOTHING`), `buildCursorTrack` (raw IPC data → track, applying the smoothing choice), `placeCursor` (pure: sample + display→artboard mapping → `{ url, size, offset, position, rotation, onScreen }`), and `projectFolderFromObjectUrl`. Because the cursor is part of the output video, the editor preview and the encoded frame call the *same* `placeCursor`, so they stay pixel-identical.
+- `components/editor/canvas/canvas-cursor-overlay.tsx` — `CanvasCursorOverlay`, one `Konva.Image` inside the artboard clip group, above the videos. Imperatively applies `placeCursor` on every playhead tick.
 - `public/assets/cursors/` — the SVG/PNG assets extracted from Screen Studio (166 files, sets `macos`, `macos-tahoe`, `touch`, `halloween`, `custom-1..20`). Default render set is `macos`.
 
 Data flow:
 
 - `projects:getCursorData(folder)` (read-only IPC, `electron/ipc/projects.ts`) reads the recording's `mousemoves-0.json` + the `input` output's `session.processTimeStartMs` / `displayBoundsPoints` and returns `CursorTrackData`. The overlay derives `folder` from the screen video's `file://` `objectUrl`, so the provider is untouched.
 - On load it builds the smoothed track once; on every playhead tick (`subscribeTimelineTicks`) it samples by **source time** and places the cursor imperatively.
+- `place()` hides the node when no track is loaded yet (or when the screen video has no resolvable `objectUrl`, so the track fetch bails). Without this guard the node keeps its last bitmap and draws at the image's natural size at `(0, 0)` — a static, oversized cursor stranded on the canvas if the recording's URL ever fails to resolve.
+- **In export** (`components/editor/export/`): the cursor is part of the output video, so the export pipeline composes it too. `build-stage.ts` → `buildCursorOverlay` derives the project folder from the screen video's asset URL, fetches the same `getCursorData`, builds the track via `buildCursorTrack`, pre-decodes every distinct cursor SVG the track references (so the per-frame loop never awaits a load), and adds one `Konva.Image` on top of the video nodes in the content layer (matching the editor's z-order). `run-export.ts`'s frame loop calls `placeCursor` with the screen clip's `sourceTimeSec` straight from the frame plan — so the cursor honors trims/splits and only shows while the screen clip is active — then swaps `node.image(...)` to the matching pre-decoded SVG. No screen recording, no cursor sidecar, or an unresolvable folder ⇒ `cursor` is null and export proceeds without it.
 
 Time + coordinate mapping (the precise part):
 
-- **Time**: timeline seconds → screen recording source seconds via the screen clip (`t − clip.start + clip.sourceIn`), ×1000 = recording-relative ms = the cursor track's time base (= `processTimeMs − session.processTimeStartMs`). `session.processTimeStartMs` is anchored to the screen video's **first-frame** host time (not stream start), so cursor source time 0 lines up with video source time 0 — without this the cursor lags the video by ScreenCaptureKit's ~100–200 ms startup delay. Sampling by source time makes trims/offsets free. Outside the captured range → cursor hidden.
+- **Time**: timeline seconds → screen recording source seconds via the screen clip (`t − clip.start + clip.sourceIn`), ×1000 = recording-relative ms = the cursor track's time base (= `processTimeMs − session.processTimeStartMs`). `session.processTimeStartMs` is anchored to the screen video's **first-frame** host time (not stream start), so cursor source time 0 lines up with video source time 0 — without this the cursor lags the video by ScreenCaptureKit's ~100–200 ms startup delay. Sampling by source time makes trims/offsets free. **Outside the captured sample range the cursor is held, not hidden**: `sampleCursorAtTime` clamps the query time into `[firstSample, lastSample]` and returns the boundary position. The leading/trailing gaps are stationary periods (event capture emits nothing while the mouse doesn't move), so holding the nearest known position is exactly correct. The mac-addon also bookends the recorded stream with start/end samples (see `docs/screen-recording-addon.md` → Boundary bookends), so freshly recorded tracks already span the full session; the renderer-side hold additionally covers older recordings that lack those bookends. The only hide path is the off-crop test below.
 - **Position**: display-relative logical point → display fraction (`x / displayWidth`) → source pixel (`× intrinsicWidth`) → cover-crop (`getVideoCoverCrop`) → node-local px → rotate by the node rotation and offset by the node `(x, y)` → artboard coords. Off-crop points hide the cursor.
 - **Hotspot**: the cursor SVG is placed via Konva `offset = hotspot × renderSize`, so the hotspot pixel lands exactly on the artboard point and rotation/scale pivot on it.
-- **Size**: `CURSOR_BOX_HEIGHT_POINTS × CURSOR_SCALE` (display points) × the uniform px-per-display-point scale; cosmetic only (position/hotspot are exact). Tune the two constants in `canvas-cursor-overlay.tsx`.
+- **Size**: `CURSOR_BOX_HEIGHT_POINTS × CURSOR_SCALE` (display points) × the uniform px-per-display-point scale; cosmetic only (position/hotspot are exact). Tune the two constants in `cursor-scene.ts` (shared by the editor and the exporter, so both move together).
 
 Performance posture:
 
@@ -552,7 +563,43 @@ Known limitations / v2:
 - Full-display recordings only. Region/window captures would need the source-rect offset folded into the display→source mapping.
 - Custom app cursors (`cursorId = custom-N` from the addon) fall back to the pointer; using the captured PNG from the recording's `cursors/` folder is future work.
 - Click effects, cursor click-spring scale, "hide when idle", and shake removal (Screen Studio cursor options) are not implemented.
-- Cursor set + size are not user-configurable yet (constants in `canvas-cursor-overlay.tsx`).
+- Cursor set + size are not user-configurable yet (constants in `cursor-scene.ts`).
+
+## Fullscreen Preview Mode
+
+A distraction-free playback mode: the "Preview" titlebar button (left of Export, `title-bar-preview-button.tsx`) fullscreens the workspace and plays the composition start-to-end like a native video player.
+
+Design principle — **reuse the live playback engine, do not build a second stage.** Preview is the existing live Konva stage, presented via the browser Fullscreen API with a fill-fit transform and editor chrome hidden. The export pipeline's offscreen stage (`export/build-stage.ts`) stays reserved for deterministic frame-accurate export; duplicating the master-clock / audio / cursor engine for real-time preview was explicitly rejected.
+
+State and ownership:
+
+- `isPreviewMode` is session-only state on the provider (view context). `enterPreview()` / `exitPreview()` are **pure toggles** — all DOM/playback side effects live in `editor-workspace.tsx`. Not persisted, not in undo history; reset in the project-switch reset block.
+- **Enter** (workspace effect keyed on `isPreviewMode`): `containerRef.requestFullscreen()` (a rejection calls `exitPreview()`), then `setTimelineTime(0)` + `playTimeline()`.
+- **Exit** (same effect, guarded so initial mount is a no-op): `pauseTimeline()`, `document.exitFullscreen()` if still fullscreen, and repaint the user's saved `viewTransform`.
+- A mount-once `fullscreenchange` listener calls `exitPreview()` when the document drops out of fullscreen (Esc / OS gesture) while still in preview, so the state flag always tracks reality. The two exit paths (button vs. fullscreenchange) are idempotent and don't loop.
+
+Fill-fit:
+
+- A dedicated layout effect applies `getPreviewFillTransform(viewportSize, artboard)` (zero-padding contain-fit) imperatively via `applyStageViewTransform` whenever preview is active. It recomputes on the fullscreen resize (the workspace `ResizeObserver` reports the screen size → `setViewportSize` → this effect) and on artboard change.
+- The normal transform-sync layout effect early-returns while `isPreviewMode` so it doesn't fight the fill-fit; it still keeps `viewTransformRef` current for restore-on-exit.
+- `setViewportSize` (provider) skips its auto-fit/clamp transform mutation during preview, so the persisted user view survives untouched.
+- Contain-fit keeps the artboard sharp (the canvas re-rasterizes at display pixel density via `Konva.pixelRatio`, capped 3); letterbox bars are the black container background. No crop, no distortion.
+
+Chrome + interaction gating while preview:
+
+- Container background switches to black; the white artboard backdrop DOM is not rendered.
+- Stage interaction handlers (`handleWheel/MouseDown/MouseMove/Tap/DragStart`) and the artboard hit-rect handlers early-return on `isPreviewModeRef`; the `SelectedVideoTransformer` is forced to `null`; the selection toolbar is force-hidden. The pixel grid is already hidden below its `visibleFromScale`.
+- The global keydown handler, while preview, maps **Space → toggle play/pause** and mutes every other editor shortcut (undo/redo, nudge, zoom, frame-step, pan). Esc is left to the browser to exit fullscreen.
+
+Controls (`preview-controls.tsx`, DOM overlay mounted only in preview, `z-[60]`):
+
+- Native-player feel: a full-surface click target toggles play/pause; an auto-hiding bottom transport (play/pause, scrub bar, elapsed / total clock) fades out ~2.5 s into playback and reappears on pointer move; an always-on Exit button (top-right) and the cursor hide while controls are hidden.
+- The scrub-bar fill and elapsed clock are driven imperatively from `subscribeTimelineTicks` (no per-frame React render). Scrubbing pauses playback, then commits via `setTimelineTime` (which re-notifies subscribers so the bar tracks while paused).
+- **End of timeline**: the live engine auto-pauses at `timelineDuration` (no loop). The overlay detects `!isTimelinePlaying && timelineTime ≥ duration` and shows a centered **Replay** button (`setTimelineTime(0)` + `playTimeline()`).
+
+The cursor overlay and audio need zero preview-specific code — both ride the existing playback engine (tick subscription and `shouldPlayAudio`).
+
+Performance: reuses the single content-layer redraw; adds no per-node DOM, no per-node listeners, and no per-frame React state. Holds the 5000-node stress invariant.
 
 ## Interaction Model
 
@@ -723,7 +770,7 @@ Schema (`electron/ipc/project-schema.ts`):
 - `timelineClips: ProjectTimelineClip[]` — `start`, `end`, `sourceIn`, `sourceOut` per clip. Only on-canvas videos have a clip; detached videos carry none.
 - `updatedAtUnixMs` — refreshed by main on every successful write.
 
-Not persisted: selection, playhead time, timeline zoom/scroll, viewport transform, hover preview state, measured per-clip source fps (`videoFpsRef`, re-measured each session for frame-stepping), the **cursor overlay track** (loaded on demand from the recording's input sidecars via `projects:getCursorData` and re-built each session — see [Cursor Overlay](#cursor-overlay)), the in-memory undo/redo history (`historyRef`), the session-only imported URL cache (`sessionImportedUrlsRef`), runtime `objectUrl` strings, all `*Ref` runtime state. The view always re-fits the artboard on load.
+Not persisted: selection, playhead time, timeline zoom/scroll, viewport transform, **fullscreen preview state (`isPreviewMode`)** (session-only flag for [Fullscreen Preview Mode](#fullscreen-preview-mode); reset on project switch), hover preview state, measured per-clip source fps (`videoFpsRef`, re-measured each session for frame-stepping), the **cursor overlay track** (loaded on demand from the recording's input sidecars via `projects:getCursorData` and re-built each session — see [Cursor Overlay](#cursor-overlay)), the in-memory undo/redo history (`historyRef`), the session-only video URL cache (`sessionVideoUrlsRef`, holding `file://` URLs for both recordings and imports), runtime `objectUrl` strings, all `*Ref` runtime state. The view always re-fits the artboard on load.
 
 Derived-on-load (not persisted, but reconstructed every hydration): a recording's `CanvasVideoItem.fileSize` is read back from `ProjectAsset.fileSize`, not from `project.json`. Both hydration paths (fast-path restore and slow-path synthesis) and both undo/redo restores route through `resolveFileSizeForRestore`. Imported videos keep their persisted `source.fileSize` instead.
 
@@ -843,7 +890,7 @@ Settings (`electron/ipc/export-schema.ts` + mirror in `types/api.d.ts` + rendere
 
 Rendering pipeline (`components/editor/export/`):
 
-- `build-stage.ts`: builds a vanilla `Konva.Stage` from a `ProjectStateV1` snapshot. One `Konva.Layer` for the background (color or wallpaper bitmap + grain overlay) and one for the video content. Each video is a `Konva.Image` whose `sceneFunc` calls the shared `drawCanvasVideoFrame` from `components/editor/canvas/video-scene-draw.ts` — so the export frame is pixel-identical to the editor preview. A scale factor (output width / artboard width) is applied at the Stage level so all node coordinates remain in artboard space. Nodes start `visible(false)`; the loop activates them per frame.
+- `build-stage.ts`: builds a vanilla `Konva.Stage` from a `ProjectStateV1` snapshot. One `Konva.Layer` for the background (color or wallpaper bitmap + grain overlay) and one for the video content. Each video is a `Konva.Image` whose `sceneFunc` calls the shared `drawCanvasVideoFrame` from `components/editor/canvas/video-scene-draw.ts` — so the export frame is pixel-identical to the editor preview. A scale factor (output width / artboard width) is applied at the Stage level so all node coordinates remain in artboard space. Nodes start `visible(false)`; the loop activates them per frame. `buildCursorOverlay` then loads the recorded-cursor track (via `getCursorData` + the shared `buildCursorTrack`), pre-decodes every cursor SVG the track references, and adds one extra `Konva.Image` **on top of the video nodes** in the content layer — the cursor is part of the output video, so it composes through the same shared `placeCursor` math as the editor (`cursor-scene.ts`). Returns `handles.cursor` (or null when there's no screen recording / cursor sidecar).
 - `source-frames.ts`: source-side WebCodecs decode pipeline. `planExportFrames` walks the timeline once and produces (a) a per-output-frame list of active clips and (b) the monotonic sequence of source timestamps each unique source video will be asked about. `SourceFrameProvider.create({...})` opens a Mediabunny `Input` over `UrlSource` (HTTP Range streaming — does **not** blob the whole file into memory) and wraps a `CanvasSink.canvasesAtTimestamps(...)` async generator. Mediabunny decodes each source packet **at most once** when timestamps are monotonic and pre-fetches `poolSize`–1 canvases ahead of the consumer. The create path is wrapped in try/catch so a failure between `new Input` and the iterator handoff disposes the Input rather than leaking it.
 - `decode-audio.ts` (`streamTimelineAudio`): **window-based streaming mixer**. The previous implementation `fetch(file://…) → arrayBuffer() → OfflineAudioContext.decodeAudioData()` per source loaded the entire source video file into RAM and then allocated a single timeline-sized output `AudioBuffer` — for a 2 GB recording and a 1 h timeline that's ~2 GB transient + ~1.4 GB decoded, easily crashing the export window. The current pipeline:
   1. Opens one Mediabunny `Input` per unique source URL (HTTP Range streaming).
@@ -853,10 +900,13 @@ Rendering pipeline (`components/editor/export/`):
 - `run-export.ts`: orchestrates the loop. Emits an `onStage(stage)` callback at every phase boundary (`preparing`, `decoding-audio`, `encoding`, `muxing-audio`, `finalizing`) so the export window can swap its headline + status text in step with the pipeline. **Probe-before-add**: because Mediabunny doesn't let you remove a track after `output.start()`, the runner first calls `probeHasAnyAudio` to open each source briefly and check `getPrimaryAudioTrack()`. If any source has audio, an `AudioBufferSource` is added; otherwise the file is video-only. The source-decoder spin-up still runs active sources in parallel, but any missing metadata or decoder failure aborts the job; successful-but-blank exports are worse than a visible error because they look complete until playback. For each output frame:
   1. `node.visible(false)` on every video node (so a clip that ended last frame doesn't ghost a stale image).
   2. In parallel, `await provider.next()` for each active source → assign the returned canvas to its Konva node via `node.image(canvas)` + `node.visible(true)`.
+  2b. If `handles.cursor` is present, place the cursor for this frame: take the screen clip's `sourceTimeSec` from the frame plan (so the cursor follows trims/splits and only shows while the screen clip is active), call the shared `placeCursor`, swap `node.image(...)` to the matching pre-decoded SVG, and set position/size/offset/rotation/visibility — or hide it when off-crop or the screen clip isn't active.
   3. `handles.contentLayer.draw()` — only the content layer; background stays untouched.
   4. Blit every layer canvas onto the stable composite `<canvas>` (via the layer's underlying `_canvas`).
   5. `await videoSource.add(t, 1/fps)` — Mediabunny's backpressure; never fire-and-forget.
   6. Periodic `onProgress` callback (~10 Hz) with `{ framesDone, framesTotal, etaSeconds }`, reported through IPC. The page renders a realtime `Frame N of M · WxH · ETA` line plus a cycling micro-phrase (`Composing`, `Painting frames`, `Wiring shadows`, …) so the user sees the export actively breathing during the long encoding phase.
+
+  The progress bar is a **single monotonic determinate bar** spanning the whole pipeline (`computeOverallPct` in `app/export/page.tsx`): `preparing` → 0, `decoding-audio` → 4%, `encoding` → 4%–96% scaled by `framesDone/framesTotal`, `muxing-audio` → 98%, `finalizing` → 99%. It starts fresh at 0, advances once through the real render, and never resets. (It previously used an indeterminate sliding segment for the non-encoding phases; the segment reached the track's right edge — reading as "100%" during prep — and then the determinate encoding bar appeared at 0, reading as a reset. The weighted single bar removes both illusions.)
 - After the frame loop, if an audio track was added, `streamTimelineAudio` is run end-to-end and the windows are pushed through `AudioBufferSource.add` one at a time. If audio mixing throws or produces no samples (edge case: every source's audio decode failed), a single tiny silent buffer is pushed so the track isn't empty (Mediabunny requires at least one packet per declared track before finalize).
 
 Why this is fast — what we removed:
