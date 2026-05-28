@@ -14,6 +14,7 @@ const ARTBOARD: EditorArtboard = {
   background: null,
   grain: 0,
   padding: 0,
+  cursorSizeMultiplier: 1,
 }
 
 function canvasVideo(partial: Partial<CanvasVideoItem> & { id: string }): CanvasVideoItem {

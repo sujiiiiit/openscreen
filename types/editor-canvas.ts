@@ -14,6 +14,10 @@ export type EditorArtboard = CanvasSize & {
   background: ArtboardBackground | null
   grain: number
   padding: number
+  // Recorded-cursor render-size multiplier (1 = recorded-accurate minimum).
+  // See cursor-scene.ts CURSOR_SIZE_MIN/MAX. Project-level: one screen
+  // recording per project, so the cursor size is global to the artboard.
+  cursorSizeMultiplier: number
 }
 
 export const ARTBOARD_SELECTION_ID = "__artboard__"

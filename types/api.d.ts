@@ -204,6 +204,10 @@ export interface ProjectArtboard {
   background: ProjectArtboardBackground | null
   padding: number
   grain: number
+  // Recorded-cursor render-size multiplier (1 = recorded-accurate minimum).
+  // Optional on disk: older project.json files predate it and the validator
+  // supplies the default, so they keep loading. See electron/ipc/project-schema.ts.
+  cursorSizeMultiplier?: number
 }
 
 export type ProjectVideoRole = 'screen' | 'camera' | 'media'

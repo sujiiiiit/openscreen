@@ -338,12 +338,15 @@ export async function runExport(
         // only shows while the screen clip is active). Same placement math as
         // the live editor's CanvasCursorOverlay.
         if (handles.cursor) {
-          const { node, track, video, screenVideoId, images } = handles.cursor
+          const { node, track, video, screenVideoId, sizeMultiplier, images } =
+            handles.cursor
           const screenEntry = active.find(
             (entry) => entry.videoId === screenVideoId,
           )
           const placement = screenEntry
-            ? placeCursor(track, video, screenEntry.sourceTimeSec)
+            ? placeCursor(track, video, screenEntry.sourceTimeSec, {
+                sizeMultiplier,
+              })
             : null
           const image = placement ? images.get(placement.url) : undefined
           if (placement && placement.onScreen && image) {

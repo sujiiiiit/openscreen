@@ -9,7 +9,9 @@ import {
 } from "@/components/editor/canvas/video-scene-draw"
 import {
   buildCursorTrack,
+  clampCursorSize,
   CURSOR_SET,
+  CURSOR_SIZE_DEFAULT,
   projectFolderFromObjectUrl,
   type CursorVideoGeometry,
 } from "@/components/editor/canvas/cursor-scene"
@@ -53,6 +55,9 @@ export interface ExportCursorHandle {
   video: CursorVideoGeometry
   /** Which video id the cursor follows — used to find the active screen clip. */
   screenVideoId: string
+  /** User-chosen render-size multiplier (artboard-level); 1 = recorded-accurate
+   * minimum. Threaded into `placeCursor` so the export matches the preview. */
+  sizeMultiplier: number
   /** Decoded cursor SVGs keyed by asset URL (the shape changes across frames). */
   images: Map<string, HTMLImageElement>
 }
@@ -296,7 +301,18 @@ async function buildCursorOverlay(opts: {
     intrinsicHeight: screenVideo.intrinsicHeight,
   }
 
-  return { node, track, video, screenVideoId: screenVideo.id, images }
+  const sizeMultiplier = clampCursorSize(
+    state.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT,
+  )
+
+  return {
+    node,
+    track,
+    video,
+    screenVideoId: screenVideo.id,
+    sizeMultiplier,
+    images,
+  }
 }
 
 async function loadHtmlImage(url: string): Promise<HTMLImageElement> {

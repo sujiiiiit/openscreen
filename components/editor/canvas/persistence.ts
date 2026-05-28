@@ -46,6 +46,7 @@ export function serializeArtboard(artboard: EditorArtboard): ProjectArtboard {
       : null,
     padding: artboard.padding,
     grain: artboard.grain,
+    cursorSizeMultiplier: artboard.cursorSizeMultiplier,
   }
 }
 

@@ -13,6 +13,7 @@ import {
   projectFolderFromObjectUrl,
 } from "./cursor-scene"
 import {
+  useEditorCanvasArtboard,
   useEditorCanvasMedia,
   useEditorCanvasTimeline,
   useEditorCanvasTimelineActions,
@@ -39,8 +40,12 @@ function loadCursorImage(url: string): HTMLImageElement {
  */
 export function CanvasCursorOverlay() {
   const { videos } = useEditorCanvasMedia()
+  const { artboard } = useEditorCanvasArtboard()
   const { timelineClips, timelineTime } = useEditorCanvasTimeline()
-  const { subscribeTimelineTicks } = useEditorCanvasTimelineActions()
+  const { subscribeTimelineTicks, subscribeHoverTime } =
+    useEditorCanvasTimelineActions()
+
+  const cursorSizeMultiplier = artboard.cursorSizeMultiplier
 
   const screenVideo = videos.find((video) => video.role === "screen") ?? null
   const screenClip = screenVideo
@@ -55,11 +60,18 @@ export function CanvasCursorOverlay() {
   const trackRef = useRef<SmoothedCursorTrack | null>(null)
   const videoRef = useRef<CanvasVideoItem | null>(screenVideo)
   const clipRef = useRef(screenClip)
+  const sizeRef = useRef(cursorSizeMultiplier)
   const currentUrlRef = useRef<string | null>(null)
+  // Last committed playhead time the cursor was placed at. Lets the ruler
+  // hover-scrub preview restore the exact committed position when the hover
+  // ends, independent of the debounced `timelineTime` React state.
+  const lastCommittedTimeRef = useRef(timelineTime)
 
-  // Keep the geometry/clip the tick closure reads current without re-subscribing.
+  // Keep the geometry/clip/size the tick closure reads current without
+  // re-subscribing.
   videoRef.current = screenVideo
   clipRef.current = screenClip
+  sizeRef.current = cursorSizeMultiplier
 
   // Map a display-relative point (logical points, top-left origin) to artboard
   // coordinates, through the screen video's cover-crop and transform. Returns
@@ -90,7 +102,9 @@ export function CanvasCursorOverlay() {
     const sourceSeconds = clip
       ? timelineSeconds - clip.start + clip.sourceIn
       : timelineSeconds
-    const placement = placeCursor(track, video, sourceSeconds)
+    const placement = placeCursor(track, video, sourceSeconds, {
+      sizeMultiplier: sizeRef.current,
+    })
     if (!placement) {
       if (node.visible()) {
         node.visible(false)
@@ -138,15 +152,36 @@ export function CanvasCursorOverlay() {
 
   // Imperative per-tick placement (no React state on the hot path).
   useEffect(() => {
-    return subscribeTimelineTicks((time) => place(time))
+    return subscribeTimelineTicks((time) => {
+      lastCommittedTimeRef.current = time
+      place(time)
+    })
   }, [subscribeTimelineTicks, place])
 
-  // Re-place when paused and the geometry or committed playhead changes.
+  // Ruler hover-scrub preview: while the timeline previews a hovered frame
+  // (without committing the playhead), sample the cursor at the hovered time so
+  // it tracks the previewed frame exactly like the video does. On hover-end
+  // (`null`) restore the committed position. Mirrors the video frame's hover
+  // preview, which is driven from the same channel.
   useEffect(() => {
+    return subscribeHoverTime((time) => {
+      place(
+        time === null || !Number.isFinite(time)
+          ? lastCommittedTimeRef.current
+          : time
+      )
+    })
+  }, [subscribeHoverTime, place])
+
+  // Re-place when paused and the geometry, committed playhead, or cursor size
+  // changes (so dragging the size slider updates the preview immediately).
+  useEffect(() => {
+    lastCommittedTimeRef.current = timelineTime
     place(timelineTime)
   }, [
     place,
     timelineTime,
+    cursorSizeMultiplier,
     screenVideo?.x,
     screenVideo?.y,
     screenVideo?.width,

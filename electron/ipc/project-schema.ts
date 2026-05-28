@@ -30,6 +30,10 @@ export interface ProjectArtboard {
   background: ProjectArtboardBackground | null
   padding: number
   grain: number
+  // Recorded-cursor render-size multiplier (1 = recorded-accurate minimum).
+  // Optional: absent in pre-feature project.json files, defaulted by
+  // `parseArtboard` so old projects keep loading without a version bump.
+  cursorSizeMultiplier?: number
 }
 
 export type ProjectVideoRole = 'screen' | 'camera' | 'media'
@@ -195,6 +199,19 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
   const background = parseBackground(value['background'])
   if (background === undefined) return null
 
+  // Cursor size is optional + defaulted (not part of the reject set above) so
+  // pre-feature project.json files keep loading. Clamp to the supported range;
+  // bounds mirror cursor-scene.ts CURSOR_SIZE_MIN/MAX (kept in sync by hand —
+  // the renderer module can't be imported into the main process).
+  const cursorSizeMultiplier = (() => {
+    const raw = value['cursorSizeMultiplier']
+    // Default (absent/invalid) mirrors cursor-scene.ts CURSOR_SIZE_DEFAULT (2.7)
+    // so legacy projects open at the same size as new ones. Clamp to [1, 4]
+    // mirrors CURSOR_SIZE_MIN/MAX (hand-synced — renderer module can't import).
+    if (!isFiniteNumber(raw)) return 2.7
+    return Math.min(4, Math.max(1, raw))
+  })()
+
   return {
     presetId: presetId as ProjectArtboardPresetId,
     width: value['width'] as number,
@@ -202,6 +219,7 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     background,
     padding: value['padding'] as number,
     grain: value['grain'] as number,
+    cursorSizeMultiplier,
   }
 }
 

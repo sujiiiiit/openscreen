@@ -24,6 +24,29 @@ import { getVideoCoverCrop } from "./video-cover-crop"
 export const CURSOR_SET: CursorSetId = "macos"
 export const CURSOR_BOX_HEIGHT_POINTS = 52
 export const CURSOR_SCALE = 1
+
+// User-adjustable cursor size, expressed as a multiplier over the base render
+// height (`CURSOR_BOX_HEIGHT_POINTS * CURSOR_SCALE`). The base size is the
+// MINIMUM: `1` reproduces the recorded-accurate cursor exactly, larger values
+// magnify it for emphasis. Bounds are shared by the sidebar control, the
+// provider clamp, the persistence validator, and the export pipeline so the
+// editor preview and the encoded video always agree. Size scales the render
+// box only — the hotspot offset scales with it (see `placeCursor`), so the
+// pointer stays pinned to the exact recorded position and the timing is
+// untouched. Accuracy is preserved at every size.
+export const CURSOR_SIZE_MIN = 1
+export const CURSOR_SIZE_MAX = 4
+// New projects (and legacy project.json files that predate the setting) open at
+// 270% — a comfortable emphasis size. `CURSOR_SIZE_MIN` is still the recorded-
+// accurate 1:1 floor the slider can be dragged down to.
+export const CURSOR_SIZE_DEFAULT = 2.7
+
+/** Clamp any externally-supplied size multiplier into the supported range,
+ * falling back to the default for non-finite input. */
+export function clampCursorSize(multiplier: number): number {
+  if (!Number.isFinite(multiplier)) return CURSOR_SIZE_DEFAULT
+  return Math.min(CURSOR_SIZE_MAX, Math.max(CURSOR_SIZE_MIN, multiplier))
+}
 // Spring easing of the cursor path. OFF = the cursor lands exactly on every
 // captured sample (no transition/lag) so you can judge raw capture accuracy;
 // flip to true to re-enable Screen Studio-style smoothing.
@@ -87,8 +110,10 @@ export function placeCursor(
   track: SmoothedCursorTrack,
   video: CursorVideoGeometry,
   sourceSeconds: number,
-  cursorSet: CursorSetId = CURSOR_SET,
+  options: { sizeMultiplier?: number; cursorSet?: CursorSetId } = {},
 ): CursorPlacement | null {
+  const { sizeMultiplier = CURSOR_SIZE_DEFAULT, cursorSet = CURSOR_SET } =
+    options
   const sample = sampleCursorAtTime(track, sourceSeconds * 1000)
   if (!sample) return null
 
@@ -121,7 +146,11 @@ export function placeCursor(
   // Uniform px-per-display-point scale (cover crop preserves aspect, so the
   // x and y scales coincide).
   const scale = (iw / dw) * (video.width / crop.cropWidth)
-  const renderHeight = CURSOR_BOX_HEIGHT_POINTS * CURSOR_SCALE * scale
+  const renderHeight =
+    CURSOR_BOX_HEIGHT_POINTS *
+    CURSOR_SCALE *
+    clampCursorSize(sizeMultiplier) *
+    scale
   const aspect = asset.size[1] > 0 ? asset.size[0] / asset.size[1] : 1
   const renderWidth = renderHeight * aspect
 

@@ -15,6 +15,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 import { CursorIcon, SubtitleIcon } from "@/components/ui/icons"
 import { BackgroundPanel } from "@/components/editor/background-panel"
+import { CursorPanel } from "@/components/editor/cursor-panel"
 import { VideoPanel } from "@/components/editor/video-panel"
 import { useSidebarTabsContext } from "@/components/editor/sidebar/tabs-provider"
 import {
@@ -54,12 +55,7 @@ const TAB_ITEMS: TabItem[] = [
     id: "cursor",
     label: "Cursor",
     icon: <CursorIcon className="size-4" />,
-    content: (
-      <TabSection
-        title="Cursor Effects"
-        description="Highlight clicks, add ripples, or magnify your pointer for emphasis."
-      />
-    ),
+    content: <CursorPanel />,
   },
   {
     id: "video",
