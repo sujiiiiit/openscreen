@@ -1,10 +1,9 @@
 /**
  * Draws a high-contrast procedural test pattern into a fresh canvas. Crisp
  * edges in every orientation (checkerboard, diagonals, rings, text, colour
- * bars) make a *directional* blur immediately obvious and reveal any parity
- * gap between the Pixi reference and our Konva ports far better than a photo.
- * The pattern is fully opaque, which keeps premultiplied-alpha handling a
- * no-op across all three pipelines.
+ * bars) make a *directional* blur immediately obvious — far better than a photo.
+ * The pattern is fully opaque, so the only transparency in play is the margin
+ * the blur feathers into.
  */
 export function drawMotionBlurTestPattern(width: number, height: number): HTMLCanvasElement {
   const canvas = document.createElement("canvas")

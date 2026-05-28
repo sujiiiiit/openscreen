@@ -3,9 +3,9 @@ import { effectiveKernelSize, type MotionBlurOptions } from "./types"
 /**
  * Pure-CPU port of PixiJS's `MotionBlurFilter`, operating on `ImageData`.
  *
- * It is a faithful re-implementation of the same shader math
- * (`motion-blur-shader.ts`): for every output pixel it samples `kernelSize`
- * taps along the velocity vector and averages them, with bilinear sampling.
+ * It is a faithful re-implementation of Pixi's shader math: for every output
+ * pixel it samples `kernelSize` taps along the velocity vector and averages
+ * them, with bilinear sampling.
  *
  * Like Pixi, the averaging happens in **premultiplied alpha**
  * (`FilterSystem` tags the filter output `premultiplied-alpha`). That matters at
@@ -17,8 +17,8 @@ import { effectiveKernelSize, type MotionBlurOptions } from "./types"
  *
  * This is the idiomatic-Konva integration path: `konvaMotionBlurFilter` wraps it
  * as a `Konva.Filters`-compatible function usable via `node.cache({ offset });
- * node.filters([fn])`. It is CPU-bound — fine for stills, slow for large/video
- * frames (the documented trade-off vs. the WebGL port).
+ * node.filters([fn])`. It is CPU-bound — fine for stills and small sprites, slow
+ * for large/video frames (cost is O(width * height * kernelSize)).
  */
 
 /** Bilinear sample of a premultiplied buffer at UV `(u, v)`, clamp-to-edge, into `out`. */

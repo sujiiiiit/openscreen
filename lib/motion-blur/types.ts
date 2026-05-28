@@ -1,4 +1,4 @@
-/** Parameters for the motion-blur filter, shared by the Pixi, WebGL, and CPU paths. */
+/** Parameters for the motion-blur filter. */
 export interface MotionBlurOptions {
   /** Horizontal motion, in pixels. */
   velocityX: number
@@ -31,7 +31,7 @@ export function effectiveKernelSize(options: MotionBlurOptions): number {
  * beyond the sprite instead of being clipped to its rectangle. This is exactly
  * Pixi's `MotionBlurFilter` padding (`max(|vx|,|vy|) >> 0) + 1`), which the Pixi
  * filter system uses to expand the render target. Konva gets the same margin via
- * `node.cache({ offset })`; the WebGL path expands its source canvas by this much.
+ * `node.cache({ offset })`.
  */
 export function motionBlurPadding(options: MotionBlurOptions): number {
   if (options.velocityX === 0 && options.velocityY === 0) return 0
