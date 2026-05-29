@@ -17,6 +17,7 @@ import {
   CURSOR_CLICK_PRESS_SCALE_MIN,
   CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   CURSOR_MOTION_BLUR_DEFAULT,
+  CURSOR_MOTION_ROTATION_DEFAULT,
   CURSOR_POINTER_CURSOR_ID,
   CURSOR_SET_DEFAULT,
   CURSOR_SMOOTHING_MODE_DEFAULT,
@@ -60,6 +61,11 @@ const CLICK_DOWNSCALE_DEFAULT_PCT = Math.round(
 // Motion blur is a single 0–100% intensity; the blur velocity is derived from
 // cursor speed (see cursor-scene.ts `computeCursorBlur`).
 const BLUR_DEFAULT_PCT = Math.round(CURSOR_MOTION_BLUR_DEFAULT * 100)
+// Motion rotation is a subtle 0–100% lean; the default 35% maps to up to 3.5deg
+// of the shared 10deg maximum.
+const MOTION_ROTATION_DEFAULT_PCT = Math.round(
+  CURSOR_MOTION_ROTATION_DEFAULT * 100
+)
 const BACKENDS: Array<{ value: CursorMotionBlurBackend; label: string }> = [
   { value: "gpu", label: "GPU" },
   { value: "cpu", label: "CPU" },
@@ -370,6 +376,7 @@ export function CursorPanel() {
     setCursorSmoothingMode,
     setCursorClickPressScale,
     setCursorAlwaysUsePointer,
+    setCursorMotionRotation,
     setCursorMotionBlur,
     setCursorMotionBlurBackend,
   } = useEditorCanvasActions()
@@ -398,6 +405,14 @@ export function CursorPanel() {
   const isBlurDefault = blurPct === BLUR_DEFAULT_PCT
   const applyBlurPct = (pct: number) => {
     setCursorMotionBlur(pct / 100)
+  }
+  const motionRotationPct = Math.round(
+    Math.min(1, Math.max(0, artboard.cursorMotionRotation)) * 100
+  )
+  const isMotionRotationDefault =
+    motionRotationPct === MOTION_ROTATION_DEFAULT_PCT
+  const applyMotionRotationPct = (pct: number) => {
+    setCursorMotionRotation(pct / 100)
   }
   const smoothingMode = artboard.cursorSmoothingMode
   const isSmoothingDefault = smoothingMode === CURSOR_SMOOTHING_MODE_DEFAULT
@@ -574,6 +589,43 @@ export function CursorPanel() {
               setCursorSmoothingMode(CURSOR_SMOOTHING_MODE_DEFAULT)
             }
             disabled={cursorControlsDisabled || isSmoothingDefault}
+          >
+            Reset
+          </Button>
+        </div>
+      </div>
+
+      <div className="w-full space-y-2">
+        <div className="flex items-center">
+          <h4
+            className={cn(
+              "text-xs font-semibold transition-opacity select-none",
+              cursorControlsDisabled && "opacity-50"
+            )}
+          >
+            Motion rotation
+          </h4>
+        </div>
+        <div className="flex w-full items-center gap-3">
+          <Slider
+            size="sm"
+            value={[motionRotationPct]}
+            onValueChange={(values) =>
+              applyMotionRotationPct(Array.isArray(values) ? values[0] : values)
+            }
+            min={0}
+            max={100}
+            disabled={cursorControlsDisabled}
+            showValueTooltip
+            formatValue={(v) => `${Math.round(v)}%`}
+            className="flex-1"
+          />
+          <Button
+            type="button"
+            variant="link"
+            size="sm"
+            onClick={() => applyMotionRotationPct(MOTION_ROTATION_DEFAULT_PCT)}
+            disabled={cursorControlsDisabled || isMotionRotationDefault}
           >
             Reset
           </Button>

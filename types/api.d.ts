@@ -222,6 +222,9 @@ export interface ProjectArtboard {
   // Cursor motion-blur intensity, 0..1 (0 = off). Optional on disk for the same
   // back-compat reason; validator defaults + clamps. See project-schema.ts.
   cursorMotionBlur?: number
+  // Cursor motion-rotation amount, 0..1 (0 = off). Optional on disk; validator
+  // defaults to 0.35 and clamps. See electron/ipc/project-schema.ts.
+  cursorMotionRotation?: number
   // Cursor motion-blur renderer backend. Optional on disk; validator defaults
   // to 'gpu'. See electron/ipc/project-schema.ts.
   cursorMotionBlurBackend?: "gpu" | "cpu"

@@ -104,6 +104,16 @@ function cursorOpticalScale(asset: CursorAssetEntry): number {
   )
 }
 
+// --- Cursor motion rotation ----------------------------------------------
+// Subtle cursor lean derived from recent horizontal velocity. The amount is a
+// single persisted 0..1 slider, while the velocity estimate is deterministic:
+// no per-frame state, no easing timers, and the same result while scrubbing or
+// exporting.
+export const CURSOR_MOTION_ROTATION_DEFAULT = 0.35
+export const CURSOR_MOTION_ROTATION_MAX_DEG = 10
+export const CURSOR_MOTION_ROTATION_WINDOW_SEC = 0.08
+export const CURSOR_MOTION_ROTATION_SATURATION_PX_PER_SEC = 900
+
 // --- Cursor motion blur ---------------------------------------------------
 // Screen-Studio-style directional blur on the moving cursor. A single user
 // "intensity" (0..1) is the only exposed knob; the blur *velocity* is derived
@@ -149,6 +159,12 @@ const CURSOR_CLICK_RELEASE_OVERSHOOT = 0.09
 /** Clamp the user motion-blur intensity into [0, 1], defaulting on bad input. */
 export function clampCursorMotionBlur(value: number): number {
   if (!Number.isFinite(value)) return CURSOR_MOTION_BLUR_DEFAULT
+  return Math.min(1, Math.max(0, value))
+}
+
+/** Clamp cursor motion-rotation amount into [0, 1], defaulting on bad input. */
+export function clampCursorMotionRotation(value: number): number {
+  if (!Number.isFinite(value)) return CURSOR_MOTION_ROTATION_DEFAULT
   return Math.min(1, Math.max(0, value))
 }
 
@@ -261,6 +277,14 @@ export interface CursorReferenceSize {
   height: number
 }
 
+type CursorSample = NonNullable<ReturnType<typeof sampleCursorAtTime>>
+
+interface MappedCursorPoint {
+  x: number
+  y: number
+  onScreen: boolean
+}
+
 export interface CursorPlacement {
   /** SVG asset URL for the current cursor shape. */
   url: string
@@ -275,49 +299,19 @@ export interface CursorPlacement {
   y: number
   /** Rotation in degrees — pivots around the hotspot, matching the video. */
   rotation: number
+  /** Velocity-derived tilt added to the video's base rotation, in degrees. */
+  motionRotationDeg: number
   /** False when the hotspot is cropped off the visible video (hide the node). */
   onScreen: boolean
   /** Cursor sprite scale from click press/release animation. */
   clickScale: number
 }
 
-/**
- * Map a recorded cursor sample at `sourceSeconds` (the screen recording's
- * source time) into artboard space, through the screen video's cover-crop and
- * transform. Pure: identical result whether called from the live editor's
- * per-tick placement or the exporter's per-frame loop, so the encoded cursor
- * matches the on-screen preview pixel-for-pixel.
- *
- * Returns null only when the track yields no sample or the cursor id resolves
- * to no asset; otherwise returns a placement whose `onScreen` flag carries the
- * crop test (the caller hides the node when false).
- */
-export function placeCursor(
+function mapCursorSampleToArtboard(
+  sample: CursorSample,
   track: SmoothedCursorTrack,
-  video: CursorVideoGeometry,
-  sourceSeconds: number,
-  options: {
-    sizeMultiplier?: number
-    clickPressScale?: number
-    cursorSet?: CursorSetId
-    referenceSize?: CursorReferenceSize
-    alwaysUsePointer?: boolean
-  } = {}
-): CursorPlacement | null {
-  const {
-    sizeMultiplier = CURSOR_SIZE_DEFAULT,
-    clickPressScale,
-    cursorSet = CURSOR_SET_DEFAULT,
-    referenceSize,
-    alwaysUsePointer = false,
-  } = options
-  const sample = sampleCursorAtTime(track, sourceSeconds * 1000)
-  if (!sample) return null
-
-  const cursorId = alwaysUsePointer ? CURSOR_POINTER_CURSOR_ID : sample.cursorId
-  const asset = resolveCursorAsset(cursorId, cursorSet, CURSOR_SET_DEFAULT)
-  if (!asset) return null
-
+  video: CursorVideoGeometry
+): MappedCursorPoint {
   const iw = video.intrinsicWidth || 1
   const ih = video.intrinsicHeight || 1
   const dw = track.displayWidth || iw
@@ -341,8 +335,97 @@ export function placeCursor(
   const rad = (video.rotation * Math.PI) / 180
   const cos = Math.cos(rad)
   const sin = Math.sin(rad)
-  const artboardX = video.x + localX * cos - localY * sin
-  const artboardY = video.y + localX * sin + localY * cos
+  return {
+    x: video.x + localX * cos - localY * sin,
+    y: video.y + localX * sin + localY * cos,
+    onScreen,
+  }
+}
+
+function cursorMotionRotationAt(
+  track: SmoothedCursorTrack,
+  video: CursorVideoGeometry,
+  sourceSeconds: number,
+  current: MappedCursorPoint,
+  amount: number
+): number {
+  const intensity = clampCursorMotionRotation(amount)
+  if (intensity <= 0) return 0
+
+  const previousSample = sampleCursorAtTime(
+    track,
+    (sourceSeconds - CURSOR_MOTION_ROTATION_WINDOW_SEC) * 1000
+  )
+  if (!previousSample) return 0
+
+  const previous = mapCursorSampleToArtboard(previousSample, track, video)
+  const dxArt = current.x - previous.x
+  const dyArt = current.y - previous.y
+
+  // Convert artboard displacement back into the screen video's local frame so
+  // screen-horizontal movement controls the lean even when the video is rotated.
+  const rad = (-video.rotation * Math.PI) / 180
+  const cos = Math.cos(rad)
+  const sin = Math.sin(rad)
+  const dxLocal = dxArt * cos - dyArt * sin
+  const velocityX = dxLocal / CURSOR_MOTION_ROTATION_WINDOW_SEC
+  const normalizedVelocity = Math.min(
+    1,
+    Math.max(-1, velocityX / CURSOR_MOTION_ROTATION_SATURATION_PX_PER_SEC)
+  )
+  return normalizedVelocity * CURSOR_MOTION_ROTATION_MAX_DEG * intensity
+}
+
+/**
+ * Map a recorded cursor sample at `sourceSeconds` (the screen recording's
+ * source time) into artboard space, through the screen video's cover-crop and
+ * transform. Pure: identical result whether called from the live editor's
+ * per-tick placement or the exporter's per-frame loop, so the encoded cursor
+ * matches the on-screen preview pixel-for-pixel.
+ *
+ * Returns null only when the track yields no sample or the cursor id resolves
+ * to no asset; otherwise returns a placement whose `onScreen` flag carries the
+ * crop test (the caller hides the node when false).
+ */
+export function placeCursor(
+  track: SmoothedCursorTrack,
+  video: CursorVideoGeometry,
+  sourceSeconds: number,
+  options: {
+    sizeMultiplier?: number
+    clickPressScale?: number
+    cursorSet?: CursorSetId
+    referenceSize?: CursorReferenceSize
+    alwaysUsePointer?: boolean
+    motionRotation?: number
+  } = {}
+): CursorPlacement | null {
+  const {
+    sizeMultiplier = CURSOR_SIZE_DEFAULT,
+    clickPressScale,
+    cursorSet = CURSOR_SET_DEFAULT,
+    referenceSize,
+    alwaysUsePointer = false,
+    motionRotation = CURSOR_MOTION_ROTATION_DEFAULT,
+  } = options
+  const sample = sampleCursorAtTime(track, sourceSeconds * 1000)
+  if (!sample) return null
+
+  const cursorId = alwaysUsePointer ? CURSOR_POINTER_CURSOR_ID : sample.cursorId
+  const asset = resolveCursorAsset(cursorId, cursorSet, CURSOR_SET_DEFAULT)
+  if (!asset) return null
+
+  const iw = video.intrinsicWidth || 1
+  const ih = video.intrinsicHeight || 1
+  const dw = track.displayWidth || iw
+  const mapped = mapCursorSampleToArtboard(sample, track, video)
+  const motionRotationDeg = cursorMotionRotationAt(
+    track,
+    video,
+    sourceSeconds,
+    mapped,
+    motionRotation
+  )
 
   const targetSize = referenceSize ?? {
     width: video.width,
@@ -389,10 +472,11 @@ export function placeCursor(
     height: renderHeight,
     offsetX: asset.hotspot[0] * renderWidth,
     offsetY: asset.hotspot[1] * renderHeight,
-    x: artboardX,
-    y: artboardY,
-    rotation: video.rotation,
-    onScreen,
+    x: mapped.x,
+    y: mapped.y,
+    rotation: video.rotation + motionRotationDeg,
+    motionRotationDeg,
+    onScreen: mapped.onScreen,
     clickScale,
   }
 }
@@ -421,6 +505,7 @@ export function computeCursorBlur(
     cursorSet?: CursorSetId
     referenceSize?: CursorReferenceSize
     alwaysUsePointer?: boolean
+    motionRotation?: number
   }
 ): MotionBlurOptions | null {
   const intensity = clampCursorMotionBlur(options.intensity)
@@ -432,6 +517,7 @@ export function computeCursorBlur(
     cursorSet: options.cursorSet,
     referenceSize: options.referenceSize,
     alwaysUsePointer: options.alwaysUsePointer,
+    motionRotation: options.motionRotation,
   }
   const cur = placeCursor(track, video, sourceSeconds, placeOpts)
   const prev = placeCursor(
@@ -443,10 +529,11 @@ export function computeCursorBlur(
   if (!cur || !prev) return null
 
   // Displacement in artboard px, rotated into the cursor's local (unrotated)
-  // frame so the directional blur points the right way under video rotation.
+  // frame so the directional blur points the right way under video rotation
+  // and under the velocity-derived cursor lean.
   const dxArt = cur.x - prev.x
   const dyArt = cur.y - prev.y
-  const rad = (-video.rotation * Math.PI) / 180
+  const rad = (-cur.rotation * Math.PI) / 180
   const cos = Math.cos(rad)
   const sin = Math.sin(rad)
   const dxL = dxArt * cos - dyArt * sin

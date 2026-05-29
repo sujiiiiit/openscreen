@@ -355,6 +355,7 @@ export async function runExport(
             alwaysUsePointer,
             cursorSetId,
             motionBlur,
+            motionRotation,
             renderer,
             images,
           } = handles.cursor
@@ -367,6 +368,7 @@ export async function runExport(
                 clickPressScale,
                 cursorSet: cursorSetId,
                 alwaysUsePointer,
+                motionRotation,
                 referenceSize,
               })
             : null
@@ -385,6 +387,7 @@ export async function runExport(
                 clickPressScale,
                 cursorSet: cursorSetId,
                 alwaysUsePointer,
+                motionRotation,
                 referenceSize,
               }
             )

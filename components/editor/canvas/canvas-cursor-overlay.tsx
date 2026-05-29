@@ -58,6 +58,7 @@ export function CanvasCursorOverlay() {
   const cursorSmoothingMode = artboard.cursorSmoothingMode
   const cursorClickPressScale = artboard.cursorClickPressScale
   const cursorAlwaysUsePointer = artboard.cursorAlwaysUsePointer
+  const cursorMotionRotation = artboard.cursorMotionRotation
   const cursorMotionBlur = artboard.cursorMotionBlur
   const cursorMotionBlurBackend = artboard.cursorMotionBlurBackend
 
@@ -88,6 +89,7 @@ export function CanvasCursorOverlay() {
   const smoothingModeRef = useRef(cursorSmoothingMode)
   const clickPressScaleRef = useRef(cursorClickPressScale)
   const alwaysUsePointerRef = useRef(cursorAlwaysUsePointer)
+  const motionRotationRef = useRef(cursorMotionRotation)
   const motionBlurRef = useRef(cursorMotionBlur)
   const currentUrlRef = useRef<string | null>(null)
   // Last committed playhead time the cursor was placed at. Lets the ruler
@@ -112,6 +114,7 @@ export function CanvasCursorOverlay() {
     smoothingModeRef.current = cursorSmoothingMode
     clickPressScaleRef.current = cursorClickPressScale
     alwaysUsePointerRef.current = cursorAlwaysUsePointer
+    motionRotationRef.current = cursorMotionRotation
     motionBlurRef.current = cursorMotionBlur
   })
 
@@ -158,6 +161,7 @@ export function CanvasCursorOverlay() {
       clickPressScale: clickPressScaleRef.current,
       cursorSet: cursorSetRef.current,
       alwaysUsePointer: alwaysUsePointerRef.current,
+      motionRotation: motionRotationRef.current,
       referenceSize: referenceSizeRef.current,
     })
     if (!placement) {
@@ -188,6 +192,7 @@ export function CanvasCursorOverlay() {
           clickPressScale: clickPressScaleRef.current,
           cursorSet: cursorSetRef.current,
           alwaysUsePointer: alwaysUsePointerRef.current,
+          motionRotation: motionRotationRef.current,
           referenceSize: referenceSizeRef.current,
         })
       : null
@@ -330,6 +335,7 @@ export function CanvasCursorOverlay() {
     cursorSmoothingMode,
     cursorClickPressScale,
     cursorAlwaysUsePointer,
+    cursorMotionRotation,
     cursorMotionBlur,
     cursorMotionBlurBackend,
     artboard.width,

@@ -62,6 +62,7 @@ import {
   CURSOR_CLICK_PRESS_SCALE_DEFAULT,
   CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   CURSOR_MOTION_BLUR_DEFAULT,
+  CURSOR_MOTION_ROTATION_DEFAULT,
   CURSOR_SET_DEFAULT,
   CURSOR_SMOOTHING_MODE_DEFAULT,
   CURSOR_SIZE_DEFAULT,
@@ -70,6 +71,7 @@ import {
   clampCursorClickPressScale,
   clampCursorMotionBlur,
   clampCursorMotionBlurBackend,
+  clampCursorMotionRotation,
   clampCursorSetId,
   clampCursorSmoothingMode,
 } from "@/components/editor/canvas/cursor-scene"
@@ -87,6 +89,7 @@ const DEFAULT_ARTBOARD: EditorArtboard = {
   cursorSetId: CURSOR_SET_DEFAULT,
   cursorSizeMultiplier: CURSOR_SIZE_DEFAULT,
   cursorMotionBlur: CURSOR_MOTION_BLUR_DEFAULT,
+  cursorMotionRotation: CURSOR_MOTION_ROTATION_DEFAULT,
   cursorMotionBlurBackend: CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   cursorSmoothingMode: CURSOR_SMOOTHING_MODE_DEFAULT,
   cursorClickPressScale: CURSOR_CLICK_PRESS_SCALE_DEFAULT,
@@ -216,6 +219,7 @@ type EditorCanvasContextValue = {
   setCursorSmoothingMode: (mode: CursorSmoothingMode) => void
   setCursorClickPressScale: (scale: number) => void
   setCursorAlwaysUsePointer: (enabled: boolean) => void
+  setCursorMotionRotation: (amount: number) => void
   setCursorMotionBlur: (intensity: number) => void
   setCursorMotionBlurBackend: (backend: CursorMotionBlurBackend) => void
   setViewportSize: (size: CanvasSize) => void
@@ -309,6 +313,7 @@ type EditorCanvasActionsContextValue = Pick<
   | "setCursorSmoothingMode"
   | "setCursorClickPressScale"
   | "setCursorAlwaysUsePointer"
+  | "setCursorMotionRotation"
   | "setCursorMotionBlur"
   | "setCursorMotionBlurBackend"
   | "setViewportSize"
@@ -2295,6 +2300,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const prevCursorSetId = artboardRef.current.cursorSetId
       const prevCursorSize = artboardRef.current.cursorSizeMultiplier
       const prevCursorMotionBlur = artboardRef.current.cursorMotionBlur
+      const prevCursorMotionRotation = artboardRef.current.cursorMotionRotation
       const prevCursorMotionBlurBackend =
         artboardRef.current.cursorMotionBlurBackend
       const prevCursorSmoothingMode = artboardRef.current.cursorSmoothingMode
@@ -2316,6 +2322,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           cursorSetId: prevCursorSetId,
           cursorSizeMultiplier: prevCursorSize,
           cursorMotionBlur: prevCursorMotionBlur,
+          cursorMotionRotation: prevCursorMotionRotation,
           cursorMotionBlurBackend: prevCursorMotionBlurBackend,
           cursorSmoothingMode: prevCursorSmoothingMode,
           cursorClickPressScale: prevCursorClickPressScale,
@@ -2334,6 +2341,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           cursorSetId: prevCursorSetId,
           cursorSizeMultiplier: prevCursorSize,
           cursorMotionBlur: prevCursorMotionBlur,
+          cursorMotionRotation: prevCursorMotionRotation,
           cursorMotionBlurBackend: prevCursorMotionBlurBackend,
           cursorSmoothingMode: prevCursorSmoothingMode,
           cursorClickPressScale: prevCursorClickPressScale,
@@ -2846,6 +2854,22 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     setArtboard(nextArtboard)
   }, [])
 
+  // Cursor motion-rotation amount (0..1). Shared placement math derives the
+  // tilt from the trailing horizontal velocity, so preview/export stay in sync
+  // without adding per-frame React state.
+  const setCursorMotionRotation = useCallback((amount: number) => {
+    const current = artboardRef.current
+    const clamped = clampCursorMotionRotation(amount)
+    if (current.cursorMotionRotation === clamped) return
+    historyCommitTagRef.current = "cursor-motion-rotation"
+    const nextArtboard: EditorArtboard = {
+      ...current,
+      cursorMotionRotation: clamped,
+    }
+    artboardRef.current = nextArtboard
+    setArtboard(nextArtboard)
+  }, [])
+
   // Cursor motion-blur intensity (0..1). The blur velocity is derived from
   // cursor speed (see cursor-scene.ts `computeCursorBlur`); this is the single
   // user-facing amount. Applied identically by the editor overlay and export.
@@ -3248,6 +3272,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           savedState.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT,
         cursorMotionBlur:
           savedState.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT,
+        cursorMotionRotation: clampCursorMotionRotation(
+          savedState.artboard.cursorMotionRotation ??
+            CURSOR_MOTION_ROTATION_DEFAULT
+        ),
         cursorMotionBlurBackend: clampCursorMotionBlurBackend(
           savedState.artboard.cursorMotionBlurBackend
         ),
@@ -3473,6 +3501,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setCursorSmoothingMode,
       setCursorClickPressScale,
       setCursorAlwaysUsePointer,
+      setCursorMotionRotation,
       setCursorMotionBlur,
       setCursorMotionBlurBackend,
       setViewportSize,
@@ -3501,6 +3530,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setCursorSmoothingMode,
       setCursorClickPressScale,
       setCursorAlwaysUsePointer,
+      setCursorMotionRotation,
       setCursorMotionBlur,
       setCursorMotionBlurBackend,
       setViewportSize,
@@ -3656,6 +3686,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           savedState.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT,
         cursorMotionBlur:
           savedState.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT,
+        cursorMotionRotation: clampCursorMotionRotation(
+          savedState.artboard.cursorMotionRotation ??
+            CURSOR_MOTION_ROTATION_DEFAULT
+        ),
         cursorMotionBlurBackend: clampCursorMotionBlurBackend(
           savedState.artboard.cursorMotionBlurBackend
         ),
@@ -3790,6 +3824,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const previousCursorSetId = artboardRef.current.cursorSetId
       const previousCursorSize = artboardRef.current.cursorSizeMultiplier
       const previousCursorMotionBlur = artboardRef.current.cursorMotionBlur
+      const previousCursorMotionRotation =
+        artboardRef.current.cursorMotionRotation
       const previousCursorMotionBlurBackend =
         artboardRef.current.cursorMotionBlurBackend
       const previousCursorSmoothingMode =
@@ -3813,6 +3849,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               cursorSetId: previousCursorSetId,
               cursorSizeMultiplier: previousCursorSize,
               cursorMotionBlur: previousCursorMotionBlur,
+              cursorMotionRotation: previousCursorMotionRotation,
               cursorMotionBlurBackend: previousCursorMotionBlurBackend,
               cursorSmoothingMode: previousCursorSmoothingMode,
               cursorClickPressScale: previousCursorClickPressScale,
@@ -3833,6 +3870,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               cursorSetId: previousCursorSetId,
               cursorSizeMultiplier: previousCursorSize,
               cursorMotionBlur: previousCursorMotionBlur,
+              cursorMotionRotation: previousCursorMotionRotation,
               cursorMotionBlurBackend: previousCursorMotionBlurBackend,
               cursorSmoothingMode: previousCursorSmoothingMode,
               cursorClickPressScale: previousCursorClickPressScale,

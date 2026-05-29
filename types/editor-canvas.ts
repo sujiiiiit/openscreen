@@ -36,6 +36,9 @@ export type EditorArtboard = CanvasSize & {
   // from cursor speed; this is the single user-facing amount. See cursor-scene.ts
   // CURSOR_MOTION_BLUR_DEFAULT / computeCursorBlur.
   cursorMotionBlur: number
+  // Cursor motion-rotation amount, 0..1 (0 = off). Horizontal cursor velocity
+  // adds a subtle lean around the existing hotspot; shared by preview/export.
+  cursorMotionRotation: number
   // Renderer backend for cursor motion blur. GPU is the default for responsive
   // preview; CPU is kept as a project-level fallback/comparison mode.
   cursorMotionBlurBackend: CursorMotionBlurBackend

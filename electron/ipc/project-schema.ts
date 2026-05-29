@@ -73,6 +73,9 @@ export interface ProjectArtboard {
   // Cursor motion-blur intensity, 0..1 (0 = off). Optional + defaulted by
   // `parseArtboard`, same back-compat rationale as cursorSizeMultiplier.
   cursorMotionBlur?: number
+  // Cursor motion-rotation amount, 0..1 (0 = off). Optional + defaulted by
+  // `parseArtboard`, same back-compat rationale as cursorSizeMultiplier.
+  cursorMotionRotation?: number
   // Cursor motion-blur renderer backend. Optional + defaulted to 'gpu' for
   // old project.json files.
   cursorMotionBlurBackend?: "gpu" | "cpu"
@@ -275,6 +278,15 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     return Math.min(1, Math.max(0, raw))
   })()
 
+  // Cursor motion rotation is optional + defaulted. Default (absent/invalid)
+  // mirrors cursor-scene.ts CURSOR_MOTION_ROTATION_DEFAULT (0.35); clamp to
+  // [0, 1] (hand-synced — the renderer module can't be imported here).
+  const cursorMotionRotation = (() => {
+    const raw = value["cursorMotionRotation"]
+    if (!isFiniteNumber(raw)) return 0.35
+    return Math.min(1, Math.max(0, raw))
+  })()
+
   // Renderer backend is optional + defaulted. Unknown values fall back to GPU
   // so old and hand-edited projects keep loading.
   const cursorMotionBlurBackend =
@@ -311,6 +323,7 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     cursorSetId,
     cursorSizeMultiplier,
     cursorMotionBlur,
+    cursorMotionRotation,
     cursorMotionBlurBackend,
     cursorSmoothingMode,
     cursorClickPressScale,

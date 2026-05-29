@@ -9,6 +9,7 @@ import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
 import {
   buildCursorTrack,
   computeCursorBlur,
+  CURSOR_MOTION_ROTATION_MAX_DEG,
   placeCursor,
   type CursorVideoGeometry,
 } from "../cursor-scene"
@@ -54,6 +55,7 @@ describe("computeCursorBlur", () => {
   it("returns null when intensity is 0 (off)", () => {
     const blur = computeCursorBlur(movingRight, geometry(), 0.1, {
       intensity: 0,
+      motionRotation: 0,
     })
     expect(blur).toBeNull()
   })
@@ -61,13 +63,17 @@ describe("computeCursorBlur", () => {
   it("returns null when the cursor is still", () => {
     const still = track([100, 100, 100], [50, 50, 50])
     expect(
-      computeCursorBlur(still, geometry(), 0.1, { intensity: 1 })
+      computeCursorBlur(still, geometry(), 0.1, {
+        intensity: 1,
+        motionRotation: 0,
+      })
     ).toBeNull()
   })
 
   it("blurs along the direction of travel", () => {
     const blur = computeCursorBlur(movingRight, geometry(), 0.1, {
       intensity: 1,
+      motionRotation: 0,
     })
     expect(blur).not.toBeNull()
     expect(blur!.velocityX).toBeGreaterThan(0)
@@ -83,16 +89,21 @@ describe("computeCursorBlur", () => {
   it("scales smear length linearly with intensity", () => {
     const full = computeCursorBlur(movingRight, geometry(), 0.1, {
       intensity: 1,
+      motionRotation: 0,
     })!
     const half = computeCursorBlur(movingRight, geometry(), 0.1, {
       intensity: 0.5,
+      motionRotation: 0,
     })!
     expect(half.velocityX).toBeCloseTo(full.velocityX / 2, 4)
   })
 
   it("caps the smear length for very fast moves", () => {
     const fast = track([0, 2000, 4000], [50, 50, 50]) // 20000 px/s
-    const blur = computeCursorBlur(fast, geometry(), 0.1, { intensity: 1 })!
+    const blur = computeCursorBlur(fast, geometry(), 0.1, {
+      intensity: 1,
+      motionRotation: 0,
+    })!
     expect(Math.hypot(blur.velocityX, blur.velocityY)).toBeLessThanOrEqual(200)
   })
 
@@ -101,12 +112,104 @@ describe("computeCursorBlur", () => {
     // not the video is rotated (the filter runs pre-rotation).
     const flat = computeCursorBlur(movingRight, geometry(0), 0.1, {
       intensity: 1,
+      motionRotation: 0,
     })!
     const rot = computeCursorBlur(movingRight, geometry(90), 0.1, {
       intensity: 1,
+      motionRotation: 0,
     })!
     expect(rot.velocityX).toBeCloseTo(flat.velocityX, 4)
     expect(Math.abs(rot.velocityY)).toBeLessThan(1e-6)
+  })
+
+  it("uses the final cursor placement rotation for local blur direction", () => {
+    const flat = computeCursorBlur(movingRight, geometry(), 0.1, {
+      intensity: 1,
+      motionRotation: 0,
+    })!
+    const tilted = computeCursorBlur(movingRight, geometry(), 0.1, {
+      intensity: 1,
+      motionRotation: 1,
+    })!
+
+    expect(tilted.velocityX).toBeLessThan(flat.velocityX)
+    expect(tilted.velocityY).toBeLessThan(-1)
+  })
+})
+
+describe("placeCursor motion rotation", () => {
+  it("keeps a still cursor upright", () => {
+    const still = track([100, 100, 100], [50, 50, 50])
+    const placement = placeCursor(still, geometry(), 0.1, {
+      motionRotation: 1,
+    })!
+
+    expect(placement.motionRotationDeg).toBe(0)
+    expect(placement.rotation).toBe(0)
+  })
+
+  it("tilts clockwise for rightward motion", () => {
+    const placement = placeCursor(movingRight, geometry(), 0.1, {
+      motionRotation: 1,
+    })!
+
+    expect(placement.motionRotationDeg).toBeGreaterThan(0)
+    expect(placement.rotation).toBeCloseTo(CURSOR_MOTION_ROTATION_MAX_DEG, 4)
+  })
+
+  it("tilts counter-clockwise for leftward motion", () => {
+    const movingLeft = track([200, 100, 0], [50, 50, 50])
+    const placement = placeCursor(movingLeft, geometry(), 0.1, {
+      motionRotation: 1,
+    })!
+
+    expect(placement.motionRotationDeg).toBeLessThan(0)
+    expect(placement.rotation).toBeCloseTo(-CURSOR_MOTION_ROTATION_MAX_DEG, 4)
+  })
+
+  it("does not tilt for vertical-only motion", () => {
+    const movingDown = track([100, 100, 100], [0, 50, 100])
+    const placement = placeCursor(movingDown, geometry(), 0.1, {
+      motionRotation: 1,
+    })!
+
+    expect(placement.motionRotationDeg).toBeCloseTo(0, 6)
+  })
+
+  it("can be disabled with a zero amount", () => {
+    const placement = placeCursor(movingRight, geometry(), 0.1, {
+      motionRotation: 0,
+    })!
+
+    expect(placement.motionRotationDeg).toBe(0)
+    expect(placement.rotation).toBe(0)
+  })
+
+  it("keeps hotspot placement unchanged when only the tilt changes", () => {
+    const flat = placeCursor(movingRight, geometry(), 0.1, {
+      motionRotation: 0,
+    })!
+    const tilted = placeCursor(movingRight, geometry(), 0.1, {
+      motionRotation: 1,
+    })!
+
+    expect(tilted.rotation).not.toBe(flat.rotation)
+    expect(tilted.x).toBeCloseTo(flat.x, 6)
+    expect(tilted.y).toBeCloseTo(flat.y, 6)
+    expect(tilted.offsetX).toBeCloseTo(flat.offsetX, 6)
+    expect(tilted.offsetY).toBeCloseTo(flat.offsetY, 6)
+  })
+
+  it("clamps tilt by max angle and slider amount", () => {
+    const fast = track([0, 10_000, 20_000], [50, 50, 50])
+    const placement = placeCursor(fast, geometry(), 0.1, {
+      motionRotation: 0.5,
+    })!
+
+    expect(placement.motionRotationDeg).toBeCloseTo(
+      CURSOR_MOTION_ROTATION_MAX_DEG * 0.5,
+      4
+    )
   })
 })
 

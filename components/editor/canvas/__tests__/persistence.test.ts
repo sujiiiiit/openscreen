@@ -18,6 +18,7 @@ const ARTBOARD: EditorArtboard = {
   cursorSetId: "macos",
   cursorSizeMultiplier: 1,
   cursorMotionBlur: 0,
+  cursorMotionRotation: 0.35,
   cursorMotionBlurBackend: "gpu",
   cursorSmoothingMode: "default",
   cursorClickPressScale: 0.88,
@@ -163,6 +164,81 @@ describe("cursor motion blur backend persistence", () => {
 
     expect(parsed).not.toBeNull()
     expect(parsed!.artboard.cursorMotionBlurBackend).toBe("gpu")
+  })
+})
+
+describe("cursor motion rotation persistence", () => {
+  it("preserves the selected motion rotation through a round-trip", () => {
+    const parsed = roundTrip(
+      serializeProjectState(
+        { ...ARTBOARD, cursorMotionRotation: 0.72 },
+        [canvasVideo({ id: "a" })],
+        []
+      )
+    )
+
+    expect(parsed).not.toBeNull()
+    expect(parsed!.artboard.cursorMotionRotation).toBe(0.72)
+  })
+
+  it("defaults missing and invalid motion rotation to 0.35", () => {
+    const base = {
+      presetId: "wide",
+      width: 1920,
+      height: 1080,
+      background: null,
+      padding: 0,
+      grain: 0,
+    }
+    const legacy = parseProjectState({
+      version: 1,
+      artboard: base,
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+    const invalid = parseProjectState({
+      version: 1,
+      artboard: { ...base, cursorMotionRotation: "heavy" },
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+
+    expect(legacy).not.toBeNull()
+    expect(legacy!.artboard.cursorMotionRotation).toBe(0.35)
+    expect(invalid).not.toBeNull()
+    expect(invalid!.artboard.cursorMotionRotation).toBe(0.35)
+  })
+
+  it("clamps motion rotation into the supported range", () => {
+    const base = {
+      presetId: "wide",
+      width: 1920,
+      height: 1080,
+      background: null,
+      padding: 0,
+      grain: 0,
+    }
+    const tooSmall = parseProjectState({
+      version: 1,
+      artboard: { ...base, cursorMotionRotation: -1 },
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+    const tooLarge = parseProjectState({
+      version: 1,
+      artboard: { ...base, cursorMotionRotation: 2 },
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+
+    expect(tooSmall).not.toBeNull()
+    expect(tooSmall!.artboard.cursorMotionRotation).toBe(0)
+    expect(tooLarge).not.toBeNull()
+    expect(tooLarge!.artboard.cursorMotionRotation).toBe(1)
   })
 })
 

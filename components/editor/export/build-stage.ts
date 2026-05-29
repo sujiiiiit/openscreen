@@ -12,12 +12,14 @@ import {
   clampCursorClickPressScale,
   clampCursorMotionBlur,
   clampCursorMotionBlurBackend,
+  clampCursorMotionRotation,
   clampCursorSetId,
   clampCursorSmoothingMode,
   clampCursorSize,
   CURSOR_CLICK_PRESS_SCALE_DEFAULT,
   CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   CURSOR_MOTION_BLUR_DEFAULT,
+  CURSOR_MOTION_ROTATION_DEFAULT,
   CURSOR_POINTER_CURSOR_ID,
   CURSOR_SMOOTHING_MODE_DEFAULT,
   CURSOR_SET_DEFAULT,
@@ -81,6 +83,8 @@ export interface ExportCursorHandle {
   /** Cursor motion-blur intensity (0..1); fed to `computeCursorBlur` per frame
    * so the exported smear matches the preview. */
   motionBlur: number
+  /** Cursor motion-rotation amount (0..1); threaded into placement per frame. */
+  motionRotation: number
   /** Requested cursor-blur backend, defaulting to GPU for preview parity. */
   motionBlurBackend: "gpu" | "cpu"
   /** Sprite-blur renderer, reused across frames. GPU falls back to CPU if unavailable. */
@@ -348,6 +352,9 @@ async function buildCursorOverlay(opts: {
   const motionBlur = clampCursorMotionBlur(
     state.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT
   )
+  const motionRotation = clampCursorMotionRotation(
+    state.artboard.cursorMotionRotation ?? CURSOR_MOTION_ROTATION_DEFAULT
+  )
   const motionBlurBackend = clampCursorMotionBlurBackend(
     state.artboard.cursorMotionBlurBackend ?? CURSOR_MOTION_BLUR_BACKEND_DEFAULT
   )
@@ -370,6 +377,7 @@ async function buildCursorOverlay(opts: {
     alwaysUsePointer,
     cursorSetId,
     motionBlur,
+    motionRotation,
     motionBlurBackend,
     renderer,
     images,
