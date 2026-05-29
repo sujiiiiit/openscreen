@@ -88,7 +88,7 @@ const AUDIO_PROBE_SAMPLE_RATE = 48_000
  * playback.
  */
 export async function runExport(
-  options: RunExportOptions,
+  options: RunExportOptions
 ): Promise<RunExportResult> {
   const {
     state,
@@ -106,20 +106,23 @@ export async function runExport(
   }
   if (timelineDurationSec > MAX_TIMELINE_SECONDS) {
     throw new Error(
-      `Timeline is longer than the export cap of ${MAX_TIMELINE_SECONDS / 3600} hours. Trim the timeline and try again.`,
+      `Timeline is longer than the export cap of ${MAX_TIMELINE_SECONDS / 3600} hours. Trim the timeline and try again.`
     )
   }
   const missingSourceVideoIds = findMissingActiveSourceVideoIds(
     state,
-    assetUrlsByVideoId,
+    assetUrlsByVideoId
   )
   if (missingSourceVideoIds.length > 0) {
     throw new Error(
-      `Export is missing source media for active clip(s): ${formatExportSourceList(state, missingSourceVideoIds)}. Reopen the project or restore the source file and try again.`,
+      `Export is missing source media for active clip(s): ${formatExportSourceList(state, missingSourceVideoIds)}. Reopen the project or restore the source file and try again.`
     )
   }
 
-  const totalFrames = Math.max(1, Math.round(timelineDurationSec * settings.fps))
+  const totalFrames = Math.max(
+    1,
+    Math.round(timelineDurationSec * settings.fps)
+  )
   const outputSize = exportResolutionPixels(settings.resolution, {
     width: state.artboard.width,
     height: state.artboard.height,
@@ -130,7 +133,7 @@ export async function runExport(
     outputSize.width * outputSize.height > MAX_OUTPUT_PIXELS
   ) {
     throw new Error(
-      `Output resolution ${outputSize.width}×${outputSize.height} exceeds the encoder's per-frame pixel budget. Pick a lower preset.`,
+      `Output resolution ${outputSize.width}×${outputSize.height} exceeds the encoder's per-frame pixel budget. Pick a lower preset.`
     )
   }
 
@@ -179,7 +182,7 @@ export async function runExport(
         videoCodec,
         outputSize.width,
         outputSize.height,
-        settings.fps,
+        settings.fps
       ),
       // Tells the underlying VideoEncoder to optimise rate allocation for
       // text legibility (vs `'motion'` for action video). Browsers that
@@ -247,14 +250,14 @@ export async function runExport(
     const providers = new Map<string, SourceFrameProvider>()
     try {
       const sourceTimelineEntries = Array.from(
-        plan.sourceTimelinesByVideoId.entries(),
+        plan.sourceTimelinesByVideoId.entries()
       ).filter(([, timestamps]) => timestamps.length > 0)
       const missingMetadataVideoIds = sourceTimelineEntries
         .filter(([videoId]) => !videoMeta.has(videoId))
         .map(([videoId]) => videoId)
       if (missingMetadataVideoIds.length > 0) {
         throw new Error(
-          `Export is missing source metadata for active clip(s): ${formatExportSourceList(state, missingMetadataVideoIds)}.`,
+          `Export is missing source metadata for active clip(s): ${formatExportSourceList(state, missingMetadataVideoIds)}.`
         )
       }
 
@@ -272,15 +275,15 @@ export async function runExport(
             timestamps,
           })
           providers.set(videoId, provider)
-        }),
+        })
       )
       throwIfAborted(signal)
       const failedDecoderVideoIds = initResults.flatMap((result, index) =>
-        result.status === "rejected" ? [sourceTimelineEntries[index][0]] : [],
+        result.status === "rejected" ? [sourceTimelineEntries[index][0]] : []
       )
       if (failedDecoderVideoIds.length > 0) {
         throw new Error(
-          `Export could not decode source video(s): ${formatExportSourceList(state, failedDecoderVideoIds)}. Try recording in H.264 or restore the source media and try again.`,
+          `Export could not decode source video(s): ${formatExportSourceList(state, failedDecoderVideoIds)}. Try recording in H.264 or restore the source media and try again.`
         )
       }
 
@@ -302,7 +305,7 @@ export async function runExport(
       // whose audio track outlasts its video track yields `null` for the tail
       // frames, which is expected and should still export the frames it has.
       const expectedSourceIds = new Set(
-        sourceTimelineEntries.map(([videoId]) => videoId),
+        sourceTimelineEntries.map(([videoId]) => videoId)
       )
       const decodedSourceIds = new Set<string>()
 
@@ -333,7 +336,7 @@ export async function runExport(
             node.image(canvas)
             node.visible(true)
             decodedSourceIds.add(entry.videoId)
-          }),
+          })
         )
 
         // Place the recorded cursor for this frame, using the screen clip's
@@ -345,18 +348,26 @@ export async function runExport(
             node,
             track,
             video,
+            referenceSize,
             screenVideoId,
             sizeMultiplier,
+            clickPressScale,
+            alwaysUsePointer,
+            cursorSetId,
             motionBlur,
             renderer,
             images,
           } = handles.cursor
           const screenEntry = active.find(
-            (entry) => entry.videoId === screenVideoId,
+            (entry) => entry.videoId === screenVideoId
           )
           const placement = screenEntry
             ? placeCursor(track, video, screenEntry.sourceTimeSec, {
                 sizeMultiplier,
+                clickPressScale,
+                cursorSet: cursorSetId,
+                alwaysUsePointer,
+                referenceSize,
               })
             : null
           const image = placement ? images.get(placement.url) : undefined
@@ -368,14 +379,21 @@ export async function runExport(
               track,
               video,
               screenEntry.sourceTimeSec,
-              { intensity: motionBlur, sizeMultiplier },
+              {
+                intensity: motionBlur,
+                sizeMultiplier,
+                clickPressScale,
+                cursorSet: cursorSetId,
+                alwaysUsePointer,
+                referenceSize,
+              }
             )
             if (blur) {
               const { canvas, padding } = renderer.render(
                 image,
                 placement.width,
                 placement.height,
-                blur,
+                blur
               )
               node.image(canvas)
               node.size({
@@ -431,11 +449,11 @@ export async function runExport(
       // its clips would be silently black in the output — fail loudly with the
       // offending file name(s) rather than handing back a broken export.
       const undecodedSourceIds = Array.from(expectedSourceIds).filter(
-        (videoId) => !decodedSourceIds.has(videoId),
+        (videoId) => !decodedSourceIds.has(videoId)
       )
       if (undecodedSourceIds.length > 0) {
         throw new Error(
-          `Export could not decode any frames for source video(s): ${formatExportSourceList(state, undecodedSourceIds)}. Try recording in H.264 or restore the source media and try again.`,
+          `Export could not decode any frames for source video(s): ${formatExportSourceList(state, undecodedSourceIds)}. Try recording in H.264 or restore the source media and try again.`
         )
       }
 
@@ -443,11 +461,7 @@ export async function runExport(
         onStage?.("muxing-audio")
         // OfflineAudioContext is just a host for `createBuffer` calls; we
         // never actually run it. One frame is enough for the constructor.
-        const audioCtx = new OfflineAudioContext(
-          2,
-          1,
-          AUDIO_PROBE_SAMPLE_RATE,
-        )
+        const audioCtx = new OfflineAudioContext(2, 1, AUDIO_PROBE_SAMPLE_RATE)
         let wroteAudio = false
         try {
           wroteAudio = await streamTimelineAudio({
@@ -462,7 +476,10 @@ export async function runExport(
           // we'll mux a silent track below so finalize() doesn't reject
           // for an empty audio track.
           if (process.env.NODE_ENV !== "production") {
-            console.warn("[export] audio mix failed; muxing silence", audioError)
+            console.warn(
+              "[export] audio mix failed; muxing silence",
+              audioError
+            )
           }
         }
         if (!wroteAudio) {
@@ -524,7 +541,7 @@ function computeScreenContentBitrate(
   codec: "avc" | "hevc" | "vp9" | "vp8" | "av1",
   width: number,
   height: number,
-  fps: number,
+  fps: number
 ): number {
   const REFERENCE_PIXELS = 1920 * 1080
   const REFERENCE_BITRATE = 14_000_000
@@ -550,9 +567,10 @@ function computeScreenContentBitrate(
  * codec to the union is a type error rather than silently falling back to
  * an arbitrary default.
  */
-function codecBitrateProfile(
-  codec: "avc" | "hevc" | "vp9" | "vp8" | "av1",
-): { factor: number; cap: number } {
+function codecBitrateProfile(codec: "avc" | "hevc" | "vp9" | "vp8" | "av1"): {
+  factor: number
+  cap: number
+} {
   switch (codec) {
     case "avc":
       return { factor: 1.0, cap: 50_000_000 }
@@ -591,7 +609,7 @@ function makeCompositeCanvas(size: {
 
 function redrawComposite(
   handles: Awaited<ReturnType<typeof buildExportStage>>,
-  ctx: CanvasRenderingContext2D,
+  ctx: CanvasRenderingContext2D
 ): void {
   ctx.clearRect(0, 0, handles.outputSize.width, handles.outputSize.height)
   // Each Konva.Layer owns its own backing <canvas>. We blit them in z-order
@@ -605,7 +623,7 @@ function redrawComposite(
       0,
       0,
       handles.outputSize.width,
-      handles.outputSize.height,
+      handles.outputSize.height
     )
   }
 }
@@ -655,10 +673,7 @@ async function probeHasAnyAudio(options: {
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
-    throw new DOMException(
-      "Export cancelled by user.",
-      "AbortError",
-    )
+    throw new DOMException("Export cancelled by user.", "AbortError")
   }
 }
 

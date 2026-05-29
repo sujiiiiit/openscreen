@@ -1,46 +1,58 @@
 import type { CursorTrackData } from "@/types/api"
-import type { CursorMotionBlurBackend } from "@/types/editor-canvas"
-import type { CursorSetId } from "@/lib/cursors/cursor-manifest"
+import type {
+  CursorMotionBlurBackend,
+  CursorSmoothingMode,
+} from "@/types/editor-canvas"
+import type {
+  CursorAssetEntry,
+  CursorSetId,
+} from "@/lib/cursors/cursor-manifest"
 import type { MotionBlurOptions } from "@/lib/motion-blur/types"
-import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
+import { isCursorSetId, resolveCursorAsset } from "@/lib/cursors/cursor-set"
 import {
-  buildRawTrack,
   buildSmoothedTrack,
+  clickEventsFromClicks,
   rawSamplesFromMoves,
   sampleCursorAtTime,
+  type CursorSmoothingParams,
   type SmoothedCursorTrack,
 } from "@/lib/cursors/cursor-track"
 
 import { getVideoCoverCrop } from "./video-cover-crop"
 
-// Cursor set + size. `macos` per the chosen default; the box height is the
-// rendered SVG height in *display points* (the cursor coordinate space) before
-// it is scaled into artboard pixels — purely cosmetic, tune to taste. Position
-// and hotspot alignment are exact regardless of this value.
+// Cursor set + size. `macos` per the chosen default; the box height is measured
+// in captured display points, then converted to artboard/output pixels through a
+// stable reference frame. It intentionally does not inherit the current
+// screen-video transform: resizing the video changes where the cursor travels,
+// not how large the overlay cursor is.
 //
 // These constants live here (not in the overlay component) so the export
 // pipeline composes the cursor with byte-for-byte the same set, size, and
 // smoothing as the live editor preview — the cursor is part of the output
 // video, so the two paths must agree. Same single-source-of-truth rationale as
 // `video-scene-draw.ts` for the video appearance stack.
-export const CURSOR_SET: CursorSetId = "macos"
+export const CURSOR_SET_DEFAULT: CursorSetId = "macos"
+export const CURSOR_SET: CursorSetId = CURSOR_SET_DEFAULT
+export const CURSOR_POINTER_CURSOR_ID = "arrow"
 export const CURSOR_BOX_HEIGHT_POINTS = 52
 export const CURSOR_SCALE = 1
+const CURSOR_OPTICAL_SCALE_MIN = 0.4
+const CURSOR_OPTICAL_SCALE_MAX = 1.25
 
 // User-adjustable cursor size, expressed as a multiplier over the base render
 // height (`CURSOR_BOX_HEIGHT_POINTS * CURSOR_SCALE`). The base size is the
-// MINIMUM: `1` reproduces the recorded-accurate cursor exactly, larger values
+// MINIMUM: `1` keeps the cursor at its reference-frame size, larger values
 // magnify it for emphasis. Bounds are shared by the sidebar control, the
 // provider clamp, the persistence validator, and the export pipeline so the
 // editor preview and the encoded video always agree. Size scales the render
-// box only — the hotspot offset scales with it (see `placeCursor`), so the
-// pointer stays pinned to the exact recorded position and the timing is
-// untouched. Accuracy is preserved at every size.
+// box only — never the recorded path or current video transform. The hotspot
+// offset scales with the box (see `placeCursor`), so the pointer stays pinned to
+// the exact recorded position and the timing is untouched.
 export const CURSOR_SIZE_MIN = 1
 export const CURSOR_SIZE_MAX = 4
 // New projects (and legacy project.json files that predate the setting) open at
-// 270% — a comfortable emphasis size. `CURSOR_SIZE_MIN` is still the recorded-
-// accurate 1:1 floor the slider can be dragged down to.
+// 270% — a comfortable emphasis size. `CURSOR_SIZE_MIN` is still the reference-
+// frame 1:1 floor the slider can be dragged down to.
 export const CURSOR_SIZE_DEFAULT = 2.7
 
 /** Clamp any externally-supplied size multiplier into the supported range,
@@ -49,10 +61,48 @@ export function clampCursorSize(multiplier: number): number {
   if (!Number.isFinite(multiplier)) return CURSOR_SIZE_DEFAULT
   return Math.min(CURSOR_SIZE_MAX, Math.max(CURSOR_SIZE_MIN, multiplier))
 }
-// Spring easing of the cursor path. OFF = the cursor lands exactly on every
-// captured sample (no transition/lag) so you can judge raw capture accuracy;
-// flip to true to re-enable Screen Studio-style smoothing.
-export const CURSOR_SMOOTHING = false
+// --- Cursor smoothing -----------------------------------------------------
+// All user-facing modes smooth the recorded path. We precompute a zero-phase
+// forward/backward filter from the complete recording, so smoothing does not
+// require an explicit timeline delay. Rapid is still smoothed, just lightly.
+export const CURSOR_SMOOTHING_MODE_DEFAULT: CursorSmoothingMode = "default"
+export const CURSOR_SMOOTHING_MODES: CursorSmoothingMode[] = [
+  "rapid",
+  "quick",
+  "default",
+  "slow",
+]
+
+const CURSOR_SMOOTHING_PARAMS: Record<
+  CursorSmoothingMode,
+  CursorSmoothingParams
+> = {
+  rapid: { timeConstantMs: 12, passes: 1 },
+  quick: { timeConstantMs: 24, passes: 1 },
+  default: { timeConstantMs: 48, passes: 2 },
+  slow: { timeConstantMs: 84, passes: 2 },
+}
+
+export function clampCursorSmoothingMode(value: unknown): CursorSmoothingMode {
+  return CURSOR_SMOOTHING_MODES.includes(value as CursorSmoothingMode)
+    ? (value as CursorSmoothingMode)
+    : CURSOR_SMOOTHING_MODE_DEFAULT
+}
+
+export function clampCursorSetId(value: unknown): CursorSetId {
+  return typeof value === "string" && isCursorSetId(value)
+    ? value
+    : CURSOR_SET_DEFAULT
+}
+
+function cursorOpticalScale(asset: CursorAssetEntry): number {
+  const scale = asset.opticalScale
+  if (!Number.isFinite(scale) || scale <= 0) return 1
+  return Math.min(
+    CURSOR_OPTICAL_SCALE_MAX,
+    Math.max(CURSOR_OPTICAL_SCALE_MIN, scale)
+  )
+}
 
 // --- Cursor motion blur ---------------------------------------------------
 // Screen-Studio-style directional blur on the moving cursor. A single user
@@ -85,10 +135,30 @@ const CURSOR_BLUR_MIN_SMEAR_PX = 1.5
 const CURSOR_BLUR_KERNEL_MIN = 5
 const CURSOR_BLUR_KERNEL_MAX = 25
 
+// Click press scale. Non-linear beats linear here: a quick ease into a user-
+// controlled press plus a damped release/rebound reads like a physical click,
+// while the hotspot remains pinned because `placeCursor` scales offset with the
+// sprite. `1` disables the shrink; the current shipped value stays the default.
+export const CURSOR_CLICK_PRESS_SCALE_MIN = 0.5
+export const CURSOR_CLICK_PRESS_SCALE_MAX = 1
+export const CURSOR_CLICK_PRESS_SCALE_DEFAULT = 0.88
+const CURSOR_CLICK_PRESS_IN_MS = 70
+const CURSOR_CLICK_RELEASE_MS = 220
+const CURSOR_CLICK_RELEASE_OVERSHOOT = 0.09
+
 /** Clamp the user motion-blur intensity into [0, 1], defaulting on bad input. */
 export function clampCursorMotionBlur(value: number): number {
   if (!Number.isFinite(value)) return CURSOR_MOTION_BLUR_DEFAULT
   return Math.min(1, Math.max(0, value))
+}
+
+/** Clamp the clicked cursor's target scale; 1 means no press shrink. */
+export function clampCursorClickPressScale(value: number): number {
+  if (!Number.isFinite(value)) return CURSOR_CLICK_PRESS_SCALE_DEFAULT
+  return Math.min(
+    CURSOR_CLICK_PRESS_SCALE_MAX,
+    Math.max(CURSOR_CLICK_PRESS_SCALE_MIN, value)
+  )
 }
 
 /** Clamp unknown persisted/UI backend input, defaulting to GPU. */
@@ -104,17 +174,74 @@ function oddKernel(value: number): number {
   return Math.min(CURSOR_BLUR_KERNEL_MAX, Math.max(CURSOR_BLUR_KERNEL_MIN, k))
 }
 
+function easeOutCubic(t: number): number {
+  const clamped = Math.min(1, Math.max(0, t))
+  return 1 - Math.pow(1 - clamped, 3)
+}
+
+function cursorClickScaleAt(
+  track: SmoothedCursorTrack,
+  tMs: number,
+  pressScale?: number
+): number {
+  const clicks = track.clicks
+  if (!clicks || clicks.length === 0) return 1
+
+  const targetScale =
+    typeof pressScale === "number"
+      ? clampCursorClickPressScale(pressScale)
+      : CURSOR_CLICK_PRESS_SCALE_DEFAULT
+  let lo = 0
+  let hi = clicks.length - 1
+  if (tMs < clicks[0].t) return 1
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1
+    if (clicks[mid].t <= tMs) lo = mid
+    else hi = mid
+  }
+  const event = clicks[hi].t <= tMs ? clicks[hi] : clicks[lo]
+  const dt = tMs - event.t
+  const depth = 1 - targetScale
+  if (depth <= 0) return 1
+
+  if (event.type === "down") {
+    const p = dt / CURSOR_CLICK_PRESS_IN_MS
+    if (p < 1) return 1 - depth * easeOutCubic(p)
+    return targetScale
+  }
+
+  if (dt > CURSOR_CLICK_RELEASE_MS) return 1
+  const p = Math.min(1, Math.max(0, dt / CURSOR_CLICK_RELEASE_MS))
+  const base = targetScale + depth * easeOutCubic(p)
+  const rebound =
+    Math.min(CURSOR_CLICK_RELEASE_OVERSHOOT, depth * 0.75) *
+    Math.sin(Math.PI * p) *
+    (1 - p)
+  return base + rebound
+}
+
 /** Build the time-indexed cursor track from raw IPC data, applying the shared
  * smoothing choice. Returns null when there's no usable cursor data. */
 export function buildCursorTrack(
-  data: CursorTrackData | null
+  data: CursorTrackData | null,
+  options: { smoothingMode?: CursorSmoothingMode } = {}
 ): SmoothedCursorTrack | null {
   if (!data || data.moves.length === 0) return null
   const samples = rawSamplesFromMoves(data.moves, data.processTimeStartMs)
   if (samples.length === 0) return null
-  return CURSOR_SMOOTHING
-    ? buildSmoothedTrack(samples, data.displayWidth, data.displayHeight)
-    : buildRawTrack(samples, data.displayWidth, data.displayHeight)
+  const clicks = clickEventsFromClicks(
+    data.clicks ?? [],
+    data.processTimeStartMs
+  )
+  const mode = clampCursorSmoothingMode(options.smoothingMode)
+  const params = CURSOR_SMOOTHING_PARAMS[mode]
+  return buildSmoothedTrack(
+    samples,
+    data.displayWidth,
+    data.displayHeight,
+    params,
+    clicks
+  )
 }
 
 /** Minimal screen-video geometry the cursor placement needs. Both the editor's
@@ -127,6 +254,11 @@ export interface CursorVideoGeometry {
   rotation: number
   intrinsicWidth: number
   intrinsicHeight: number
+}
+
+export interface CursorReferenceSize {
+  width: number
+  height: number
 }
 
 export interface CursorPlacement {
@@ -145,6 +277,8 @@ export interface CursorPlacement {
   rotation: number
   /** False when the hotspot is cropped off the visible video (hide the node). */
   onScreen: boolean
+  /** Cursor sprite scale from click press/release animation. */
+  clickScale: number
 }
 
 /**
@@ -162,14 +296,26 @@ export function placeCursor(
   track: SmoothedCursorTrack,
   video: CursorVideoGeometry,
   sourceSeconds: number,
-  options: { sizeMultiplier?: number; cursorSet?: CursorSetId } = {}
+  options: {
+    sizeMultiplier?: number
+    clickPressScale?: number
+    cursorSet?: CursorSetId
+    referenceSize?: CursorReferenceSize
+    alwaysUsePointer?: boolean
+  } = {}
 ): CursorPlacement | null {
-  const { sizeMultiplier = CURSOR_SIZE_DEFAULT, cursorSet = CURSOR_SET } =
-    options
+  const {
+    sizeMultiplier = CURSOR_SIZE_DEFAULT,
+    clickPressScale,
+    cursorSet = CURSOR_SET_DEFAULT,
+    referenceSize,
+    alwaysUsePointer = false,
+  } = options
   const sample = sampleCursorAtTime(track, sourceSeconds * 1000)
   if (!sample) return null
 
-  const asset = resolveCursorAsset(sample.cursorId, cursorSet)
+  const cursorId = alwaysUsePointer ? CURSOR_POINTER_CURSOR_ID : sample.cursorId
+  const asset = resolveCursorAsset(cursorId, cursorSet, CURSOR_SET_DEFAULT)
   if (!asset) return null
 
   const iw = video.intrinsicWidth || 1
@@ -198,14 +344,42 @@ export function placeCursor(
   const artboardX = video.x + localX * cos - localY * sin
   const artboardY = video.y + localX * sin + localY * cos
 
-  // Uniform px-per-display-point scale (cover crop preserves aspect, so the
-  // x and y scales coincide).
-  const scale = (iw / dw) * (video.width / crop.cropWidth)
+  const targetSize = referenceSize ?? {
+    width: video.width,
+    height: video.height,
+  }
+  const refWidth =
+    Number.isFinite(targetSize.width) && targetSize.width > 0
+      ? targetSize.width
+      : video.width
+  const refHeight =
+    Number.isFinite(targetSize.height) && targetSize.height > 0
+      ? targetSize.height
+      : video.height
+  const referenceCrop = getVideoCoverCrop(
+    { width: iw, height: ih },
+    { width: refWidth, height: refHeight }
+  )
+  // Stable px-per-display-point scale. Use an artboard-sized reference target in
+  // preview/export so default/min/max keep their original fitted-video look while
+  // manual screen-video resizing no longer changes the cursor sprite size.
+  const referenceScale =
+    (iw / dw) * (refWidth / Math.max(1, referenceCrop.cropWidth))
+  const renderScale =
+    Number.isFinite(referenceScale) && referenceScale > 0 ? referenceScale : 1
+
+  const clickScale = cursorClickScaleAt(
+    track,
+    sourceSeconds * 1000,
+    clickPressScale
+  )
   const renderHeight =
     CURSOR_BOX_HEIGHT_POINTS *
     CURSOR_SCALE *
     clampCursorSize(sizeMultiplier) *
-    scale
+    cursorOpticalScale(asset) *
+    renderScale *
+    clickScale
   const aspect = asset.size[1] > 0 ? asset.size[0] / asset.size[1] : 1
   const renderWidth = renderHeight * aspect
 
@@ -219,6 +393,7 @@ export function placeCursor(
     y: artboardY,
     rotation: video.rotation,
     onScreen,
+    clickScale,
   }
 }
 
@@ -242,7 +417,10 @@ export function computeCursorBlur(
   options: {
     intensity: number
     sizeMultiplier?: number
+    clickPressScale?: number
     cursorSet?: CursorSetId
+    referenceSize?: CursorReferenceSize
+    alwaysUsePointer?: boolean
   }
 ): MotionBlurOptions | null {
   const intensity = clampCursorMotionBlur(options.intensity)
@@ -250,7 +428,10 @@ export function computeCursorBlur(
 
   const placeOpts = {
     sizeMultiplier: options.sizeMultiplier,
+    clickPressScale: options.clickPressScale,
     cursorSet: options.cursorSet,
+    referenceSize: options.referenceSize,
+    alwaysUsePointer: options.alwaysUsePointer,
   }
   const cur = placeCursor(track, video, sourceSeconds, placeOpts)
   const prev = placeCursor(

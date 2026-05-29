@@ -1,4 +1,7 @@
 import type { ArtboardPresetId } from "@/lib/editor-canvas"
+import type { CursorSetId } from "@/lib/cursors/cursor-manifest"
+
+export type { CursorSetId } from "@/lib/cursors/cursor-manifest"
 
 export type CanvasSize = {
   width: number
@@ -10,15 +13,24 @@ export type ArtboardBackground =
   | { type: "color"; value: string }
 
 export type CursorMotionBlurBackend = "gpu" | "cpu"
+export type CursorSmoothingMode = "rapid" | "quick" | "default" | "slow"
 
 export type EditorArtboard = CanvasSize & {
   presetId: ArtboardPresetId
   background: ArtboardBackground | null
   grain: number
   padding: number
-  // Recorded-cursor render-size multiplier (1 = recorded-accurate minimum).
-  // See cursor-scene.ts CURSOR_SIZE_MIN/MAX. Project-level: one screen
-  // recording per project, so the cursor size is global to the artboard.
+  // Master switch for the custom cursor overlay. When false, preview and export
+  // skip rendering the themed cursor entirely; the other cursor settings stay
+  // persisted so they come back when the overlay is re-enabled.
+  cursorCustomRenderingEnabled: boolean
+  // The bundled cursor asset set used to resolve each captured cursor shape.
+  // Shared by preview/export and persisted on the artboard.
+  cursorSetId: CursorSetId
+  // Recorded-cursor render-size multiplier (1 = reference-frame base size). It
+  // is independent from later screen-video resize/scale. See cursor-scene.ts
+  // CURSOR_SIZE_MIN/MAX. Project-level: one screen recording per project, so the
+  // cursor size is global to the artboard.
   cursorSizeMultiplier: number
   // Cursor motion-blur intensity, 0..1 (0 = off). The blur velocity is derived
   // from cursor speed; this is the single user-facing amount. See cursor-scene.ts
@@ -27,6 +39,15 @@ export type EditorArtboard = CanvasSize & {
   // Renderer backend for cursor motion blur. GPU is the default for responsive
   // preview; CPU is kept as a project-level fallback/comparison mode.
   cursorMotionBlurBackend: CursorMotionBlurBackend
+  // Cursor path smoothing preset. All modes smooth; Rapid is the lightest and
+  // Slow is the softest. Shared by preview and export.
+  cursorSmoothingMode: CursorSmoothingMode
+  // Target cursor scale while a captured mouse button is pressed. `1` disables
+  // the shrink; default is 0.88. Shared by preview and export.
+  cursorClickPressScale: number
+  // When true, every captured cursor id resolves to the themed pointer asset.
+  // Useful when text/resize cursors are distracting. Shared by preview/export.
+  cursorAlwaysUsePointer: boolean
 }
 
 export const ARTBOARD_SELECTION_ID = "__artboard__"

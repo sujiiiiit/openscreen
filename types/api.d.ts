@@ -17,6 +17,7 @@ import type {
   VideoCodec,
   VideoQuality,
 } from "@openscreen/mac-addon"
+import type { CursorSetId } from "@/lib/cursors/cursor-manifest"
 
 /** Mirror of RecordingQualitySettings from electron/ipc/recorder.ts. */
 export interface RecordingQualitySettings {
@@ -207,7 +208,14 @@ export interface ProjectArtboard {
   background: ProjectArtboardBackground | null
   padding: number
   grain: number
-  // Recorded-cursor render-size multiplier (1 = recorded-accurate minimum).
+  // Master switch for the custom cursor overlay. Optional on disk; validator
+  // defaults to true so old projects keep their current cursor rendering.
+  cursorCustomRenderingEnabled?: boolean
+  // Bundled cursor style. Optional on disk; validator defaults invalid/missing
+  // values to the current macOS set for old projects.
+  cursorSetId?: CursorSetId
+  // Recorded-cursor render-size multiplier (1 = reference-frame base size,
+  // independent from later screen-video resize/scale).
   // Optional on disk: older project.json files predate it and the validator
   // supplies the default, so they keep loading. See electron/ipc/project-schema.ts.
   cursorSizeMultiplier?: number
@@ -217,6 +225,15 @@ export interface ProjectArtboard {
   // Cursor motion-blur renderer backend. Optional on disk; validator defaults
   // to 'gpu'. See electron/ipc/project-schema.ts.
   cursorMotionBlurBackend?: "gpu" | "cpu"
+  // Cursor path smoothing preset. Optional on disk; validator defaults to
+  // 'default'. See electron/ipc/project-schema.ts.
+  cursorSmoothingMode?: "rapid" | "quick" | "default" | "slow"
+  // Target cursor scale while a recorded click is pressed. Optional on disk;
+  // validator defaults to 0.88 and clamps to the supported range.
+  cursorClickPressScale?: number
+  // When true, every captured cursor id resolves to the themed pointer asset.
+  // Optional on disk; validator defaults to false for old projects.
+  cursorAlwaysUsePointer?: boolean
 }
 
 export type ProjectVideoRole = "screen" | "camera" | "media"
@@ -371,8 +388,18 @@ export interface CursorMoveSample {
   type?: string
 }
 
+export interface CursorClickSample {
+  processTimeMs: number
+  x: number
+  y: number
+  cursorId?: string
+  type?: string
+  button?: number | string
+}
+
 export interface CursorTrackData {
   moves: CursorMoveSample[]
+  clicks: CursorClickSample[]
   processTimeStartMs: number
   displayWidth: number
   displayHeight: number

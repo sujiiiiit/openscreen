@@ -144,6 +144,8 @@ The screen-recording feature set is identical on 13.0 and 15.0+; only audio scop
 
 - **`@available` gates on every 14+ / 15+ symbol** so the addon never crashes on macOS 13/14 against a newer SDK.
 - **Settings validation runs twice** — once on the JS side before `startRecording`, once on the native side in `-resolveOptions`. Unknown enum values fall back to defaults.
+- **Display picking is cursor-scoped, not primary-display-scoped.** The display picker and the generic default display target ask the native addon for the CoreGraphics display under the cursor, then map that `CGDirectDisplayID` back to Electron for overlay bounds. The display/window picker overlay is moved onto the target display instead of relying on one virtual-desktop-sized panel; macOS can otherwise keep that panel attached to the Dock/active Space display, making the selection for another monitor render off-screen. If the native lookup is unavailable, the fallback first checks which Electron display contains the cursor before using `getDisplayNearestPoint`.
+- **Region picking uses one overlay per display until drawing starts.** Region mode creates a transparent picker panel on every attached display so the user can start a drag on any monitor. Once the first real drag is reported from one panel, the picker destroys the other display panels and keeps the active panel for resizing/confirmation. This avoids cross-display `NSPanel` visibility issues and prevents accidental multi-display regions.
 - **`SCStreamFrameInfo.status` filter** — only `SCFrameStatusComplete` frames are passed to `appendSampleBuffer:`. Empty / idle / blank buffers would otherwise crash VideoToolbox.
 - **Monotonic PTS guard** — drops any sample whose presentation timestamp is ≤ the previous appended frame, protecting against Presenter Overlay timing glitches that would otherwise permanently fail the writer.
 - **`expectsMediaDataInRealTime = YES`** on every writer input lets the encoder make rate-control trade-offs suited to live capture.
@@ -219,6 +221,7 @@ ls <session>/cursors/ | wc -l   # 38 system cursors on a normal session
 - `packages/mac-addon/src/ScreenTrack.mm` — `-resolveOptions`, `-streamConfigurationForContent:`, `-videoColorProperties`, `-videoCompressionProperties`, `-prepareWriter:`, `-appendVideoSampleBuffer:`, `-metadata`.
 - `packages/mac-addon/src/RecorderSession.mm` — container-aware file extension, manifest assembly.
 - `packages/mac-addon/index.d.ts` — `VideoCodec`, `VideoQuality`, `ContainerFormat`, `ResolutionMode`, `FrameRate`, `StartRecordingOptions`, manifest metadata fields.
+- `electron/ipc/display-target.ts` — cursor-scoped display resolution shared by display picker and default recorder start.
 - `electron/ipc/recorder.ts` — `RecordingQualitySettings`, persistence, `coerceRecordingQualitySettings`, IPC handlers.
 - `electron/preload.ts` — `getRecordingSettings` / `setRecordingSettings` / `openRecordingSettings` bridge.
 - `types/api.d.ts` — renderer-facing mirror of `RecordingQualitySettings`.

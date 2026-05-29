@@ -14,9 +14,14 @@ const ARTBOARD: EditorArtboard = {
   background: null,
   grain: 0,
   padding: 0,
+  cursorCustomRenderingEnabled: true,
+  cursorSetId: "macos",
   cursorSizeMultiplier: 1,
   cursorMotionBlur: 0,
   cursorMotionBlurBackend: "gpu",
+  cursorSmoothingMode: "default",
+  cursorClickPressScale: 0.88,
+  cursorAlwaysUsePointer: false,
 }
 
 function canvasVideo(
@@ -158,6 +163,250 @@ describe("cursor motion blur backend persistence", () => {
 
     expect(parsed).not.toBeNull()
     expect(parsed!.artboard.cursorMotionBlurBackend).toBe("gpu")
+  })
+})
+
+describe("custom cursor rendering persistence", () => {
+  it("preserves disabled custom cursor rendering through a round-trip", () => {
+    const parsed = roundTrip(
+      serializeProjectState(
+        { ...ARTBOARD, cursorCustomRenderingEnabled: false },
+        [canvasVideo({ id: "a" })],
+        []
+      )
+    )
+
+    expect(parsed).not.toBeNull()
+    expect(parsed!.artboard.cursorCustomRenderingEnabled).toBe(false)
+  })
+
+  it("defaults missing and non-false values to enabled for legacy/hand-edited projects", () => {
+    const legacy = parseProjectState({
+      version: 1,
+      artboard: {
+        presetId: "wide",
+        width: 1920,
+        height: 1080,
+        background: null,
+        padding: 0,
+        grain: 0,
+      },
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+    const invalid = parseProjectState({
+      version: 1,
+      artboard: {
+        presetId: "wide",
+        width: 1920,
+        height: 1080,
+        background: null,
+        padding: 0,
+        grain: 0,
+        cursorCustomRenderingEnabled: "no",
+      },
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+
+    expect(legacy).not.toBeNull()
+    expect(legacy!.artboard.cursorCustomRenderingEnabled).toBe(true)
+    expect(invalid).not.toBeNull()
+    expect(invalid!.artboard.cursorCustomRenderingEnabled).toBe(true)
+  })
+})
+
+describe("cursor style persistence", () => {
+  it("preserves the selected cursor set through a round-trip", () => {
+    const parsed = roundTrip(
+      serializeProjectState(
+        { ...ARTBOARD, cursorSetId: "halloween" },
+        [canvasVideo({ id: "a" })],
+        []
+      )
+    )
+
+    expect(parsed).not.toBeNull()
+    expect(parsed!.artboard.cursorSetId).toBe("halloween")
+  })
+
+  it("defaults missing and invalid cursor sets to macos for legacy/hand-edited projects", () => {
+    const legacy = parseProjectState({
+      version: 1,
+      artboard: {
+        presetId: "wide",
+        width: 1920,
+        height: 1080,
+        background: null,
+        padding: 0,
+        grain: 0,
+      },
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+    const invalid = parseProjectState({
+      version: 1,
+      artboard: {
+        presetId: "wide",
+        width: 1920,
+        height: 1080,
+        background: null,
+        padding: 0,
+        grain: 0,
+        cursorSetId: "made-up",
+      },
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+
+    expect(legacy).not.toBeNull()
+    expect(legacy!.artboard.cursorSetId).toBe("macos")
+    expect(invalid).not.toBeNull()
+    expect(invalid!.artboard.cursorSetId).toBe("macos")
+  })
+})
+
+describe("cursor smoothing persistence", () => {
+  it("preserves the selected smoothing mode through a round-trip", () => {
+    const parsed = roundTrip(
+      serializeProjectState(
+        { ...ARTBOARD, cursorSmoothingMode: "slow" },
+        [canvasVideo({ id: "a" })],
+        []
+      )
+    )
+
+    expect(parsed).not.toBeNull()
+    expect(parsed!.artboard.cursorSmoothingMode).toBe("slow")
+  })
+
+  it("defaults an invalid smoothing mode to default for legacy/hand-edited projects", () => {
+    const parsed = parseProjectState({
+      version: 1,
+      artboard: {
+        presetId: "wide",
+        width: 1920,
+        height: 1080,
+        background: null,
+        padding: 0,
+        grain: 0,
+        cursorSmoothingMode: "raw",
+      },
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+
+    expect(parsed).not.toBeNull()
+    expect(parsed!.artboard.cursorSmoothingMode).toBe("default")
+  })
+})
+
+describe("cursor click press scale persistence", () => {
+  it("preserves the selected click press scale through a round-trip", () => {
+    const parsed = roundTrip(
+      serializeProjectState(
+        { ...ARTBOARD, cursorClickPressScale: 0.72 },
+        [canvasVideo({ id: "a" })],
+        []
+      )
+    )
+
+    expect(parsed).not.toBeNull()
+    expect(parsed!.artboard.cursorClickPressScale).toBe(0.72)
+  })
+
+  it("defaults and clamps click press scale for legacy/hand-edited projects", () => {
+    const legacy = parseProjectState({
+      version: 1,
+      artboard: {
+        presetId: "wide",
+        width: 1920,
+        height: 1080,
+        background: null,
+        padding: 0,
+        grain: 0,
+      },
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+    const tooSmall = parseProjectState({
+      version: 1,
+      artboard: {
+        presetId: "wide",
+        width: 1920,
+        height: 1080,
+        background: null,
+        padding: 0,
+        grain: 0,
+        cursorClickPressScale: 0.2,
+      },
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+
+    expect(legacy).not.toBeNull()
+    expect(legacy!.artboard.cursorClickPressScale).toBe(0.88)
+    expect(tooSmall).not.toBeNull()
+    expect(tooSmall!.artboard.cursorClickPressScale).toBe(0.5)
+  })
+})
+
+describe("cursor pointer override persistence", () => {
+  it("preserves the always-use-pointer setting through a round-trip", () => {
+    const parsed = roundTrip(
+      serializeProjectState(
+        { ...ARTBOARD, cursorAlwaysUsePointer: true },
+        [canvasVideo({ id: "a" })],
+        []
+      )
+    )
+
+    expect(parsed).not.toBeNull()
+    expect(parsed!.artboard.cursorAlwaysUsePointer).toBe(true)
+  })
+
+  it("defaults non-true values to false for legacy/hand-edited projects", () => {
+    const legacy = parseProjectState({
+      version: 1,
+      artboard: {
+        presetId: "wide",
+        width: 1920,
+        height: 1080,
+        background: null,
+        padding: 0,
+        grain: 0,
+      },
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+    const invalid = parseProjectState({
+      version: 1,
+      artboard: {
+        presetId: "wide",
+        width: 1920,
+        height: 1080,
+        background: null,
+        padding: 0,
+        grain: 0,
+        cursorAlwaysUsePointer: "yes",
+      },
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+
+    expect(legacy).not.toBeNull()
+    expect(legacy!.artboard.cursorAlwaysUsePointer).toBe(false)
+    expect(invalid).not.toBeNull()
+    expect(invalid!.artboard.cursorAlwaysUsePointer).toBe(false)
   })
 })
 

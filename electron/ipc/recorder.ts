@@ -4,7 +4,6 @@ import {
   app,
   dialog,
   ipcMain,
-  screen,
   type IpcMainInvokeEvent,
   type MenuItemConstructorOptions,
 } from 'electron'
@@ -24,6 +23,7 @@ import addon, {
   type VideoQuality,
   type WindowSource,
 } from '@openscreen/mac-addon'
+import { resolveDisplayUnderCursor } from './display-target'
 
 // IMPORTANT: the exported types below are mirrored in `types/api.d.ts` so
 // the renderer can typecheck the preload bridge without importing from
@@ -337,9 +337,16 @@ function outputDirectory(): string {
 }
 
 function defaultCaptureTarget(): CaptureTarget {
+  const display = resolveDisplayUnderCursor()
   return {
     type: 'display',
-    displayId: screen.getPrimaryDisplay().id,
+    displayId: display.displayId,
+    title: 'Display',
+    applicationName: 'Display',
+    x: display.bounds.x,
+    y: display.bounds.y,
+    width: display.pixelWidth,
+    height: display.pixelHeight,
   }
 }
 

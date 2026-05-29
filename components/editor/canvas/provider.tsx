@@ -32,6 +32,8 @@ import type {
   CanvasVideoSource,
   CanvasVideoTransformPatch,
   CursorMotionBlurBackend,
+  CursorSetId,
+  CursorSmoothingMode,
   EditorArtboard,
   EditorSaveStatus,
   ViewTransform,
@@ -57,13 +59,19 @@ import {
   type HistoryCommitTag,
 } from "@/components/editor/canvas/history"
 import {
+  CURSOR_CLICK_PRESS_SCALE_DEFAULT,
   CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   CURSOR_MOTION_BLUR_DEFAULT,
+  CURSOR_SET_DEFAULT,
+  CURSOR_SMOOTHING_MODE_DEFAULT,
   CURSOR_SIZE_DEFAULT,
   CURSOR_SIZE_MAX,
   CURSOR_SIZE_MIN,
+  clampCursorClickPressScale,
   clampCursorMotionBlur,
   clampCursorMotionBlurBackend,
+  clampCursorSetId,
+  clampCursorSmoothingMode,
 } from "@/components/editor/canvas/cursor-scene"
 
 const DEFAULT_VIEWPORT_SIZE: CanvasSize = { width: 0, height: 0 }
@@ -75,9 +83,14 @@ const DEFAULT_ARTBOARD: EditorArtboard = {
   background: null,
   grain: 0,
   padding: 0,
+  cursorCustomRenderingEnabled: true,
+  cursorSetId: CURSOR_SET_DEFAULT,
   cursorSizeMultiplier: CURSOR_SIZE_DEFAULT,
   cursorMotionBlur: CURSOR_MOTION_BLUR_DEFAULT,
   cursorMotionBlurBackend: CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
+  cursorSmoothingMode: CURSOR_SMOOTHING_MODE_DEFAULT,
+  cursorClickPressScale: CURSOR_CLICK_PRESS_SCALE_DEFAULT,
+  cursorAlwaysUsePointer: false,
 }
 const ARTBOARD_PADDING_MAX = 500
 const DEFAULT_VIEW_TRANSFORM = getFitViewTransform(
@@ -197,7 +210,12 @@ type EditorCanvasContextValue = {
   setArtboardBackground: (background: ArtboardBackground | null) => void
   setArtboardGrain: (grain: number) => void
   setArtboardPadding: (padding: number) => void
+  setCursorCustomRenderingEnabled: (enabled: boolean) => void
+  setCursorSetId: (setId: CursorSetId) => void
   setCursorSizeMultiplier: (multiplier: number) => void
+  setCursorSmoothingMode: (mode: CursorSmoothingMode) => void
+  setCursorClickPressScale: (scale: number) => void
+  setCursorAlwaysUsePointer: (enabled: boolean) => void
   setCursorMotionBlur: (intensity: number) => void
   setCursorMotionBlurBackend: (backend: CursorMotionBlurBackend) => void
   setViewportSize: (size: CanvasSize) => void
@@ -285,7 +303,12 @@ type EditorCanvasActionsContextValue = Pick<
   | "setArtboardBackground"
   | "setArtboardGrain"
   | "setArtboardPadding"
+  | "setCursorCustomRenderingEnabled"
+  | "setCursorSetId"
   | "setCursorSizeMultiplier"
+  | "setCursorSmoothingMode"
+  | "setCursorClickPressScale"
+  | "setCursorAlwaysUsePointer"
   | "setCursorMotionBlur"
   | "setCursorMotionBlurBackend"
   | "setViewportSize"
@@ -2267,10 +2290,18 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const prevBackground = artboardRef.current.background
       const prevGrain = artboardRef.current.grain
       const prevPadding = artboardRef.current.padding
+      const prevCursorCustomRenderingEnabled =
+        artboardRef.current.cursorCustomRenderingEnabled
+      const prevCursorSetId = artboardRef.current.cursorSetId
       const prevCursorSize = artboardRef.current.cursorSizeMultiplier
       const prevCursorMotionBlur = artboardRef.current.cursorMotionBlur
       const prevCursorMotionBlurBackend =
         artboardRef.current.cursorMotionBlurBackend
+      const prevCursorSmoothingMode = artboardRef.current.cursorSmoothingMode
+      const prevCursorClickPressScale =
+        artboardRef.current.cursorClickPressScale
+      const prevCursorAlwaysUsePointer =
+        artboardRef.current.cursorAlwaysUsePointer
       let nextArtboard: EditorArtboard
       if (id === AUTO_ARTBOARD_PRESET_ID) {
         const auto = resolveAutoArtboard(sourceVideoDimsRef.current)
@@ -2281,9 +2312,14 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           background: prevBackground,
           grain: prevGrain,
           padding: prevPadding,
+          cursorCustomRenderingEnabled: prevCursorCustomRenderingEnabled,
+          cursorSetId: prevCursorSetId,
           cursorSizeMultiplier: prevCursorSize,
           cursorMotionBlur: prevCursorMotionBlur,
           cursorMotionBlurBackend: prevCursorMotionBlurBackend,
+          cursorSmoothingMode: prevCursorSmoothingMode,
+          cursorClickPressScale: prevCursorClickPressScale,
+          cursorAlwaysUsePointer: prevCursorAlwaysUsePointer,
         }
       } else {
         const preset = getArtboardPreset(id)
@@ -2294,9 +2330,14 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           background: prevBackground,
           grain: prevGrain,
           padding: prevPadding,
+          cursorCustomRenderingEnabled: prevCursorCustomRenderingEnabled,
+          cursorSetId: prevCursorSetId,
           cursorSizeMultiplier: prevCursorSize,
           cursorMotionBlur: prevCursorMotionBlur,
           cursorMotionBlurBackend: prevCursorMotionBlurBackend,
+          cursorSmoothingMode: prevCursorSmoothingMode,
+          cursorClickPressScale: prevCursorClickPressScale,
+          cursorAlwaysUsePointer: prevCursorAlwaysUsePointer,
         }
       }
 
@@ -2737,6 +2778,74 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     setArtboard(nextArtboard)
   }, [])
 
+  const setCursorSmoothingMode = useCallback((mode: CursorSmoothingMode) => {
+    const current = artboardRef.current
+    const clamped = clampCursorSmoothingMode(mode)
+    if (current.cursorSmoothingMode === clamped) return
+    historyCommitTagRef.current = "cursor-smoothing"
+    const nextArtboard: EditorArtboard = {
+      ...current,
+      cursorSmoothingMode: clamped,
+    }
+    artboardRef.current = nextArtboard
+    setArtboard(nextArtboard)
+  }, [])
+
+  // Target scale for the cursor while a captured click is pressed. `1` means no
+  // shrink; the current default remains 0.88. Stored on the artboard and passed
+  // through shared `placeCursor` so preview/export agree.
+  const setCursorClickPressScale = useCallback((scale: number) => {
+    const current = artboardRef.current
+    const clamped = clampCursorClickPressScale(scale)
+    if (current.cursorClickPressScale === clamped) return
+    historyCommitTagRef.current = "cursor-click-press-scale"
+    const nextArtboard: EditorArtboard = {
+      ...current,
+      cursorClickPressScale: clamped,
+    }
+    artboardRef.current = nextArtboard
+    setArtboard(nextArtboard)
+  }, [])
+
+  const setCursorCustomRenderingEnabled = useCallback((enabled: boolean) => {
+    const current = artboardRef.current
+    const nextEnabled = Boolean(enabled)
+    if (current.cursorCustomRenderingEnabled === nextEnabled) return
+    historyCommitTagRef.current = "cursor-custom-rendering"
+    const nextArtboard: EditorArtboard = {
+      ...current,
+      cursorCustomRenderingEnabled: nextEnabled,
+    }
+    artboardRef.current = nextArtboard
+    setArtboard(nextArtboard)
+  }, [])
+
+  const setCursorSetId = useCallback((setId: CursorSetId) => {
+    const current = artboardRef.current
+    const clamped = clampCursorSetId(setId)
+    if (current.cursorSetId === clamped) return
+    historyCommitTagRef.current = "cursor-set"
+    const nextArtboard: EditorArtboard = {
+      ...current,
+      cursorSetId: clamped,
+    }
+    artboardRef.current = nextArtboard
+    setArtboard(nextArtboard)
+  }, [])
+
+  const setCursorAlwaysUsePointer = useCallback((enabled: boolean) => {
+    const current = artboardRef.current
+    const nextEnabled = Boolean(enabled)
+    if (current.cursorAlwaysUsePointer === nextEnabled) return
+    historyCommitTagRef.current = "cursor-always-use-pointer"
+    const nextArtboard: EditorArtboard = {
+      ...current,
+      cursorAlwaysUsePointer: nextEnabled,
+    }
+    artboardRef.current = nextArtboard
+    setArtboard(nextArtboard)
+  }, [])
+
   // Cursor motion-blur intensity (0..1). The blur velocity is derived from
   // cursor speed (see cursor-scene.ts `computeCursorBlur`); this is the single
   // user-facing amount. Applied identically by the editor overlay and export.
@@ -3132,6 +3241,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         background: savedState.artboard.background,
         grain: savedState.artboard.grain,
         padding: savedState.artboard.padding,
+        cursorCustomRenderingEnabled:
+          savedState.artboard.cursorCustomRenderingEnabled !== false,
+        cursorSetId: clampCursorSetId(savedState.artboard.cursorSetId),
         cursorSizeMultiplier:
           savedState.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT,
         cursorMotionBlur:
@@ -3139,6 +3251,15 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         cursorMotionBlurBackend: clampCursorMotionBlurBackend(
           savedState.artboard.cursorMotionBlurBackend
         ),
+        cursorSmoothingMode: clampCursorSmoothingMode(
+          savedState.artboard.cursorSmoothingMode
+        ),
+        cursorClickPressScale: clampCursorClickPressScale(
+          savedState.artboard.cursorClickPressScale ??
+            CURSOR_CLICK_PRESS_SCALE_DEFAULT
+        ),
+        cursorAlwaysUsePointer:
+          savedState.artboard.cursorAlwaysUsePointer === true,
       }
       const toCanvasVideo = (video: ProjectStateV1["videos"][number]) =>
         projectVideoToCanvasVideo(
@@ -3346,7 +3467,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setArtboardBackground,
       setArtboardGrain,
       setArtboardPadding,
+      setCursorCustomRenderingEnabled,
+      setCursorSetId,
       setCursorSizeMultiplier,
+      setCursorSmoothingMode,
+      setCursorClickPressScale,
+      setCursorAlwaysUsePointer,
       setCursorMotionBlur,
       setCursorMotionBlurBackend,
       setViewportSize,
@@ -3369,7 +3495,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setArtboardBackground,
       setArtboardGrain,
       setArtboardPadding,
+      setCursorCustomRenderingEnabled,
+      setCursorSetId,
       setCursorSizeMultiplier,
+      setCursorSmoothingMode,
+      setCursorClickPressScale,
+      setCursorAlwaysUsePointer,
       setCursorMotionBlur,
       setCursorMotionBlurBackend,
       setViewportSize,
@@ -3518,6 +3649,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         background: savedState.artboard.background,
         grain: savedState.artboard.grain,
         padding: savedState.artboard.padding,
+        cursorCustomRenderingEnabled:
+          savedState.artboard.cursorCustomRenderingEnabled !== false,
+        cursorSetId: clampCursorSetId(savedState.artboard.cursorSetId),
         cursorSizeMultiplier:
           savedState.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT,
         cursorMotionBlur:
@@ -3525,6 +3659,15 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         cursorMotionBlurBackend: clampCursorMotionBlurBackend(
           savedState.artboard.cursorMotionBlurBackend
         ),
+        cursorSmoothingMode: clampCursorSmoothingMode(
+          savedState.artboard.cursorSmoothingMode
+        ),
+        cursorClickPressScale: clampCursorClickPressScale(
+          savedState.artboard.cursorClickPressScale ??
+            CURSOR_CLICK_PRESS_SCALE_DEFAULT
+        ),
+        cursorAlwaysUsePointer:
+          savedState.artboard.cursorAlwaysUsePointer === true,
       }
       artboardRef.current = savedArtboard
       // Hydration is a one-shot synchronization from disk into React state —
@@ -3642,10 +3785,19 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const previousBackground = artboardRef.current.background
       const previousGrain = artboardRef.current.grain
       const previousPadding = artboardRef.current.padding
+      const previousCursorCustomRenderingEnabled =
+        artboardRef.current.cursorCustomRenderingEnabled
+      const previousCursorSetId = artboardRef.current.cursorSetId
       const previousCursorSize = artboardRef.current.cursorSizeMultiplier
       const previousCursorMotionBlur = artboardRef.current.cursorMotionBlur
       const previousCursorMotionBlurBackend =
         artboardRef.current.cursorMotionBlurBackend
+      const previousCursorSmoothingMode =
+        artboardRef.current.cursorSmoothingMode
+      const previousCursorClickPressScale =
+        artboardRef.current.cursorClickPressScale
+      const previousCursorAlwaysUsePointer =
+        artboardRef.current.cursorAlwaysUsePointer
       const nextArtboard: EditorArtboard = useAuto
         ? (() => {
             const auto = resolveAutoArtboard(sourceVideoDimsRef.current)
@@ -3656,9 +3808,15 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               background: previousBackground,
               grain: previousGrain,
               padding: previousPadding,
+              cursorCustomRenderingEnabled:
+                previousCursorCustomRenderingEnabled,
+              cursorSetId: previousCursorSetId,
               cursorSizeMultiplier: previousCursorSize,
               cursorMotionBlur: previousCursorMotionBlur,
               cursorMotionBlurBackend: previousCursorMotionBlurBackend,
+              cursorSmoothingMode: previousCursorSmoothingMode,
+              cursorClickPressScale: previousCursorClickPressScale,
+              cursorAlwaysUsePointer: previousCursorAlwaysUsePointer,
             }
           })()
         : (() => {
@@ -3670,9 +3828,15 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               background: previousBackground,
               grain: previousGrain,
               padding: previousPadding,
+              cursorCustomRenderingEnabled:
+                previousCursorCustomRenderingEnabled,
+              cursorSetId: previousCursorSetId,
               cursorSizeMultiplier: previousCursorSize,
               cursorMotionBlur: previousCursorMotionBlur,
               cursorMotionBlurBackend: previousCursorMotionBlurBackend,
+              cursorSmoothingMode: previousCursorSmoothingMode,
+              cursorClickPressScale: previousCursorClickPressScale,
+              cursorAlwaysUsePointer: previousCursorAlwaysUsePointer,
             }
           })()
       artboardRef.current = nextArtboard

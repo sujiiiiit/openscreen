@@ -9,12 +9,18 @@ import {
 } from "@/components/editor/canvas/video-scene-draw"
 import {
   buildCursorTrack,
+  clampCursorClickPressScale,
   clampCursorMotionBlur,
   clampCursorMotionBlurBackend,
+  clampCursorSetId,
+  clampCursorSmoothingMode,
   clampCursorSize,
+  CURSOR_CLICK_PRESS_SCALE_DEFAULT,
   CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   CURSOR_MOTION_BLUR_DEFAULT,
-  CURSOR_SET,
+  CURSOR_POINTER_CURSOR_ID,
+  CURSOR_SMOOTHING_MODE_DEFAULT,
+  CURSOR_SET_DEFAULT,
   CURSOR_SIZE_DEFAULT,
   projectFolderFromObjectUrl,
   type CursorVideoGeometry,
@@ -25,6 +31,7 @@ import {
   type SpriteMotionBlurRenderer,
 } from "@/lib/motion-blur/sprite-motion-blur"
 import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
+import type { CursorSetId } from "@/lib/cursors/cursor-manifest"
 import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
 import { getWallpaperFullUrl, isWallpaperId } from "@/lib/wallpapers"
 
@@ -58,11 +65,19 @@ export interface ExportCursorHandle {
   track: SmoothedCursorTrack
   /** Screen video geometry the placement maps through. */
   video: CursorVideoGeometry
+  /** Stable artboard-sized frame used for cursor render scale. */
+  referenceSize: { width: number; height: number }
   /** Which video id the cursor follows — used to find the active screen clip. */
   screenVideoId: string
-  /** User-chosen render-size multiplier (artboard-level); 1 = recorded-accurate
-   * minimum. Threaded into `placeCursor` so the export matches the preview. */
+  /** User-chosen render-size multiplier (artboard-level); 1 = reference-frame
+   * base size. Threaded into `placeCursor` so export matches preview. */
   sizeMultiplier: number
+  /** User-chosen clicked scale; 1 means no press shrink. */
+  clickPressScale: number
+  /** Force every captured cursor shape to the themed pointer asset. */
+  alwaysUsePointer: boolean
+  /** Bundled cursor style used to resolve each captured cursor shape. */
+  cursorSetId: CursorSetId
   /** Cursor motion-blur intensity (0..1); fed to `computeCursorBlur` per frame
    * so the exported smear matches the preview. */
   motionBlur: number
@@ -255,6 +270,7 @@ async function buildCursorOverlay(opts: {
   contentLayer: Konva.Layer
 }): Promise<ExportCursorHandle | null> {
   const { state, assetUrlsByVideoId, contentLayer } = opts
+  if (state.artboard.cursorCustomRenderingEnabled === false) return null
 
   const screenVideo = state.videos.find(
     (video) => video.role === "screen" && (video.onCanvas ?? true)
@@ -270,15 +286,24 @@ async function buildCursorOverlay(opts: {
   // already uses; it reads the recording's input sidecar and returns null when
   // the recording captured no cursor.
   const data = await window.api?.projects.getCursorData(folder)
-  const track = buildCursorTrack(data ?? null)
+  const smoothingMode = clampCursorSmoothingMode(
+    state.artboard.cursorSmoothingMode ?? CURSOR_SMOOTHING_MODE_DEFAULT
+  )
+  const track = buildCursorTrack(data ?? null, { smoothingMode })
   if (!track) return null
 
-  // Pre-decode every distinct cursor shape the track will show. Bounded and
-  // tiny (a handful of SVGs), so awaiting them all up front is cheap and keeps
-  // the per-frame loop allocation-free.
+  // Pre-decode every distinct cursor shape the track will show. When the
+  // pointer override is enabled, only the pointer asset is needed. Bounded and
+  // tiny either way, so awaiting them up front keeps the per-frame loop
+  // allocation-free.
+  const alwaysUsePointer = state.artboard.cursorAlwaysUsePointer === true
+  const cursorSetId = clampCursorSetId(state.artboard.cursorSetId)
   const urls = new Set<string>()
-  for (const cursorId of track.cursorIds) {
-    const asset = resolveCursorAsset(cursorId, CURSOR_SET)
+  const cursorIds = alwaysUsePointer
+    ? [CURSOR_POINTER_CURSOR_ID]
+    : track.cursorIds
+  for (const cursorId of cursorIds) {
+    const asset = resolveCursorAsset(cursorId, cursorSetId, CURSOR_SET_DEFAULT)
     if (asset) urls.add(asset.url)
   }
   const images = new Map<string, HTMLImageElement>()
@@ -317,6 +342,9 @@ async function buildCursorOverlay(opts: {
   const sizeMultiplier = clampCursorSize(
     state.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT
   )
+  const clickPressScale = clampCursorClickPressScale(
+    state.artboard.cursorClickPressScale ?? CURSOR_CLICK_PRESS_SCALE_DEFAULT
+  )
   const motionBlur = clampCursorMotionBlur(
     state.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT
   )
@@ -332,8 +360,15 @@ async function buildCursorOverlay(opts: {
     node,
     track,
     video,
+    referenceSize: {
+      width: state.artboard.width,
+      height: state.artboard.height,
+    },
     screenVideoId: screenVideo.id,
     sizeMultiplier,
+    clickPressScale,
+    alwaysUsePointer,
+    cursorSetId,
     motionBlur,
     motionBlurBackend,
     renderer,

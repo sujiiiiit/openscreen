@@ -1,19 +1,35 @@
 import { describe, expect, it } from "vitest"
 
-import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
+import {
+  sampleCursorAtTime,
+  type SmoothedCursorTrack,
+} from "@/lib/cursors/cursor-track"
+import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
 
-import { computeCursorBlur, type CursorVideoGeometry } from "../cursor-scene"
+import {
+  buildCursorTrack,
+  computeCursorBlur,
+  placeCursor,
+  type CursorVideoGeometry,
+} from "../cursor-scene"
 
 // A synthetic track + 1:1 video geometry so artboard coords equal sample coords
 // (display points map straight through with no cover-crop and unit scale). This
 // isolates the velocity → motion-blur derivation from the placement math.
-function track(xs: number[], ys: number[], dtMs = 100): SmoothedCursorTrack {
+function track(
+  xs: number[],
+  ys: number[],
+  dtMs = 100,
+  clicks: SmoothedCursorTrack["clicks"] = [],
+  cursorId = "pointer"
+): SmoothedCursorTrack {
   const n = xs.length
   return {
     t: Float64Array.from(xs.map((_, i) => i * dtMs)),
     x: Float64Array.from(xs),
     y: Float64Array.from(ys),
-    cursorIds: Array.from({ length: n }, () => "pointer"),
+    cursorIds: Array.from({ length: n }, () => cursorId),
+    clicks,
     displayWidth: 200,
     displayHeight: 100,
     durationMs: (n - 1) * dtMs,
@@ -36,17 +52,23 @@ const movingRight = track([0, 100, 200], [50, 50, 50]) // 1000 px/s along +x
 
 describe("computeCursorBlur", () => {
   it("returns null when intensity is 0 (off)", () => {
-    const blur = computeCursorBlur(movingRight, geometry(), 0.1, { intensity: 0 })
+    const blur = computeCursorBlur(movingRight, geometry(), 0.1, {
+      intensity: 0,
+    })
     expect(blur).toBeNull()
   })
 
   it("returns null when the cursor is still", () => {
     const still = track([100, 100, 100], [50, 50, 50])
-    expect(computeCursorBlur(still, geometry(), 0.1, { intensity: 1 })).toBeNull()
+    expect(
+      computeCursorBlur(still, geometry(), 0.1, { intensity: 1 })
+    ).toBeNull()
   })
 
   it("blurs along the direction of travel", () => {
-    const blur = computeCursorBlur(movingRight, geometry(), 0.1, { intensity: 1 })
+    const blur = computeCursorBlur(movingRight, geometry(), 0.1, {
+      intensity: 1,
+    })
     expect(blur).not.toBeNull()
     expect(blur!.velocityX).toBeGreaterThan(0)
     expect(Math.abs(blur!.velocityY)).toBeLessThan(1e-6)
@@ -59,8 +81,12 @@ describe("computeCursorBlur", () => {
   })
 
   it("scales smear length linearly with intensity", () => {
-    const full = computeCursorBlur(movingRight, geometry(), 0.1, { intensity: 1 })!
-    const half = computeCursorBlur(movingRight, geometry(), 0.1, { intensity: 0.5 })!
+    const full = computeCursorBlur(movingRight, geometry(), 0.1, {
+      intensity: 1,
+    })!
+    const half = computeCursorBlur(movingRight, geometry(), 0.1, {
+      intensity: 0.5,
+    })!
     expect(half.velocityX).toBeCloseTo(full.velocityX / 2, 4)
   })
 
@@ -73,9 +99,214 @@ describe("computeCursorBlur", () => {
   it("is rotation-invariant in the cursor's local frame", () => {
     // A screen-horizontal move must blur horizontally in local space whether or
     // not the video is rotated (the filter runs pre-rotation).
-    const flat = computeCursorBlur(movingRight, geometry(0), 0.1, { intensity: 1 })!
-    const rot = computeCursorBlur(movingRight, geometry(90), 0.1, { intensity: 1 })!
+    const flat = computeCursorBlur(movingRight, geometry(0), 0.1, {
+      intensity: 1,
+    })!
+    const rot = computeCursorBlur(movingRight, geometry(90), 0.1, {
+      intensity: 1,
+    })!
     expect(rot.velocityX).toBeCloseTo(flat.velocityX, 4)
     expect(Math.abs(rot.velocityY)).toBeLessThan(1e-6)
+  })
+})
+
+describe("buildCursorTrack smoothing modes", () => {
+  const data = {
+    processTimeStartMs: 0,
+    displayWidth: 200,
+    displayHeight: 100,
+    moves: [
+      { processTimeMs: 0, x: 0, y: 50, cursorId: "pointer" },
+      { processTimeMs: 100, x: 100, y: 50, cursorId: "pointer" },
+      { processTimeMs: 200, x: 0, y: 50, cursorId: "pointer" },
+    ],
+    clicks: [],
+  }
+
+  it("keeps Rapid smoothed while Slow smooths more heavily", () => {
+    const rapid = buildCursorTrack(data, { smoothingMode: "rapid" })!
+    const slow = buildCursorTrack(data, { smoothingMode: "slow" })!
+
+    const rapidPeak = sampleCursorAtTime(rapid, 100)!.x
+    const slowPeak = sampleCursorAtTime(slow, 100)!.x
+
+    expect(rapidPeak).toBeLessThan(100)
+    expect(rapidPeak).toBeGreaterThan(slowPeak)
+  })
+})
+
+describe("cursor click scale", () => {
+  it("builds click press events from mouseclick sidecar samples", () => {
+    const fromSidecar = buildCursorTrack(
+      {
+        processTimeStartMs: 1000,
+        displayWidth: 200,
+        displayHeight: 100,
+        moves: [
+          { processTimeMs: 1000, x: 100, y: 50, cursorId: "pointer" },
+          { processTimeMs: 1400, x: 100, y: 50, cursorId: "pointer" },
+        ],
+        clicks: [
+          {
+            processTimeMs: 1060,
+            x: 100,
+            y: 50,
+            cursorId: "pointer",
+            type: "mouseDown",
+            button: "left",
+          },
+          {
+            processTimeMs: 1160,
+            x: 100,
+            y: 50,
+            cursorId: "pointer",
+            type: "mouseUp",
+            button: "left",
+          },
+        ],
+      },
+      { smoothingMode: "rapid" }
+    )!
+
+    expect(fromSidecar.clicks).toEqual([
+      { t: 60, type: "down" },
+      { t: 160, type: "up" },
+    ])
+    expect(placeCursor(fromSidecar, geometry(), 0.09)!.clickScale).toBeLessThan(
+      1
+    )
+  })
+
+  const clicked = track(
+    [100, 100, 100, 100, 100, 100],
+    [50, 50, 50, 50, 50, 50],
+    100,
+    [
+      { t: 100, type: "down" },
+      { t: 150, type: "up" },
+    ]
+  )
+
+  it("eases into press and rebounds after release", () => {
+    expect(placeCursor(clicked, geometry(), 0.05)!.clickScale).toBe(1)
+    expect(placeCursor(clicked, geometry(), 0.12)!.clickScale).toBeLessThan(1)
+    expect(placeCursor(clicked, geometry(), 0.26)!.clickScale).toBeGreaterThan(
+      1
+    )
+    expect(placeCursor(clicked, geometry(), 0.4)!.clickScale).toBeCloseTo(1, 4)
+  })
+
+  it("keeps the hotspot position pinned while scaling", () => {
+    const before = placeCursor(clicked, geometry(), 0.05)!
+    const pressed = placeCursor(clicked, geometry(), 0.12)!
+
+    expect(pressed.width).toBeLessThan(before.width)
+    expect(pressed.x).toBeCloseTo(before.x, 6)
+    expect(pressed.y).toBeCloseTo(before.y, 6)
+  })
+
+  it("uses the configured pressed scale and lets 100% disable shrink", () => {
+    const held = track([100, 100, 100, 100, 100], [50, 50, 50, 50, 50], 100, [
+      { t: 100, type: "down" },
+    ])
+
+    expect(
+      placeCursor(held, geometry(), 0.3, { clickPressScale: 0.7 })!.clickScale
+    ).toBeCloseTo(0.7, 4)
+    expect(
+      placeCursor(held, geometry(), 0.3, { clickPressScale: 1 })!.clickScale
+    ).toBe(1)
+  })
+})
+
+describe("placeCursor pointer override", () => {
+  it("can force non-pointer cursor shapes to render as the themed pointer", () => {
+    const textCursor = track([100, 100], [50, 50], 100, [], "iBeam")
+
+    const normal = placeCursor(textCursor, geometry(), 0)!
+    const forced = placeCursor(textCursor, geometry(), 0, {
+      alwaysUsePointer: true,
+    })!
+
+    expect(normal.url).toContain("ibeamstroke")
+    expect(forced.url).toContain("pointer")
+    expect(forced.x).toBeCloseTo(normal.x, 6)
+    expect(forced.y).toBeCloseTo(normal.y, 6)
+  })
+
+  it("uses the selected cursor set's pointer asset", () => {
+    const textCursor = track([100, 100], [50, 50], 100, [], "iBeam")
+
+    const macos = placeCursor(textCursor, geometry(), 0, {
+      alwaysUsePointer: true,
+      cursorSet: "macos",
+    })!
+    const forced = placeCursor(textCursor, geometry(), 0, {
+      alwaysUsePointer: true,
+      cursorSet: "custom-2",
+    })!
+    const asset = resolveCursorAsset("pointer", "custom-2", "macos")!
+
+    expect(forced.url).toContain("/assets/cursors/sets/custom-2/pointer")
+    expect(asset.opticalScale).toBeLessThan(1)
+    expect(forced.height).toBeCloseTo(macos.height * asset.opticalScale, 4)
+    expect(forced.x).toBeCloseTo(macos.x, 6)
+    expect(forced.y).toBeCloseTo(macos.y, 6)
+  })
+})
+
+describe("placeCursor cursor set", () => {
+  it("resolves cursor assets from the selected set", () => {
+    const placement = placeCursor(movingRight, geometry(), 0.1, {
+      cursorSet: "halloween",
+    })!
+
+    expect(placement.url).toContain("/assets/cursors/sets/halloween/pointer")
+  })
+
+  it("normalizes selected styles to the macOS optical size", () => {
+    const macos = placeCursor(movingRight, geometry(), 0.1, {
+      cursorSet: "macos",
+    })!
+    const custom = placeCursor(movingRight, geometry(), 0.1, {
+      cursorSet: "custom-1",
+    })!
+    const asset = resolveCursorAsset("pointer", "custom-1", "macos")!
+
+    expect(asset.opticalScale).toBeLessThan(1)
+    expect(custom.height).toBeCloseTo(macos.height * asset.opticalScale, 4)
+    expect(custom.x).toBeCloseTo(macos.x, 6)
+    expect(custom.y).toBeCloseTo(macos.y, 6)
+    expect(custom.offsetX).toBeCloseTo(asset.hotspot[0] * custom.width, 6)
+    expect(custom.offsetY).toBeCloseTo(asset.hotspot[1] * custom.height, 6)
+  })
+})
+
+describe("placeCursor size", () => {
+  const referenceSize = { width: 200, height: 100 }
+
+  it("keeps render size independent from screen video resize", () => {
+    const full = placeCursor(movingRight, geometry(), 0.1, { referenceSize })!
+    const resized = placeCursor(
+      movingRight,
+      { ...geometry(), width: 100, height: 50 },
+      0.1,
+      { referenceSize }
+    )!
+
+    expect(resized.width).toBeCloseTo(full.width, 6)
+    expect(resized.height).toBeCloseTo(full.height, 6)
+    // Position still follows the resized video's content box.
+    expect(resized.x).toBeCloseTo(full.x / 2, 6)
+    expect(resized.y).toBeCloseTo(full.y / 2, 6)
+  })
+
+  it("preserves the fitted-video baseline size for the same cursor setting", () => {
+    const placement = placeCursor(movingRight, geometry(), 0.1, {
+      sizeMultiplier: 2.7,
+      referenceSize,
+    })!
+
+    expect(placement.height).toBeCloseTo(52 * 2.7, 6)
   })
 })

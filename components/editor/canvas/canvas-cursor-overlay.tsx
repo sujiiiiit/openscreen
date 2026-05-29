@@ -5,6 +5,7 @@ import { Image as KonvaImage } from "react-konva"
 import type Konva from "konva"
 
 import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
+import type { CursorTrackData } from "@/types/api"
 import type { CanvasVideoItem } from "@/types/editor-canvas"
 
 import {
@@ -51,7 +52,12 @@ export function CanvasCursorOverlay() {
   const { subscribeTimelineTicks, subscribeHoverTime } =
     useEditorCanvasTimelineActions()
 
+  const cursorCustomRenderingEnabled = artboard.cursorCustomRenderingEnabled
+  const cursorSetId = artboard.cursorSetId
   const cursorSizeMultiplier = artboard.cursorSizeMultiplier
+  const cursorSmoothingMode = artboard.cursorSmoothingMode
+  const cursorClickPressScale = artboard.cursorClickPressScale
+  const cursorAlwaysUsePointer = artboard.cursorAlwaysUsePointer
   const cursorMotionBlur = artboard.cursorMotionBlur
   const cursorMotionBlurBackend = artboard.cursorMotionBlurBackend
 
@@ -68,10 +74,20 @@ export function CanvasCursorOverlay() {
   // Latest `place` for the SVG-load redraw closure (avoids `place` referencing
   // itself). Kept current via an effect below.
   const placeRef = useRef<(seconds: number) => void>(() => {})
+  const dataRef = useRef<CursorTrackData | null>(null)
   const trackRef = useRef<SmoothedCursorTrack | null>(null)
   const videoRef = useRef<CanvasVideoItem | null>(screenVideo)
   const clipRef = useRef(screenClip)
+  const referenceSizeRef = useRef({
+    width: artboard.width,
+    height: artboard.height,
+  })
+  const customRenderingEnabledRef = useRef(cursorCustomRenderingEnabled)
+  const cursorSetRef = useRef(cursorSetId)
   const sizeRef = useRef(cursorSizeMultiplier)
+  const smoothingModeRef = useRef(cursorSmoothingMode)
+  const clickPressScaleRef = useRef(cursorClickPressScale)
+  const alwaysUsePointerRef = useRef(cursorAlwaysUsePointer)
   const motionBlurRef = useRef(cursorMotionBlur)
   const currentUrlRef = useRef<string | null>(null)
   // Last committed playhead time the cursor was placed at. Lets the ruler
@@ -86,14 +102,23 @@ export function CanvasCursorOverlay() {
   useEffect(() => {
     videoRef.current = screenVideo
     clipRef.current = screenClip
+    referenceSizeRef.current = {
+      width: artboard.width,
+      height: artboard.height,
+    }
+    customRenderingEnabledRef.current = cursorCustomRenderingEnabled
+    cursorSetRef.current = cursorSetId
     sizeRef.current = cursorSizeMultiplier
+    smoothingModeRef.current = cursorSmoothingMode
+    clickPressScaleRef.current = cursorClickPressScale
+    alwaysUsePointerRef.current = cursorAlwaysUsePointer
     motionBlurRef.current = cursorMotionBlur
   })
 
   // Map a display-relative point (logical points, top-left origin) to artboard
-  // coordinates, through the screen video's cover-crop and transform. Returns
-  // the artboard point of the cursor hotspot plus the px-per-display-point
-  // scale, or null when the point is cropped off-screen.
+  // coordinates, through the screen video's cover-crop and transform. The
+  // cursor sprite size uses `referenceSizeRef`, so video-node resizing changes
+  // the path but not the visible cursor scale.
   const place = useCallback((timelineSeconds: number) => {
     const node = imageRef.current
     const video = videoRef.current
@@ -101,6 +126,18 @@ export function CanvasCursorOverlay() {
     if (!node || !video) return
 
     const layer = node.getLayer()
+    const hideCursorNodes = () => {
+      let changed = false
+      if (node.visible()) {
+        node.visible(false)
+        changed = true
+      }
+      if (changed) layer?.batchDraw()
+    }
+    if (!customRenderingEnabledRef.current) {
+      hideCursorNodes()
+      return
+    }
 
     // No track means no usable cursor data (missing recording file, or data
     // not yet loaded). Hide rather than leaving the node drawing its last
@@ -108,10 +145,7 @@ export function CanvasCursorOverlay() {
     // to resolve strands a static, mispositioned cursor on a blank canvas.
     const track = trackRef.current
     if (!track) {
-      if (node.visible()) {
-        node.visible(false)
-        layer?.batchDraw()
-      }
+      hideCursorNodes()
       return
     }
 
@@ -121,12 +155,13 @@ export function CanvasCursorOverlay() {
       : timelineSeconds
     const placement = placeCursor(track, video, sourceSeconds, {
       sizeMultiplier: sizeRef.current,
+      clickPressScale: clickPressScaleRef.current,
+      cursorSet: cursorSetRef.current,
+      alwaysUsePointer: alwaysUsePointerRef.current,
+      referenceSize: referenceSizeRef.current,
     })
     if (!placement) {
-      if (node.visible()) {
-        node.visible(false)
-        layer?.batchDraw()
-      }
+      hideCursorNodes()
       return
     }
 
@@ -150,6 +185,10 @@ export function CanvasCursorOverlay() {
       ? computeCursorBlur(track, video, sourceSeconds, {
           intensity: motionBlurRef.current,
           sizeMultiplier: sizeRef.current,
+          clickPressScale: clickPressScaleRef.current,
+          cursorSet: cursorSetRef.current,
+          alwaysUsePointer: alwaysUsePointerRef.current,
+          referenceSize: referenceSizeRef.current,
         })
       : null
     const renderer = rendererRef.current
@@ -192,6 +231,10 @@ export function CanvasCursorOverlay() {
   // returns a padded canvas injected into the single Konva.Image node, so the
   // frame loop never pays for Konva node.cache()/filters.
   useEffect(() => {
+    if (!cursorCustomRenderingEnabled) {
+      rendererRef.current = null
+      return
+    }
     const renderer =
       createSpriteMotionBlurRendererForBackend(cursorMotionBlurBackend) ??
       createSpriteMotionBlurRendererForBackend("cpu")
@@ -201,12 +244,17 @@ export function CanvasCursorOverlay() {
       renderer?.destroy()
       rendererRef.current = null
     }
-  }, [cursorMotionBlurBackend])
+  }, [cursorCustomRenderingEnabled, cursorMotionBlurBackend])
 
-  // Load + pre-spring the cursor track whenever the screen recording changes.
+  // Load + precompute the cursor track whenever the screen recording changes.
   useEffect(() => {
+    dataRef.current = null
     trackRef.current = null
     currentUrlRef.current = null
+    if (!cursorCustomRenderingEnabled) {
+      place(lastCommittedTimeRef.current)
+      return
+    }
     const objectUrl = screenVideo?.objectUrl
     if (!objectUrl || screenVideo?.source.kind !== "recording") return
     const folder = projectFolderFromObjectUrl(objectUrl)
@@ -215,7 +263,10 @@ export function CanvasCursorOverlay() {
     let cancelled = false
     void window.api?.projects.getCursorData(folder).then((data) => {
       if (cancelled) return
-      const track = buildCursorTrack(data)
+      dataRef.current = data
+      const track = buildCursorTrack(data, {
+        smoothingMode: smoothingModeRef.current,
+      })
       if (!track) return
       trackRef.current = track
       place(timelineTime)
@@ -224,7 +275,23 @@ export function CanvasCursorOverlay() {
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [screenVideo?.objectUrl, screenVideo?.source.kind, place])
+  }, [
+    cursorCustomRenderingEnabled,
+    screenVideo?.objectUrl,
+    screenVideo?.source.kind,
+    place,
+  ])
+
+  // Rebuild from cached cursor data when the smoothing preset changes. The
+  // expensive part is still off the frame loop, and there is no extra IPC read.
+  useEffect(() => {
+    const data = dataRef.current
+    if (!data) return
+    trackRef.current = buildCursorTrack(data, {
+      smoothingMode: cursorSmoothingMode,
+    })
+    place(lastCommittedTimeRef.current)
+  }, [cursorSmoothingMode, place])
 
   // Imperative per-tick placement (no React state on the hot path).
   useEffect(() => {
@@ -249,17 +316,24 @@ export function CanvasCursorOverlay() {
     })
   }, [subscribeHoverTime, place])
 
-  // Re-place when paused and the geometry, committed playhead, or cursor size
-  // changes (so dragging the size slider updates the preview immediately).
+  // Re-place when paused and the geometry, committed playhead, or cursor
+  // appearance changes (so controls update the preview immediately).
   useEffect(() => {
     lastCommittedTimeRef.current = timelineTime
     place(timelineTime)
   }, [
     place,
     timelineTime,
+    cursorCustomRenderingEnabled,
+    cursorSetId,
     cursorSizeMultiplier,
+    cursorSmoothingMode,
+    cursorClickPressScale,
+    cursorAlwaysUsePointer,
     cursorMotionBlur,
     cursorMotionBlurBackend,
+    artboard.width,
+    artboard.height,
     screenVideo?.x,
     screenVideo?.y,
     screenVideo?.width,
@@ -267,7 +341,7 @@ export function CanvasCursorOverlay() {
     screenVideo?.rotation,
   ])
 
-  if (!screenVideo) return null
+  if (!screenVideo || !cursorCustomRenderingEnabled) return null
 
   return (
     // `image` is driven imperatively in `place()` (sharp SVG or blurred canvas),
