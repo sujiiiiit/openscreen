@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button"
 import { Slider } from "@/components/ui/slider"
 import { cn } from "@/lib/utils"
 import {
+  CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   CURSOR_MOTION_BLUR_DEFAULT,
   CURSOR_SIZE_DEFAULT,
   CURSOR_SIZE_MAX,
@@ -14,6 +15,7 @@ import {
   useEditorCanvasArtboard,
   useEditorCanvasMedia,
 } from "@/components/editor/canvas/provider"
+import type { CursorMotionBlurBackend } from "@/types/editor-canvas"
 
 // The slider works in whole percent (100% = the recorded-accurate minimum) and
 // converts to the stored multiplier. Bounds come from cursor-scene so the
@@ -25,12 +27,19 @@ const SIZE_DEFAULT_PCT = Math.round(CURSOR_SIZE_DEFAULT * 100)
 // Motion blur is a single 0–100% intensity; the blur velocity is derived from
 // cursor speed (see cursor-scene.ts `computeCursorBlur`).
 const BLUR_DEFAULT_PCT = Math.round(CURSOR_MOTION_BLUR_DEFAULT * 100)
+const BACKENDS: Array<{ value: CursorMotionBlurBackend; label: string }> = [
+  { value: "gpu", label: "GPU" },
+  { value: "cpu", label: "CPU" },
+]
 
 export function CursorPanel() {
   const { artboard } = useEditorCanvasArtboard()
   const { videos } = useEditorCanvasMedia()
-  const { setCursorSizeMultiplier, setCursorMotionBlur } =
-    useEditorCanvasActions()
+  const {
+    setCursorSizeMultiplier,
+    setCursorMotionBlur,
+    setCursorMotionBlurBackend,
+  } = useEditorCanvasActions()
 
   // The recorded cursor is drawn over the screen recording, so the control is
   // meaningless without one — disable it rather than move a slider that does
@@ -48,11 +57,15 @@ export function CursorPanel() {
     setCursorSizeMultiplier(pct / 100)
   }
 
-  const blurPct = Math.round(Math.min(1, Math.max(0, artboard.cursorMotionBlur)) * 100)
+  const blurPct = Math.round(
+    Math.min(1, Math.max(0, artboard.cursorMotionBlur)) * 100
+  )
   const isBlurDefault = blurPct === BLUR_DEFAULT_PCT
   const applyBlurPct = (pct: number) => {
     setCursorMotionBlur(pct / 100)
   }
+  const backend = artboard.cursorMotionBlurBackend
+  const isBackendDefault = backend === CURSOR_MOTION_BLUR_BACKEND_DEFAULT
 
   return (
     <section className="flex w-full flex-col gap-4 pb-6">
@@ -131,6 +144,61 @@ export function CursorPanel() {
             size="sm"
             onClick={() => applyBlurPct(BLUR_DEFAULT_PCT)}
             disabled={!hasScreenVideo || isBlurDefault}
+          >
+            Reset
+          </Button>
+        </div>
+      </div>
+
+      <div className="w-full space-y-2">
+        <div className="flex items-center">
+          <h4
+            className={cn(
+              "text-xs font-semibold transition-opacity select-none",
+              !hasScreenVideo && "opacity-50"
+            )}
+          >
+            Blur renderer
+          </h4>
+        </div>
+        <div className="flex w-full items-center gap-3">
+          <div
+            className={cn(
+              "grid h-8 flex-1 grid-cols-2 rounded-md border border-border bg-muted/40 p-0.5",
+              !hasScreenVideo && "opacity-50"
+            )}
+            role="group"
+            aria-label="Cursor motion blur renderer"
+          >
+            {BACKENDS.map((option) => {
+              const selected = backend === option.value
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={cn(
+                    "rounded-[5px] px-2 text-xs font-medium transition-colors outline-none select-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                    selected
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                  aria-pressed={selected}
+                  disabled={!hasScreenVideo}
+                  onClick={() => setCursorMotionBlurBackend(option.value)}
+                >
+                  {option.label}
+                </button>
+              )
+            })}
+          </div>
+          <Button
+            type="button"
+            variant="link"
+            size="sm"
+            onClick={() =>
+              setCursorMotionBlurBackend(CURSOR_MOTION_BLUR_BACKEND_DEFAULT)
+            }
+            disabled={!hasScreenVideo || isBackendDefault}
           >
             Reset
           </Button>

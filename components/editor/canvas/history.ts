@@ -27,6 +27,7 @@ export type HistoryCommitTag =
   | "grain"
   | "cursor-size"
   | "cursor-motion-blur"
+  | "cursor-motion-blur-backend"
   | "clip-move"
   | "clip-resize"
   | "unknown"

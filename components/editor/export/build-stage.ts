@@ -10,7 +10,9 @@ import {
 import {
   buildCursorTrack,
   clampCursorMotionBlur,
+  clampCursorMotionBlurBackend,
   clampCursorSize,
+  CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   CURSOR_MOTION_BLUR_DEFAULT,
   CURSOR_SET,
   CURSOR_SIZE_DEFAULT,
@@ -19,15 +21,12 @@ import {
 } from "@/components/editor/canvas/cursor-scene"
 import { getVideoCoverCrop } from "@/components/editor/canvas/video-cover-crop"
 import {
-  createSpriteMotionBlurRenderer,
+  createSpriteMotionBlurRendererForBackend,
   type SpriteMotionBlurRenderer,
 } from "@/lib/motion-blur/sprite-motion-blur"
 import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
 import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
-import {
-  getWallpaperFullUrl,
-  isWallpaperId,
-} from "@/lib/wallpapers"
+import { getWallpaperFullUrl, isWallpaperId } from "@/lib/wallpapers"
 
 export interface ExportStageHandles {
   stage: Konva.Stage
@@ -67,7 +66,9 @@ export interface ExportCursorHandle {
   /** Cursor motion-blur intensity (0..1); fed to `computeCursorBlur` per frame
    * so the exported smear matches the preview. */
   motionBlur: number
-  /** GPU (CPU-fallback) sprite-blur renderer, reused across frames. */
+  /** Requested cursor-blur backend, defaulting to GPU for preview parity. */
+  motionBlurBackend: "gpu" | "cpu"
+  /** Sprite-blur renderer, reused across frames. GPU falls back to CPU if unavailable. */
   renderer: SpriteMotionBlurRenderer
   /** Decoded cursor SVGs keyed by asset URL (the shape changes across frames). */
   images: Map<string, HTMLImageElement>
@@ -92,7 +93,7 @@ export interface BuildStageOptions {
  * once after construction, then redraw the content layer per output frame.
  */
 export async function buildExportStage(
-  options: BuildStageOptions,
+  options: BuildStageOptions
 ): Promise<ExportStageHandles> {
   const { state, assetUrlsByVideoId, outputSize, container } = options
   const { artboard } = state
@@ -132,7 +133,7 @@ export async function buildExportStage(
         listening: false,
         perfectDrawEnabled: false,
         shadowForStrokeEnabled: false,
-      }),
+      })
     )
   } else if (
     artboard.background?.type === "wallpaper" &&
@@ -143,7 +144,7 @@ export async function buildExportStage(
       const bitmap = await loadImageBitmap(url)
       const crop = getVideoCoverCrop(
         { width: bitmap.width, height: bitmap.height },
-        { width: artboard.width, height: artboard.height },
+        { width: artboard.width, height: artboard.height }
       )
       backgroundLayer.add(
         new Konva.Image({
@@ -160,7 +161,7 @@ export async function buildExportStage(
           perfectDrawEnabled: false,
           shadowForStrokeEnabled: false,
           transformsEnabled: "position",
-        }),
+        })
       )
     } catch {
       // Wallpaper missing — drop the background rather than failing the
@@ -188,7 +189,7 @@ export async function buildExportStage(
           perfectDrawEnabled: false,
           shadowForStrokeEnabled: false,
           transformsEnabled: "position",
-        }),
+        })
       )
     }
   }
@@ -256,7 +257,7 @@ async function buildCursorOverlay(opts: {
   const { state, assetUrlsByVideoId, contentLayer } = opts
 
   const screenVideo = state.videos.find(
-    (video) => video.role === "screen" && (video.onCanvas ?? true),
+    (video) => video.role === "screen" && (video.onCanvas ?? true)
   )
   if (!screenVideo) return null
 
@@ -290,7 +291,7 @@ async function buildCursorOverlay(opts: {
         // the render loop hides the node for those frames rather than failing
         // the whole export.
       }
-    }),
+    })
   )
   if (images.size === 0) return null
 
@@ -314,11 +315,18 @@ async function buildCursorOverlay(opts: {
   }
 
   const sizeMultiplier = clampCursorSize(
-    state.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT,
+    state.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT
   )
   const motionBlur = clampCursorMotionBlur(
-    state.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT,
+    state.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT
   )
+  const motionBlurBackend = clampCursorMotionBlurBackend(
+    state.artboard.cursorMotionBlurBackend ?? CURSOR_MOTION_BLUR_BACKEND_DEFAULT
+  )
+  const renderer =
+    createSpriteMotionBlurRendererForBackend(motionBlurBackend) ??
+    createSpriteMotionBlurRendererForBackend("cpu")
+  if (!renderer) return null
 
   return {
     node,
@@ -327,7 +335,8 @@ async function buildCursorOverlay(opts: {
     screenVideoId: screenVideo.id,
     sizeMultiplier,
     motionBlur,
-    renderer: createSpriteMotionBlurRenderer(),
+    motionBlurBackend,
+    renderer,
     images,
   }
 }
@@ -342,14 +351,14 @@ async function loadHtmlImage(url: string): Promise<HTMLImageElement> {
 
 function buildVideoNode(
   video: ProjectVideo,
-  placeholder: HTMLCanvasElement,
+  placeholder: HTMLCanvasElement
 ): Konva.Image {
   const squircleParams = computeSquircleParams(video)
   const borderParams = computeBorderParams(video)
   const shadowParams = computeShadowParams(video)
   const cover = getVideoCoverCrop(
     { width: video.intrinsicWidth, height: video.intrinsicHeight },
-    { width: video.width, height: video.height },
+    { width: video.width, height: video.height }
   )
 
   const node = new Konva.Image({
@@ -381,12 +390,10 @@ function buildVideoNode(
       img,
       w,
       h,
-      cw && ch
-        ? { x: ki.cropX(), y: ki.cropY(), width: cw, height: ch }
-        : null,
+      cw && ch ? { x: ki.cropX(), y: ki.cropY(), width: cw, height: ch } : null,
       squircleParams,
       borderParams,
-      shadowParams,
+      shadowParams
     )
   })
   return node

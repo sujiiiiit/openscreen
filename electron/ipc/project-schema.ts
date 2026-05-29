@@ -37,6 +37,9 @@ export interface ProjectArtboard {
   // Cursor motion-blur intensity, 0..1 (0 = off). Optional + defaulted by
   // `parseArtboard`, same back-compat rationale as cursorSizeMultiplier.
   cursorMotionBlur?: number
+  // Cursor motion-blur renderer backend. Optional + defaulted to 'gpu' for
+  // old project.json files.
+  cursorMotionBlurBackend?: 'gpu' | 'cpu'
 }
 
 export type ProjectVideoRole = 'screen' | 'camera' | 'media'
@@ -225,6 +228,11 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     return Math.min(1, Math.max(0, raw))
   })()
 
+  // Renderer backend is optional + defaulted. Unknown values fall back to GPU
+  // so old and hand-edited projects keep loading.
+  const cursorMotionBlurBackend =
+    value['cursorMotionBlurBackend'] === 'cpu' ? 'cpu' : 'gpu'
+
   return {
     presetId: presetId as ProjectArtboardPresetId,
     width: value['width'] as number,
@@ -234,6 +242,7 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     grain: value['grain'] as number,
     cursorSizeMultiplier,
     cursorMotionBlur,
+    cursorMotionBlurBackend,
   }
 }
 

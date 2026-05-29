@@ -33,10 +33,12 @@ export interface SpriteMotionBlurRenderer {
     source: CanvasImageSource,
     renderW: number,
     renderH: number,
-    options: MotionBlurOptions,
+    options: MotionBlurOptions
   ): SpriteMotionBlurResult
   destroy(): void
 }
+
+export type SpriteMotionBlurBackend = "auto" | "gpu" | "cpu"
 
 const VERTEX_SRC = /* glsl */ `#version 300 es
 in vec2 aPosition;
@@ -61,7 +63,7 @@ uniform int uKernel;
 uniform float uOffset;
 uniform vec2 uTexSize;   // px
 
-const int MAX_KERNEL = 64;
+const int MAX_KERNEL_SIZE = 2048;
 
 void main(void) {
   vec4 c = texture(uTex, vUv);
@@ -71,7 +73,7 @@ void main(void) {
   float off = -uOffset / length(uVelocity) - 0.5;
   int k = uKernel - 1;
 
-  for (int i = 0; i < MAX_KERNEL - 1; i++) {
+  for (int i = 0; i < MAX_KERNEL_SIZE - 1; i++) {
     if (i == k) break;
     vec2 bias = vel * (float(i) / float(k) + off);
     c += texture(uTex, vUv + bias);
@@ -86,7 +88,11 @@ function ensureSize(canvas: HTMLCanvasElement, w: number, h: number): void {
   if (canvas.height !== h) canvas.height = h
 }
 
-function compile(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {
+function compile(
+  gl: WebGL2RenderingContext,
+  type: number,
+  src: string
+): WebGLShader {
   const sh = gl.createShader(type)!
   gl.shaderSource(sh, src)
   gl.compileShader(sh)
@@ -98,7 +104,7 @@ function compile(gl: WebGL2RenderingContext, type: number, src: string): WebGLSh
   return sh
 }
 
-function tryCreateGpu(): SpriteMotionBlurRenderer | null {
+export function createGpuSpriteMotionBlurRenderer(): SpriteMotionBlurRenderer | null {
   let glCanvas: HTMLCanvasElement
   let gl: WebGL2RenderingContext | null
   try {
@@ -165,7 +171,7 @@ function tryCreateGpu(): SpriteMotionBlurRenderer | null {
     source: CanvasImageSource,
     renderW: number,
     renderH: number,
-    options: MotionBlurOptions,
+    options: MotionBlurOptions
   ): SpriteMotionBlurResult {
     const g = gl as WebGL2RenderingContext
     const padding = motionBlurPadding(options)
@@ -183,7 +189,11 @@ function tryCreateGpu(): SpriteMotionBlurRenderer | null {
     g.bindTexture(g.TEXTURE_2D, texture)
     g.texImage2D(g.TEXTURE_2D, 0, g.RGBA, g.RGBA, g.UNSIGNED_BYTE, scratch)
     g.uniform1i(uTex, 0)
-    g.uniform2f(uVelocity, options.velocityX, options.velocityY)
+    // The uploaded canvas is Y-flipped so the full-screen WebGL quad displays
+    // upright. Pixi/Konva/ImageData velocities are canvas-space (positive Y
+    // down), so invert Y at the shader boundary to keep the blur direction
+    // identical to the CPU filter and PixiJS MotionBlurFilter.
+    g.uniform2f(uVelocity, options.velocityX, -options.velocityY)
     g.uniform1i(uKernel, kernelFor(options))
     g.uniform1f(uOffset, options.offset)
     g.uniform2f(uTexSize, ew, eh)
@@ -205,7 +215,7 @@ function tryCreateGpu(): SpriteMotionBlurRenderer | null {
   return { backend: "gpu", render, destroy }
 }
 
-function createCpu(): SpriteMotionBlurRenderer {
+export function createCpuSpriteMotionBlurRenderer(): SpriteMotionBlurRenderer {
   const scratch = document.createElement("canvas")
   const scratchCtx = scratch.getContext("2d")!
   const out = document.createElement("canvas")
@@ -215,7 +225,7 @@ function createCpu(): SpriteMotionBlurRenderer {
     source: CanvasImageSource,
     renderW: number,
     renderH: number,
-    options: MotionBlurOptions,
+    options: MotionBlurOptions
   ): SpriteMotionBlurResult {
     const padding = motionBlurPadding(options)
     const ew = Math.max(1, Math.round(renderW + 2 * padding))
@@ -225,7 +235,10 @@ function createCpu(): SpriteMotionBlurRenderer {
     scratchCtx.clearRect(0, 0, ew, eh)
     scratchCtx.drawImage(source, padding, padding, renderW, renderH)
 
-    const blurred = applyMotionBlur(scratchCtx.getImageData(0, 0, ew, eh), options)
+    const blurred = applyMotionBlur(
+      scratchCtx.getImageData(0, 0, ew, eh),
+      options
+    )
     ensureSize(out, ew, eh)
     outCtx.putImageData(blurred, 0, 0)
     return { canvas: out, padding }
@@ -245,5 +258,21 @@ function kernelFor(options: MotionBlurOptions): number {
  * falling back to CPU when WebGL2 is unavailable (or context creation fails).
  */
 export function createSpriteMotionBlurRenderer(): SpriteMotionBlurRenderer {
-  return tryCreateGpu() ?? createCpu()
+  return (
+    createGpuSpriteMotionBlurRenderer() ?? createCpuSpriteMotionBlurRenderer()
+  )
+}
+
+/**
+ * Diagnostic factory for places like `/motion-blur-lab` where we need to compare
+ * a specific backend. Production cursor rendering should use
+ * `createSpriteMotionBlurRenderer()` so it keeps the GPU-primary/CPU-fallback
+ * behavior.
+ */
+export function createSpriteMotionBlurRendererForBackend(
+  backend: SpriteMotionBlurBackend
+): SpriteMotionBlurRenderer | null {
+  if (backend === "gpu") return createGpuSpriteMotionBlurRenderer()
+  if (backend === "cpu") return createCpuSpriteMotionBlurRenderer()
+  return createSpriteMotionBlurRenderer()
 }

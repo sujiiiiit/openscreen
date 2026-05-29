@@ -16,16 +16,23 @@ const ARTBOARD: EditorArtboard = {
   padding: 0,
   cursorSizeMultiplier: 1,
   cursorMotionBlur: 0,
+  cursorMotionBlurBackend: "gpu",
 }
 
-function canvasVideo(partial: Partial<CanvasVideoItem> & { id: string }): CanvasVideoItem {
+function canvasVideo(
+  partial: Partial<CanvasVideoItem> & { id: string }
+): CanvasVideoItem {
   const { id, ...rest } = partial
   return {
     id,
     fileName: `${id}.mov`,
     objectUrl: `file:///tmp/${id}.mov`,
     fileSize: 1234,
-    source: { kind: "imported", relativePath: `assets/videos/${id}/${id}.mov`, fileSize: 1234 },
+    source: {
+      kind: "imported",
+      relativePath: `assets/videos/${id}/${id}.mov`,
+      fileSize: 1234,
+    },
     intrinsicWidth: 1920,
     intrinsicHeight: 1080,
     durationMs: 5000,
@@ -79,7 +86,14 @@ describe("serializeProjectState with detached videos", () => {
     const onCanvas = [canvasVideo({ id: "screen" }), canvasVideo({ id: "cam" })]
     const detached = [canvasVideo({ id: "removed" })]
     const clips = [
-      { id: "screen:clip", videoId: "screen", start: 0, end: 5, sourceIn: 0, sourceOut: 5 },
+      {
+        id: "screen:clip",
+        videoId: "screen",
+        start: 0,
+        end: 5,
+        sourceIn: 0,
+        sourceOut: 5,
+      },
     ]
 
     const parsed = roundTrip(
@@ -97,7 +111,9 @@ describe("serializeProjectState with detached videos", () => {
     expect(parsed!.videos[1].onCanvas).toBeUndefined()
     expect(parsed!.videos[2].onCanvas).toBe(false)
     // Detached videos carry no timeline clip.
-    expect(parsed!.timelineClips.map((clip) => clip.videoId)).toEqual(["screen"])
+    expect(parsed!.timelineClips.map((clip) => clip.videoId)).toEqual([
+      "screen",
+    ])
   })
 
   it("defaults detached to an empty list (export snapshot path) — every video stays on-canvas", () => {
@@ -106,6 +122,42 @@ describe("serializeProjectState with detached videos", () => {
     )
     expect(parsed!.videos).toHaveLength(1)
     expect(parsed!.videos[0].onCanvas).toBeUndefined()
+  })
+})
+
+describe("cursor motion blur backend persistence", () => {
+  it("preserves the selected backend through a round-trip", () => {
+    const parsed = roundTrip(
+      serializeProjectState(
+        { ...ARTBOARD, cursorMotionBlurBackend: "cpu" },
+        [canvasVideo({ id: "a" })],
+        []
+      )
+    )
+
+    expect(parsed).not.toBeNull()
+    expect(parsed!.artboard.cursorMotionBlurBackend).toBe("cpu")
+  })
+
+  it("defaults an invalid backend to gpu for legacy/hand-edited projects", () => {
+    const parsed = parseProjectState({
+      version: 1,
+      artboard: {
+        presetId: "wide",
+        width: 1920,
+        height: 1080,
+        background: null,
+        padding: 0,
+        grain: 0,
+        cursorMotionBlurBackend: "webgpu",
+      },
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+
+    expect(parsed).not.toBeNull()
+    expect(parsed!.artboard.cursorMotionBlurBackend).toBe("gpu")
   })
 })
 

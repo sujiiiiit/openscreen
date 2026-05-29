@@ -1,4 +1,5 @@
 import type { CursorTrackData } from "@/types/api"
+import type { CursorMotionBlurBackend } from "@/types/editor-canvas"
 import type { CursorSetId } from "@/lib/cursors/cursor-manifest"
 import type { MotionBlurOptions } from "@/lib/motion-blur/types"
 import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
@@ -65,6 +66,10 @@ export const CURSOR_SMOOTHING = false
 // 0.6 — a tasteful, clearly-visible amount.
 export const CURSOR_MOTION_BLUR_DEFAULT = 0.6
 
+// GPU keeps the interactive Konva preview responsive; CPU is available as an
+// explicit fallback/comparison mode and uses the same Pixi-derived math.
+export const CURSOR_MOTION_BLUR_BACKEND_DEFAULT: CursorMotionBlurBackend = "gpu"
+
 // Tuning knobs (not user-facing):
 // - finite-difference window for estimating cursor speed; small + fixed so the
 //   estimate is identical in the editor preview and any export fps.
@@ -86,6 +91,13 @@ export function clampCursorMotionBlur(value: number): number {
   return Math.min(1, Math.max(0, value))
 }
 
+/** Clamp unknown persisted/UI backend input, defaulting to GPU. */
+export function clampCursorMotionBlurBackend(
+  value: unknown
+): CursorMotionBlurBackend {
+  return value === "cpu" ? "cpu" : CURSOR_MOTION_BLUR_BACKEND_DEFAULT
+}
+
 function oddKernel(value: number): number {
   let k = Math.round(value)
   if (k % 2 === 0) k += 1
@@ -95,7 +107,7 @@ function oddKernel(value: number): number {
 /** Build the time-indexed cursor track from raw IPC data, applying the shared
  * smoothing choice. Returns null when there's no usable cursor data. */
 export function buildCursorTrack(
-  data: CursorTrackData | null,
+  data: CursorTrackData | null
 ): SmoothedCursorTrack | null {
   if (!data || data.moves.length === 0) return null
   const samples = rawSamplesFromMoves(data.moves, data.processTimeStartMs)
@@ -150,7 +162,7 @@ export function placeCursor(
   track: SmoothedCursorTrack,
   video: CursorVideoGeometry,
   sourceSeconds: number,
-  options: { sizeMultiplier?: number; cursorSet?: CursorSetId } = {},
+  options: { sizeMultiplier?: number; cursorSet?: CursorSetId } = {}
 ): CursorPlacement | null {
   const { sizeMultiplier = CURSOR_SIZE_DEFAULT, cursorSet = CURSOR_SET } =
     options
@@ -168,14 +180,17 @@ export function placeCursor(
   // Display point → source pixel → cover-crop → node-local → artboard.
   const crop = getVideoCoverCrop(
     { width: iw, height: ih },
-    { width: video.width, height: video.height },
+    { width: video.width, height: video.height }
   )
   const sx = (sample.x / dw) * iw
   const sy = (sample.y / dh) * ih
   const localX = ((sx - crop.cropX) / crop.cropWidth) * video.width
   const localY = ((sy - crop.cropY) / crop.cropHeight) * video.height
   const onScreen =
-    localX >= 0 && localX <= video.width && localY >= 0 && localY <= video.height
+    localX >= 0 &&
+    localX <= video.width &&
+    localY >= 0 &&
+    localY <= video.height
 
   const rad = (video.rotation * Math.PI) / 180
   const cos = Math.cos(rad)
@@ -224,7 +239,11 @@ export function computeCursorBlur(
   track: SmoothedCursorTrack,
   video: CursorVideoGeometry,
   sourceSeconds: number,
-  options: { intensity: number; sizeMultiplier?: number; cursorSet?: CursorSetId },
+  options: {
+    intensity: number
+    sizeMultiplier?: number
+    cursorSet?: CursorSetId
+  }
 ): MotionBlurOptions | null {
   const intensity = clampCursorMotionBlur(options.intensity)
   if (intensity <= 0) return null
@@ -238,7 +257,7 @@ export function computeCursorBlur(
     track,
     video,
     sourceSeconds - CURSOR_BLUR_SAMPLE_DT_SEC,
-    placeOpts,
+    placeOpts
   )
   if (!cur || !prev) return null
 
@@ -257,7 +276,7 @@ export function computeCursorBlur(
   const speed = dist / CURSOR_BLUR_SAMPLE_DT_SEC // px/s
   const smear = Math.min(
     speed * CURSOR_BLUR_SHUTTER_SEC * intensity,
-    CURSOR_BLUR_MAX_SMEAR_PX,
+    CURSOR_BLUR_MAX_SMEAR_PX
   )
   if (smear < CURSOR_BLUR_MIN_SMEAR_PX) return null
 

@@ -9,6 +9,8 @@ export type ArtboardBackground =
   | { type: "wallpaper"; value: string; blurRadius?: number }
   | { type: "color"; value: string }
 
+export type CursorMotionBlurBackend = "gpu" | "cpu"
+
 export type EditorArtboard = CanvasSize & {
   presetId: ArtboardPresetId
   background: ArtboardBackground | null
@@ -22,6 +24,9 @@ export type EditorArtboard = CanvasSize & {
   // from cursor speed; this is the single user-facing amount. See cursor-scene.ts
   // CURSOR_MOTION_BLUR_DEFAULT / computeCursorBlur.
   cursorMotionBlur: number
+  // Renderer backend for cursor motion blur. GPU is the default for responsive
+  // preview; CPU is kept as a project-level fallback/comparison mode.
+  cursorMotionBlurBackend: CursorMotionBlurBackend
 }
 
 export const ARTBOARD_SELECTION_ID = "__artboard__"

@@ -31,6 +31,7 @@ import type {
   CanvasVideoRole,
   CanvasVideoSource,
   CanvasVideoTransformPatch,
+  CursorMotionBlurBackend,
   EditorArtboard,
   EditorSaveStatus,
   ViewTransform,
@@ -56,11 +57,13 @@ import {
   type HistoryCommitTag,
 } from "@/components/editor/canvas/history"
 import {
+  CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   CURSOR_MOTION_BLUR_DEFAULT,
   CURSOR_SIZE_DEFAULT,
   CURSOR_SIZE_MAX,
   CURSOR_SIZE_MIN,
   clampCursorMotionBlur,
+  clampCursorMotionBlurBackend,
 } from "@/components/editor/canvas/cursor-scene"
 
 const DEFAULT_VIEWPORT_SIZE: CanvasSize = { width: 0, height: 0 }
@@ -74,6 +77,7 @@ const DEFAULT_ARTBOARD: EditorArtboard = {
   padding: 0,
   cursorSizeMultiplier: CURSOR_SIZE_DEFAULT,
   cursorMotionBlur: CURSOR_MOTION_BLUR_DEFAULT,
+  cursorMotionBlurBackend: CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
 }
 const ARTBOARD_PADDING_MAX = 500
 const DEFAULT_VIEW_TRANSFORM = getFitViewTransform(
@@ -195,6 +199,7 @@ type EditorCanvasContextValue = {
   setArtboardPadding: (padding: number) => void
   setCursorSizeMultiplier: (multiplier: number) => void
   setCursorMotionBlur: (intensity: number) => void
+  setCursorMotionBlurBackend: (backend: CursorMotionBlurBackend) => void
   setViewportSize: (size: CanvasSize) => void
   setViewTransform: (transform: ViewTransform) => void
   fitArtboardToViewport: () => void
@@ -282,6 +287,7 @@ type EditorCanvasActionsContextValue = Pick<
   | "setArtboardPadding"
   | "setCursorSizeMultiplier"
   | "setCursorMotionBlur"
+  | "setCursorMotionBlurBackend"
   | "setViewportSize"
   | "setViewTransform"
   | "fitArtboardToViewport"
@@ -407,12 +413,12 @@ function getCoverVideoPlacement(
 // collapse to zero — leaving a 2px floor keeps `getScreenVideoPlacement`'s
 // `Math.max(1, ...)` from masking a too-aggressive value.
 function getPaddingInsetPx(artboard: EditorArtboard) {
-  const raw = Math.max(
-    0,
-    Math.min(ARTBOARD_PADDING_MAX, artboard.padding ?? 0)
-  )
+  const raw = Math.max(0, Math.min(ARTBOARD_PADDING_MAX, artboard.padding ?? 0))
   if (raw <= 0) return 0
-  const maxInset = Math.max(0, Math.floor(Math.min(artboard.width, artboard.height) / 2) - 1)
+  const maxInset = Math.max(
+    0,
+    Math.floor(Math.min(artboard.width, artboard.height) / 2) - 1
+  )
   return Math.min(raw, maxInset)
 }
 
@@ -554,7 +560,10 @@ function createVideoAppearanceDefaults(
   }
 
   if (role === "camera") {
-    const radius = Math.max(0, Math.floor(Math.min(size.width, size.height) / 2))
+    const radius = Math.max(
+      0,
+      Math.floor(Math.min(size.width, size.height) / 2)
+    )
     return {
       cornerRadius: radius,
       cornerSmoothing: 1,
@@ -738,9 +747,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   // self-reference the useCallback (React Compiler can't preserve manual
   // memoisation around self-referential `useCallback`s and the lint refuses
   // it). The ref is mirrored from `flushAutosave` via an effect below.
-  const flushAutosaveRef = useRef<((projectPath: string) => Promise<void>) | null>(
-    null
-  )
+  const flushAutosaveRef = useRef<
+    ((projectPath: string) => Promise<void>) | null
+  >(null)
   // Undo / redo history. The push site lives inside the autosave drain so a
   // single 500ms debounce window collapses many rapid mutations into one
   // history entry, naturally giving us "drag a slider = one undo step"
@@ -827,115 +836,118 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     []
   )
 
-  const flushAutosave = useCallback(async (projectPath: string) => {
-    if (autosaveInFlightRef.current) {
-      autosavePendingRef.current = true
-      return
-    }
-    autosaveInFlightRef.current = true
-    // Clear any pending retry — we're saving now, so a scheduled retry would
-    // duplicate work and may race with this attempt.
-    if (autosaveRetryTimerRef.current !== null) {
-      clearTimeout(autosaveRetryTimerRef.current)
-      autosaveRetryTimerRef.current = null
-    }
-    setSaveStatus("saving")
-    let lastError: string | null = null
-    let abortedForProjectSwitch = false
-    try {
-      // Drain mode: keep writing as long as edits arrive while one save is in
-      // flight. Each pass serialises fresh refs, so the last write always
-      // reflects the latest committed state. We bail mid-drain if the user
-      // switched projects — otherwise we'd write the new project's state to
-      // the old project's `project.json`.
-      do {
-        autosavePendingRef.current = false
-        if (projectRef.current?.path !== projectPath) {
-          abortedForProjectSwitch = true
-          break
-        }
-        const snapshot = serializeProjectState(
-          artboardRef.current,
-          videosRef.current,
-          timelineClipsRef.current,
-          detachedVideosRef.current
-        )
-        const fingerprint = fingerprintProjectState(snapshot)
-        // Snapshot the tag at the same instant as the state so a user
-        // action that lands during the IPC await cannot attribute its tag
-        // to this snapshot. The next drain pass will pick up the new tag.
-        const capturedTag = historyCommitTagRef.current
-        historyCommitTagRef.current = null
-        if (
-          fingerprint !== null &&
-          fingerprint === lastWrittenSerializedRef.current
-        ) {
-          // Memory matches what's already on disk — skip the IPC, treat as
-          // a successful no-op. Avoids a redundant write right after fast-
-          // path hydration and any other "schedule-but-no-real-change" path.
-          lastError = null
-          // Still advance the history clock on no-op flushes so a
-          // destructive-flush call after a stale debounce can coalesce
-          // correctly — the snapshot didn't change, so this branch never
-          // pushes a new entry, only refreshes the top's timestamp.
-          pushHistoryFromAutosave(snapshot, fingerprint, capturedTag)
-          continue
-        }
-        try {
-          const result = await window.api?.projects.saveState(
-            projectPath,
-            snapshot
-          )
-          if (result && result.ok === false) {
-            lastError = result.reason
-            console.error("[provider] autosave rejected:", result.reason)
-          } else {
-            lastError = null
-            if (fingerprint !== null) {
-              lastWrittenSerializedRef.current = fingerprint
-            }
-          }
-        } catch (cause) {
-          lastError = cause instanceof Error ? cause.message : String(cause)
-          console.error("[provider] autosave failed:", cause)
-        }
-        // Push to history regardless of disk-write outcome. History is
-        // in-memory only; a transient IPC error must not silently drop a
-        // ledger entry, and a successful retry will reconcile the disk side.
-        pushHistoryFromAutosave(snapshot, fingerprint, capturedTag)
-      } while (autosavePendingRef.current)
-    } finally {
-      autosaveInFlightRef.current = false
-      if (abortedForProjectSwitch) {
-        // Don't surface a failure for an aborted save — the user just moved
-        // on; the new project's autosave will paint the indicator next.
-      } else {
-        setSaveError(lastError)
-        setSaveStatus(lastError ? "error" : "saved")
-        if (lastError) {
-          // Auto-retry once after a short delay so transient I/O errors
-          // (full disk that just freed, perms that just changed, USB blip)
-          // self-heal without a user edit. A new edit supersedes the retry
-          // because the autosave effect clears `autosaveRetryTimerRef`.
-          if (autosaveRetryTimerRef.current !== null) {
-            clearTimeout(autosaveRetryTimerRef.current)
-          }
-          autosaveRetryTimerRef.current = setTimeout(() => {
-            autosaveRetryTimerRef.current = null
-            if (projectRef.current?.path !== projectPath) return
-            const next = flushAutosaveRef.current
-            if (next) void next(projectPath)
-          }, PROJECT_STATE_AUTOSAVE_RETRY_MS)
-        }
+  const flushAutosave = useCallback(
+    async (projectPath: string) => {
+      if (autosaveInFlightRef.current) {
+        autosavePendingRef.current = true
+        return
       }
-      // Clear the restore guard now that the post-restore autosave has
-      // completed its drain. The guard is set by `undo` / `redo` and lives
-      // until the next autosave finishes so multiple back-to-back drain
-      // passes (e.g., a new edit immediately after restore) all skip the
-      // push site for the restored state.
-      restoringFromHistoryRef.current = false
-    }
-  }, [pushHistoryFromAutosave])
+      autosaveInFlightRef.current = true
+      // Clear any pending retry — we're saving now, so a scheduled retry would
+      // duplicate work and may race with this attempt.
+      if (autosaveRetryTimerRef.current !== null) {
+        clearTimeout(autosaveRetryTimerRef.current)
+        autosaveRetryTimerRef.current = null
+      }
+      setSaveStatus("saving")
+      let lastError: string | null = null
+      let abortedForProjectSwitch = false
+      try {
+        // Drain mode: keep writing as long as edits arrive while one save is in
+        // flight. Each pass serialises fresh refs, so the last write always
+        // reflects the latest committed state. We bail mid-drain if the user
+        // switched projects — otherwise we'd write the new project's state to
+        // the old project's `project.json`.
+        do {
+          autosavePendingRef.current = false
+          if (projectRef.current?.path !== projectPath) {
+            abortedForProjectSwitch = true
+            break
+          }
+          const snapshot = serializeProjectState(
+            artboardRef.current,
+            videosRef.current,
+            timelineClipsRef.current,
+            detachedVideosRef.current
+          )
+          const fingerprint = fingerprintProjectState(snapshot)
+          // Snapshot the tag at the same instant as the state so a user
+          // action that lands during the IPC await cannot attribute its tag
+          // to this snapshot. The next drain pass will pick up the new tag.
+          const capturedTag = historyCommitTagRef.current
+          historyCommitTagRef.current = null
+          if (
+            fingerprint !== null &&
+            fingerprint === lastWrittenSerializedRef.current
+          ) {
+            // Memory matches what's already on disk — skip the IPC, treat as
+            // a successful no-op. Avoids a redundant write right after fast-
+            // path hydration and any other "schedule-but-no-real-change" path.
+            lastError = null
+            // Still advance the history clock on no-op flushes so a
+            // destructive-flush call after a stale debounce can coalesce
+            // correctly — the snapshot didn't change, so this branch never
+            // pushes a new entry, only refreshes the top's timestamp.
+            pushHistoryFromAutosave(snapshot, fingerprint, capturedTag)
+            continue
+          }
+          try {
+            const result = await window.api?.projects.saveState(
+              projectPath,
+              snapshot
+            )
+            if (result && result.ok === false) {
+              lastError = result.reason
+              console.error("[provider] autosave rejected:", result.reason)
+            } else {
+              lastError = null
+              if (fingerprint !== null) {
+                lastWrittenSerializedRef.current = fingerprint
+              }
+            }
+          } catch (cause) {
+            lastError = cause instanceof Error ? cause.message : String(cause)
+            console.error("[provider] autosave failed:", cause)
+          }
+          // Push to history regardless of disk-write outcome. History is
+          // in-memory only; a transient IPC error must not silently drop a
+          // ledger entry, and a successful retry will reconcile the disk side.
+          pushHistoryFromAutosave(snapshot, fingerprint, capturedTag)
+        } while (autosavePendingRef.current)
+      } finally {
+        autosaveInFlightRef.current = false
+        if (abortedForProjectSwitch) {
+          // Don't surface a failure for an aborted save — the user just moved
+          // on; the new project's autosave will paint the indicator next.
+        } else {
+          setSaveError(lastError)
+          setSaveStatus(lastError ? "error" : "saved")
+          if (lastError) {
+            // Auto-retry once after a short delay so transient I/O errors
+            // (full disk that just freed, perms that just changed, USB blip)
+            // self-heal without a user edit. A new edit supersedes the retry
+            // because the autosave effect clears `autosaveRetryTimerRef`.
+            if (autosaveRetryTimerRef.current !== null) {
+              clearTimeout(autosaveRetryTimerRef.current)
+            }
+            autosaveRetryTimerRef.current = setTimeout(() => {
+              autosaveRetryTimerRef.current = null
+              if (projectRef.current?.path !== projectPath) return
+              const next = flushAutosaveRef.current
+              if (next) void next(projectPath)
+            }, PROJECT_STATE_AUTOSAVE_RETRY_MS)
+          }
+        }
+        // Clear the restore guard now that the post-restore autosave has
+        // completed its drain. The guard is set by `undo` / `redo` and lives
+        // until the next autosave finishes so multiple back-to-back drain
+        // passes (e.g., a new edit immediately after restore) all skip the
+        // push site for the restored state.
+        restoringFromHistoryRef.current = false
+      }
+    },
+    [pushHistoryFromAutosave]
+  )
 
   // Synchronous flush helper used by destructive actions (delete, duplicate,
   // add, preset). Pushes the *pre-destructive* snapshot into history right
@@ -1176,7 +1188,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     const visibleIds = new Set<string>()
     const videoById = videoByIdRef.current
     const timelineEnd = timelineDurationRef.current
-    const isAtTimelineEnd = time >= timelineEnd - TIMELINE_END_HOLD_EPSILON_SECONDS
+    const isAtTimelineEnd =
+      time >= timelineEnd - TIMELINE_END_HOLD_EPSILON_SECONDS
     let stableStart = 0
     let stableEnd = Number.POSITIVE_INFINITY
 
@@ -1331,7 +1344,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         committedSeekStateRef.current.delete(videoId)
         timelineCanvasNodesRef.current.get(videoId)?.getLayer()?.batchDraw()
       }, 250)
-      committedSeekStateRef.current.set(videoId, { targetSourceTime, timeoutId })
+      committedSeekStateRef.current.set(videoId, {
+        targetSourceTime,
+        timeoutId,
+      })
       safeSeekElement(element, targetSourceTime)
     },
     [safeSeekElement]
@@ -1712,11 +1728,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   // actually triggers the Konva batchDraw, so the canvas component stays
   // unaware of hover vs committed.
   const onTimelineVideoSeeked = useCallback(
-    (
-      videoId: string,
-      element: HTMLVideoElement,
-      redrawLayer: () => void
-    ) => {
+    (videoId: string, element: HTMLVideoElement, redrawLayer: () => void) => {
       const entry = hoverSeekStateRef.current.get(videoId)
       if (entry) {
         window.clearTimeout(entry.timeoutId)
@@ -1732,7 +1744,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         // the next rAF.
         if (!hoverPreviewActiveRef.current) return
         const liveHoverTime = hoverPreviewTimeRef.current
-        if (liveHoverTime === null || liveHoverTime === entry.hoverTimelineTime) {
+        if (
+          liveHoverTime === null ||
+          liveHoverTime === entry.hoverTimelineTime
+        ) {
           return
         }
         const frame = resolveTimelineFrame(videoId, liveHoverTime)
@@ -1946,7 +1961,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           // Only trust the master clock when it's near the rAF projection; a
           // wild jump (e.g., after a tab-visibility gap) keeps the rAF
           // estimate so the cursor doesn't snap unexpectedly.
-          if (Math.abs(projected - nextTime) <= TIMELINE_PLAYBACK_DRIFT_SECONDS) {
+          if (
+            Math.abs(projected - nextTime) <= TIMELINE_PLAYBACK_DRIFT_SECONDS
+          ) {
             nextTime = projected
           }
         }
@@ -2252,6 +2269,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const prevPadding = artboardRef.current.padding
       const prevCursorSize = artboardRef.current.cursorSizeMultiplier
       const prevCursorMotionBlur = artboardRef.current.cursorMotionBlur
+      const prevCursorMotionBlurBackend =
+        artboardRef.current.cursorMotionBlurBackend
       let nextArtboard: EditorArtboard
       if (id === AUTO_ARTBOARD_PRESET_ID) {
         const auto = resolveAutoArtboard(sourceVideoDimsRef.current)
@@ -2264,6 +2283,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           padding: prevPadding,
           cursorSizeMultiplier: prevCursorSize,
           cursorMotionBlur: prevCursorMotionBlur,
+          cursorMotionBlurBackend: prevCursorMotionBlurBackend,
         }
       } else {
         const preset = getArtboardPreset(id)
@@ -2276,6 +2296,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           padding: prevPadding,
           cursorSizeMultiplier: prevCursorSize,
           cursorMotionBlur: prevCursorMotionBlur,
+          cursorMotionBlurBackend: prevCursorMotionBlurBackend,
         }
       }
 
@@ -2347,10 +2368,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         return nextClips
       })
       if (didChange) {
-        syncTimelineMedia(
-          timelineTimeRef.current,
-          isTimelinePlayingRef.current
-        )
+        syncTimelineMedia(timelineTimeRef.current, isTimelinePlayingRef.current)
       }
     },
     [commitTimelineClipsRef, syncTimelineMedia]
@@ -2422,10 +2440,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         return nextClips
       })
       if (didChange) {
-        syncTimelineMedia(
-          timelineTimeRef.current,
-          isTimelinePlayingRef.current
-        )
+        syncTimelineMedia(timelineTimeRef.current, isTimelinePlayingRef.current)
       }
     },
     [commitTimelineClipsRef, syncTimelineMedia]
@@ -2493,7 +2508,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         return
       }
       if (!importResult) {
-        setImportError("The selected video could not be copied into the project.")
+        setImportError(
+          "The selected video could not be copied into the project."
+        )
         return
       }
 
@@ -2735,6 +2752,25 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     artboardRef.current = nextArtboard
     setArtboard(nextArtboard)
   }, [])
+
+  // Renderer backend for cursor blur. The hot path reads this through the
+  // overlay's persistent renderer ref, so changing it swaps one renderer
+  // instance without adding React work to each timeline tick.
+  const setCursorMotionBlurBackend = useCallback(
+    (backend: CursorMotionBlurBackend) => {
+      const current = artboardRef.current
+      const clamped = clampCursorMotionBlurBackend(backend)
+      if (current.cursorMotionBlurBackend === clamped) return
+      historyCommitTagRef.current = "cursor-motion-blur-backend"
+      const nextArtboard: EditorArtboard = {
+        ...current,
+        cursorMotionBlurBackend: clamped,
+      }
+      artboardRef.current = nextArtboard
+      setArtboard(nextArtboard)
+    },
+    []
+  )
 
   const setArtboardPadding = useCallback(
     (padding: number) => {
@@ -3010,7 +3046,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       commitDetachedVideosRef(nextDetached)
       const nextVideos = [...videosRef.current, detached]
       commitVideosRef(nextVideos)
-      const nextClips = [...timelineClipsRef.current, createTimelineClip(detached)]
+      const nextClips = [
+        ...timelineClipsRef.current,
+        createTimelineClip(detached),
+      ]
       commitTimelineClipsRef(nextClips)
 
       setDetachedVideos(nextDetached)
@@ -3097,6 +3136,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           savedState.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT,
         cursorMotionBlur:
           savedState.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT,
+        cursorMotionBlurBackend: clampCursorMotionBlurBackend(
+          savedState.artboard.cursorMotionBlurBackend
+        ),
       }
       const toCanvasVideo = (video: ProjectStateV1["videos"][number]) =>
         projectVideoToCanvasVideo(
@@ -3306,6 +3348,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setArtboardPadding,
       setCursorSizeMultiplier,
       setCursorMotionBlur,
+      setCursorMotionBlurBackend,
       setViewportSize,
       setViewTransform,
       fitArtboardToViewport,
@@ -3328,6 +3371,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setArtboardPadding,
       setCursorSizeMultiplier,
       setCursorMotionBlur,
+      setCursorMotionBlurBackend,
       setViewportSize,
       setViewTransform,
       fitArtboardToViewport,
@@ -3478,6 +3522,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           savedState.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT,
         cursorMotionBlur:
           savedState.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT,
+        cursorMotionBlurBackend: clampCursorMotionBlurBackend(
+          savedState.artboard.cursorMotionBlurBackend
+        ),
       }
       artboardRef.current = savedArtboard
       // Hydration is a one-shot synchronization from disk into React state —
@@ -3597,6 +3644,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const previousPadding = artboardRef.current.padding
       const previousCursorSize = artboardRef.current.cursorSizeMultiplier
       const previousCursorMotionBlur = artboardRef.current.cursorMotionBlur
+      const previousCursorMotionBlurBackend =
+        artboardRef.current.cursorMotionBlurBackend
       const nextArtboard: EditorArtboard = useAuto
         ? (() => {
             const auto = resolveAutoArtboard(sourceVideoDimsRef.current)
@@ -3609,6 +3658,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               padding: previousPadding,
               cursorSizeMultiplier: previousCursorSize,
               cursorMotionBlur: previousCursorMotionBlur,
+              cursorMotionBlurBackend: previousCursorMotionBlurBackend,
             }
           })()
         : (() => {
@@ -3622,6 +3672,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               padding: previousPadding,
               cursorSizeMultiplier: previousCursorSize,
               cursorMotionBlur: previousCursorMotionBlur,
+              cursorMotionBlurBackend: previousCursorMotionBlurBackend,
             }
           })()
       artboardRef.current = nextArtboard
@@ -3649,7 +3700,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         timelineClipsRef.current,
         detachedVideosRef.current
       )
-      lastWrittenSerializedRef.current = fingerprintProjectState(baselineSnapshot)
+      lastWrittenSerializedRef.current =
+        fingerprintProjectState(baselineSnapshot)
       hydrationSeedPendingRef.current = true
       setCanUndo(false)
       setCanRedo(false)

@@ -16,7 +16,7 @@ import type {
   Unsubscribe,
   VideoCodec,
   VideoQuality,
-} from '@openscreen/mac-addon'
+} from "@openscreen/mac-addon"
 
 /** Mirror of RecordingQualitySettings from electron/ipc/recorder.ts. */
 export interface RecordingQualitySettings {
@@ -28,20 +28,23 @@ export interface RecordingQualitySettings {
 }
 
 export type MacPermissionKind =
-  | 'screen'
-  | 'microphone'
-  | 'camera'
-  | 'accessibility'
-  | 'systemAudio'
+  | "screen"
+  | "microphone"
+  | "camera"
+  | "accessibility"
+  | "systemAudio"
 
-export type RequiredMacPermissionKind = Exclude<MacPermissionKind, 'systemAudio'>
+export type RequiredMacPermissionKind = Exclude<
+  MacPermissionKind,
+  "systemAudio"
+>
 
 export type MacPermissionState =
-  | 'granted'
-  | 'notDetermined'
-  | 'denied'
-  | 'restricted'
-  | 'unknown'
+  | "granted"
+  | "notDetermined"
+  | "denied"
+  | "restricted"
+  | "unknown"
 
 export interface PermissionSnapshot {
   permissions: Record<MacPermissionKind, MacPermissionState>
@@ -56,8 +59,8 @@ export interface PermissionChangeEvent {
   snapshot: PermissionSnapshot
 }
 
-export type RecorderInputKind = 'microphone' | 'camera' | 'systemAudio'
-export type RecorderPickerMode = 'display' | 'window' | 'region'
+export type RecorderInputKind = "microphone" | "camera" | "systemAudio"
+export type RecorderPickerMode = "display" | "window" | "region"
 
 export interface RecorderMenuAnchor {
   x: number
@@ -79,7 +82,7 @@ export interface RecorderSettings {
   // When systemAudio is true, this picks between capturing audio from every
   // app ('all') or only the bundle IDs in systemAudioApplications
   // ('selected'). Ignored when systemAudio is false.
-  systemAudioScope: 'all' | 'selected'
+  systemAudioScope: "all" | "selected"
   // Bundle IDs of apps to capture audio from when systemAudioScope === 'selected'.
   // Sticky across recordings; the user manages the list manually via the
   // system audio menu.
@@ -92,11 +95,11 @@ export interface RecorderSettings {
 }
 
 export type RecorderStatus =
-  | 'idle'
-  | 'starting'
-  | 'recording'
-  | 'paused'
-  | 'stopping'
+  | "idle"
+  | "starting"
+  | "recording"
+  | "paused"
+  | "stopping"
 
 export interface RecorderState {
   status: RecorderStatus
@@ -152,16 +155,16 @@ export interface WindowStateChange {
   isFullScreen: boolean
 }
 
-export type ProjectAssetRole = 'screen' | 'camera'
+export type ProjectAssetRole = "screen" | "camera"
 
 export type ProjectRecordingType =
-  | 'display'
-  | 'window'
-  | 'region'
-  | 'application'
+  | "display"
+  | "window"
+  | "region"
+  | "application"
 
 export interface ProjectAssetAudioTrack {
-  source: 'systemAudio' | 'microphone'
+  source: "systemAudio" | "microphone"
   sampleRate?: number
   channelCount?: number
 }
@@ -186,16 +189,16 @@ export interface ProjectAsset {
 export type ProjectStateVersion = 1
 
 export type ProjectArtboardPresetId =
-  | 'wide'
-  | 'vertical'
-  | 'portrait'
-  | 'standard'
-  | 'square'
-  | 'auto'
+  | "wide"
+  | "vertical"
+  | "portrait"
+  | "standard"
+  | "square"
+  | "auto"
 
 export type ProjectArtboardBackground =
-  | { type: 'color'; value: string }
-  | { type: 'wallpaper'; value: string; blurRadius?: number }
+  | { type: "color"; value: string }
+  | { type: "wallpaper"; value: string; blurRadius?: number }
 
 export interface ProjectArtboard {
   presetId: ProjectArtboardPresetId
@@ -211,14 +214,17 @@ export interface ProjectArtboard {
   // Cursor motion-blur intensity, 0..1 (0 = off). Optional on disk for the same
   // back-compat reason; validator defaults + clamps. See project-schema.ts.
   cursorMotionBlur?: number
+  // Cursor motion-blur renderer backend. Optional on disk; validator defaults
+  // to 'gpu'. See electron/ipc/project-schema.ts.
+  cursorMotionBlurBackend?: "gpu" | "cpu"
 }
 
-export type ProjectVideoRole = 'screen' | 'camera' | 'media'
-export type ProjectBorderAlignment = 'inside' | 'center' | 'outside'
+export type ProjectVideoRole = "screen" | "camera" | "media"
+export type ProjectBorderAlignment = "inside" | "center" | "outside"
 
 export type ProjectVideoSource =
-  | { kind: 'recording'; assetRole: 'screen' | 'camera' }
-  | { kind: 'imported'; relativePath: string; fileSize: number }
+  | { kind: "recording"; assetRole: "screen" | "camera" }
+  | { kind: "imported"; relativePath: string; fileSize: number }
 
 export interface ProjectVideo {
   id: string
@@ -288,14 +294,9 @@ export type SaveProjectStateResult =
 
 // ─── export-settings schema (mirrored from electron/ipc/export-schema.ts) ──
 
-export type ExportFormatId = 'mp4-avc' | 'mp4-hevc' | 'webm-vp9'
+export type ExportFormatId = "mp4-avc" | "mp4-hevc" | "webm-vp9"
 
-export type ExportResolutionId =
-  | 'artboard'
-  | '720p'
-  | '1080p'
-  | '1440p'
-  | '4k'
+export type ExportResolutionId = "artboard" | "720p" | "1080p" | "1440p" | "4k"
 
 export type ExportFrameRate = 30 | 60
 
@@ -306,13 +307,13 @@ export interface ExportSettings {
 }
 
 export type ExportPhase =
-  | 'idle'
-  | 'preparing'
-  | 'encoding'
-  | 'finalizing'
-  | 'done'
-  | 'error'
-  | 'cancelled'
+  | "idle"
+  | "preparing"
+  | "encoding"
+  | "finalizing"
+  | "done"
+  | "error"
+  | "cancelled"
 
 export interface ExportProgress {
   framesDone: number
@@ -382,7 +383,7 @@ export interface Api {
     getState: () => Promise<RecorderState>
     showInputMenu: (
       kind: RecorderInputKind,
-      anchor: RecorderMenuAnchor,
+      anchor: RecorderMenuAnchor
     ) => Promise<RecorderState>
     showSettingsMenu: (anchor: RecorderMenuAnchor) => Promise<RecorderState>
     startPicker: (mode: RecorderPickerMode) => Promise<RecorderState>
@@ -397,7 +398,7 @@ export interface Api {
     onChanged: (callback: (state: RecorderState) => void) => Unsubscribe
     getRecordingSettings: () => Promise<RecordingQualitySettings>
     setRecordingSettings: (
-      patch: Partial<RecordingQualitySettings>,
+      patch: Partial<RecordingQualitySettings>
     ) => Promise<RecordingQualitySettings>
     openRecordingSettings: () => Promise<void>
   }
@@ -419,7 +420,9 @@ export interface Api {
     maximize: () => void
     close: () => void
     getState: () => Promise<WindowStateSnapshot>
-    onStateChanged: (callback: (state: WindowStateChange) => void) => Unsubscribe
+    onStateChanged: (
+      callback: (state: WindowStateChange) => void
+    ) => Unsubscribe
   }
   projects: {
     getLatest: () => Promise<ProjectSummary | null>
@@ -427,11 +430,11 @@ export interface Api {
     pickAndOpen: () => Promise<ProjectSummary | null>
     saveState: (
       folderPath: string,
-      state: ProjectStateV1,
+      state: ProjectStateV1
     ) => Promise<SaveProjectStateResult>
     importAsset: (
       folderPath: string,
-      payload: ImportAssetPayload,
+      payload: ImportAssetPayload
     ) => Promise<ImportAssetResult>
     getCursorData: (folderPath: string) => Promise<CursorTrackData | null>
   }
@@ -441,8 +444,12 @@ export interface Api {
     setInteractive: (interactive: boolean) => Promise<void>
     getCurrentTarget: () => Promise<PickerOverlayTarget | null>
     getSession: () => Promise<WindowPickerSession>
-    setRegionSelection: (bounds: RegionSelectionBounds | null) => Promise<RegionSelectionResult>
-    onTargetChanged: (callback: (target: PickerOverlayTarget | null) => void) => Unsubscribe
+    setRegionSelection: (
+      bounds: RegionSelectionBounds | null
+    ) => Promise<RegionSelectionResult>
+    onTargetChanged: (
+      callback: (target: PickerOverlayTarget | null) => void
+    ) => Unsubscribe
   }
   export: {
     openWindow: (payload: ExportStartPayload) => Promise<void>

@@ -8,7 +8,7 @@ import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
 import type { CanvasVideoItem } from "@/types/editor-canvas"
 
 import {
-  createSpriteMotionBlurRenderer,
+  createSpriteMotionBlurRendererForBackend,
   type SpriteMotionBlurRenderer,
 } from "@/lib/motion-blur/sprite-motion-blur"
 
@@ -53,10 +53,11 @@ export function CanvasCursorOverlay() {
 
   const cursorSizeMultiplier = artboard.cursorSizeMultiplier
   const cursorMotionBlur = artboard.cursorMotionBlur
+  const cursorMotionBlurBackend = artboard.cursorMotionBlurBackend
 
   const screenVideo = videos.find((video) => video.role === "screen") ?? null
   const screenClip = screenVideo
-    ? timelineClips.find((clip) => clip.videoId === screenVideo.id) ?? null
+    ? (timelineClips.find((clip) => clip.videoId === screenVideo.id) ?? null)
     : null
 
   const imageRef = useRef<Konva.Image | null>(null)
@@ -137,28 +138,27 @@ export function CanvasCursorOverlay() {
       svg.addEventListener(
         "load",
         () => placeRef.current(lastCommittedTimeRef.current),
-        { once: true },
+        { once: true }
       )
     }
 
     // Motion blur: derive the smear from how fast the cursor moved, then render
-    // it on the GPU (CPU fallback) and inject the result via `node.image()`.
+    // it on the selected backend and inject the result via `node.image()`.
     // No per-frame `node.cache()` / Konva filter — that was the lag. A still
     // pointer (or no renderer / undecoded svg) just draws the sharp SVG.
-    const blur =
-      placement.onScreen
-        ? computeCursorBlur(track, video, sourceSeconds, {
-            intensity: motionBlurRef.current,
-            sizeMultiplier: sizeRef.current,
-          })
-        : null
+    const blur = placement.onScreen
+      ? computeCursorBlur(track, video, sourceSeconds, {
+          intensity: motionBlurRef.current,
+          sizeMultiplier: sizeRef.current,
+        })
+      : null
     const renderer = rendererRef.current
     if (blur && renderer && svg.complete) {
       const { canvas, padding } = renderer.render(
         svg,
         placement.width,
         placement.height,
-        blur,
+        blur
       )
       node.image(canvas)
       node.size({
@@ -187,16 +187,21 @@ export function CanvasCursorOverlay() {
     placeRef.current = place
   }, [place])
 
-  // One persistent sprite-blur renderer (GPU, CPU fallback) for the cursor's
-  // lifetime. Created on the client; torn down on unmount.
+  // One persistent sprite-blur renderer for the cursor's lifetime. GPU is the
+  // default backend; CPU can be forced from the Cursor panel. Either path
+  // returns a padded canvas injected into the single Konva.Image node, so the
+  // frame loop never pays for Konva node.cache()/filters.
   useEffect(() => {
-    const renderer = createSpriteMotionBlurRenderer()
+    const renderer =
+      createSpriteMotionBlurRendererForBackend(cursorMotionBlurBackend) ??
+      createSpriteMotionBlurRendererForBackend("cpu")
     rendererRef.current = renderer
+    placeRef.current(lastCommittedTimeRef.current)
     return () => {
-      renderer.destroy()
+      renderer?.destroy()
       rendererRef.current = null
     }
-  }, [])
+  }, [cursorMotionBlurBackend])
 
   // Load + pre-spring the cursor track whenever the screen recording changes.
   useEffect(() => {
@@ -254,6 +259,7 @@ export function CanvasCursorOverlay() {
     timelineTime,
     cursorSizeMultiplier,
     cursorMotionBlur,
+    cursorMotionBlurBackend,
     screenVideo?.x,
     screenVideo?.y,
     screenVideo?.width,
