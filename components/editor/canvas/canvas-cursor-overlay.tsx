@@ -59,6 +59,7 @@ export function CanvasCursorOverlay() {
   const cursorClickPressScale = artboard.cursorClickPressScale
   const cursorAlwaysUsePointer = artboard.cursorAlwaysUsePointer
   const cursorMotionRotation = artboard.cursorMotionRotation
+  const cursorMotionRotationMode = artboard.cursorMotionRotationMode
   const cursorMotionBlur = artboard.cursorMotionBlur
   const cursorMotionBlurBackend = artboard.cursorMotionBlurBackend
 
@@ -90,6 +91,7 @@ export function CanvasCursorOverlay() {
   const clickPressScaleRef = useRef(cursorClickPressScale)
   const alwaysUsePointerRef = useRef(cursorAlwaysUsePointer)
   const motionRotationRef = useRef(cursorMotionRotation)
+  const motionRotationModeRef = useRef(cursorMotionRotationMode)
   const motionBlurRef = useRef(cursorMotionBlur)
   const currentUrlRef = useRef<string | null>(null)
   // Last committed playhead time the cursor was placed at. Lets the ruler
@@ -115,6 +117,7 @@ export function CanvasCursorOverlay() {
     clickPressScaleRef.current = cursorClickPressScale
     alwaysUsePointerRef.current = cursorAlwaysUsePointer
     motionRotationRef.current = cursorMotionRotation
+    motionRotationModeRef.current = cursorMotionRotationMode
     motionBlurRef.current = cursorMotionBlur
   })
 
@@ -162,6 +165,8 @@ export function CanvasCursorOverlay() {
       cursorSet: cursorSetRef.current,
       alwaysUsePointer: alwaysUsePointerRef.current,
       motionRotation: motionRotationRef.current,
+      motionRotationMode: motionRotationModeRef.current,
+      smoothingMode: smoothingModeRef.current,
       referenceSize: referenceSizeRef.current,
     })
     if (!placement) {
@@ -193,6 +198,8 @@ export function CanvasCursorOverlay() {
           cursorSet: cursorSetRef.current,
           alwaysUsePointer: alwaysUsePointerRef.current,
           motionRotation: motionRotationRef.current,
+          motionRotationMode: motionRotationModeRef.current,
+          smoothingMode: smoothingModeRef.current,
           referenceSize: referenceSizeRef.current,
         })
       : null
@@ -336,6 +343,7 @@ export function CanvasCursorOverlay() {
     cursorClickPressScale,
     cursorAlwaysUsePointer,
     cursorMotionRotation,
+    cursorMotionRotationMode,
     cursorMotionBlur,
     cursorMotionBlurBackend,
     artboard.width,

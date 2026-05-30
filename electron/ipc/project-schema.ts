@@ -76,6 +76,9 @@ export interface ProjectArtboard {
   // Cursor motion-rotation amount, 0..1 (0 = off). Optional + defaulted by
   // `parseArtboard`, same back-compat rationale as cursorSizeMultiplier.
   cursorMotionRotation?: number
+  // Cursor motion-rotation behavior. Optional + defaulted to 'side-lean' for
+  // old project.json files.
+  cursorMotionRotationMode?: "side-lean" | "rotation"
   // Cursor motion-blur renderer backend. Optional + defaulted to 'gpu' for
   // old project.json files.
   cursorMotionBlurBackend?: "gpu" | "cpu"
@@ -286,6 +289,8 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     if (!isFiniteNumber(raw)) return 0.35
     return Math.min(1, Math.max(0, raw))
   })()
+  const cursorMotionRotationMode =
+    value["cursorMotionRotationMode"] === "rotation" ? "rotation" : "side-lean"
 
   // Renderer backend is optional + defaulted. Unknown values fall back to GPU
   // so old and hand-edited projects keep loading.
@@ -324,6 +329,7 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     cursorSizeMultiplier,
     cursorMotionBlur,
     cursorMotionRotation,
+    cursorMotionRotationMode,
     cursorMotionBlurBackend,
     cursorSmoothingMode,
     cursorClickPressScale,

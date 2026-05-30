@@ -356,6 +356,8 @@ export async function runExport(
             cursorSetId,
             motionBlur,
             motionRotation,
+            motionRotationMode,
+            smoothingMode,
             renderer,
             images,
           } = handles.cursor
@@ -369,6 +371,8 @@ export async function runExport(
                 cursorSet: cursorSetId,
                 alwaysUsePointer,
                 motionRotation,
+                motionRotationMode,
+                smoothingMode,
                 referenceSize,
               })
             : null
@@ -388,6 +392,8 @@ export async function runExport(
                 cursorSet: cursorSetId,
                 alwaysUsePointer,
                 motionRotation,
+                motionRotationMode,
+                smoothingMode,
                 referenceSize,
               }
             )

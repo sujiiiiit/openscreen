@@ -1,6 +1,7 @@
 import type { CursorTrackData } from "@/types/api"
 import type {
   CursorMotionBlurBackend,
+  CursorMotionRotationMode,
   CursorSmoothingMode,
 } from "@/types/editor-canvas"
 import type {
@@ -83,6 +84,16 @@ const CURSOR_SMOOTHING_PARAMS: Record<
   slow: { timeConstantMs: 84, passes: 2 },
 }
 
+const CURSOR_MOTION_ROTATION_SMOOTHING_PARAMS: Record<
+  CursorSmoothingMode,
+  { windowSec: number; samples: number }
+> = {
+  rapid: { windowSec: 0.1, samples: 3 },
+  quick: { windowSec: 0.16, samples: 5 },
+  default: { windowSec: 0.24, samples: 7 },
+  slow: { windowSec: 0.36, samples: 9 },
+}
+
 export function clampCursorSmoothingMode(value: unknown): CursorSmoothingMode {
   return CURSOR_SMOOTHING_MODES.includes(value as CursorSmoothingMode)
     ? (value as CursorSmoothingMode)
@@ -105,14 +116,26 @@ function cursorOpticalScale(asset: CursorAssetEntry): number {
 }
 
 // --- Cursor motion rotation ----------------------------------------------
-// Subtle cursor lean derived from recent horizontal velocity. The amount is a
-// single persisted 0..1 slider, while the velocity estimate is deterministic:
-// no per-frame state, no easing timers, and the same result while scrubbing or
-// exporting.
+// Subtle cursor rotation derived from recent velocity. The amount is a single
+// persisted 0..1 slider, and the mode chooses whether that amount means the
+// original horizontal side-lean or a bounded full-direction follow. The velocity
+// estimate is deterministic: no per-frame state, no easing timers, and the same
+// result while scrubbing or exporting.
+export const CURSOR_MOTION_ROTATION_MODE_DEFAULT: CursorMotionRotationMode =
+  "side-lean"
+export const CURSOR_MOTION_ROTATION_MODES: CursorMotionRotationMode[] = [
+  "side-lean",
+  "rotation",
+]
 export const CURSOR_MOTION_ROTATION_DEFAULT = 0.35
-export const CURSOR_MOTION_ROTATION_MAX_DEG = 10
+export const CURSOR_MOTION_ROTATION_SIDE_LEAN_MAX_DEG = 10
+export const CURSOR_MOTION_ROTATION_DIRECTION_MAX_DEG = 45
+export const CURSOR_MOTION_ROTATION_MAX_DEG =
+  CURSOR_MOTION_ROTATION_SIDE_LEAN_MAX_DEG
 export const CURSOR_MOTION_ROTATION_WINDOW_SEC = 0.08
 export const CURSOR_MOTION_ROTATION_SATURATION_PX_PER_SEC = 900
+const CURSOR_DIRECTION_ROTATION_MIN_TIP_DISTANCE = 0.04
+const CURSOR_DIRECTION_ROTATION_FULL_TIP_DISTANCE = 0.22
 
 // --- Cursor motion blur ---------------------------------------------------
 // Screen-Studio-style directional blur on the moving cursor. A single user
@@ -166,6 +189,13 @@ export function clampCursorMotionBlur(value: number): number {
 export function clampCursorMotionRotation(value: number): number {
   if (!Number.isFinite(value)) return CURSOR_MOTION_ROTATION_DEFAULT
   return Math.min(1, Math.max(0, value))
+}
+
+/** Clamp unknown persisted/UI rotation-mode input, defaulting to side lean. */
+export function clampCursorMotionRotationMode(
+  value: unknown
+): CursorMotionRotationMode {
+  return value === "rotation" ? "rotation" : CURSOR_MOTION_ROTATION_MODE_DEFAULT
 }
 
 /** Clamp the clicked cursor's target scale; 1 means no press shrink. */
@@ -342,38 +372,159 @@ function mapCursorSampleToArtboard(
   }
 }
 
+function normalizeDegrees(degrees: number): number {
+  return ((((degrees + 180) % 360) + 360) % 360) - 180
+}
+
+function cursorForwardVector(asset: CursorAssetEntry): {
+  angleDeg: number
+  strength: number
+} {
+  const [sizeW, sizeH] = asset.size
+  if (sizeW <= 0 || sizeH <= 0) {
+    return { angleDeg: -135, strength: 1 }
+  }
+
+  const [boundsX, boundsY, boundsW, boundsH] = asset.visualBounds
+  const visualCenterX = boundsX + boundsW / 2
+  const visualCenterY = boundsY + boundsH / 2
+  const hotspotX = asset.hotspot[0] * sizeW
+  const hotspotY = asset.hotspot[1] * sizeH
+  const dx = hotspotX - visualCenterX
+  const dy = hotspotY - visualCenterY
+  const distance = Math.hypot(dx / sizeW, dy / sizeH)
+  if (distance <= 1e-6) return { angleDeg: -135, strength: 0 }
+
+  const strength = Math.min(
+    1,
+    Math.max(
+      0,
+      (distance - CURSOR_DIRECTION_ROTATION_MIN_TIP_DISTANCE) /
+        (CURSOR_DIRECTION_ROTATION_FULL_TIP_DISTANCE -
+          CURSOR_DIRECTION_ROTATION_MIN_TIP_DISTANCE)
+    )
+  )
+  return {
+    angleDeg: (Math.atan2(dy, dx) * 180) / Math.PI,
+    strength,
+  }
+}
+
 function cursorMotionRotationAt(
   track: SmoothedCursorTrack,
   video: CursorVideoGeometry,
+  asset: CursorAssetEntry,
   sourceSeconds: number,
-  current: MappedCursorPoint,
-  amount: number
+  amount: number,
+  mode: CursorMotionRotationMode,
+  smoothingMode: CursorSmoothingMode
+): number {
+  const params =
+    CURSOR_MOTION_ROTATION_SMOOTHING_PARAMS[
+      clampCursorSmoothingMode(smoothingMode)
+    ]
+  const sampleCount = Math.max(1, params.samples | 0)
+  if (sampleCount <= 1 || params.windowSec <= 0) {
+    return rawCursorMotionRotationAt(
+      track,
+      video,
+      asset,
+      sourceSeconds,
+      amount,
+      mode
+    )
+  }
+
+  let weightedRotation = 0
+  let totalWeight = 0
+  const firstTrackSec = (track.t[0] ?? 0) / 1000
+  const lastTrackSec = (track.t[track.t.length - 1] ?? 0) / 1000
+  for (let index = 0; index < sampleCount; index++) {
+    const centered =
+      sampleCount === 1 ? 0 : index / Math.max(1, sampleCount - 1) - 0.5
+    const sampleSeconds = sourceSeconds + centered * params.windowSec
+    if (
+      sampleSeconds < firstTrackSec + CURSOR_MOTION_ROTATION_WINDOW_SEC ||
+      sampleSeconds > lastTrackSec
+    ) {
+      continue
+    }
+    const weight = 1 - Math.abs(centered)
+    weightedRotation +=
+      rawCursorMotionRotationAt(
+        track,
+        video,
+        asset,
+        sampleSeconds,
+        amount,
+        mode
+      ) * weight
+    totalWeight += weight
+  }
+
+  return totalWeight > 0 ? weightedRotation / totalWeight : 0
+}
+
+function rawCursorMotionRotationAt(
+  track: SmoothedCursorTrack,
+  video: CursorVideoGeometry,
+  asset: CursorAssetEntry,
+  sourceSeconds: number,
+  amount: number,
+  mode: CursorMotionRotationMode
 ): number {
   const intensity = clampCursorMotionRotation(amount)
   if (intensity <= 0) return 0
 
+  const currentSample = sampleCursorAtTime(track, sourceSeconds * 1000)
+  if (!currentSample) return 0
   const previousSample = sampleCursorAtTime(
     track,
     (sourceSeconds - CURSOR_MOTION_ROTATION_WINDOW_SEC) * 1000
   )
   if (!previousSample) return 0
 
+  const current = mapCursorSampleToArtboard(currentSample, track, video)
   const previous = mapCursorSampleToArtboard(previousSample, track, video)
   const dxArt = current.x - previous.x
   const dyArt = current.y - previous.y
 
   // Convert artboard displacement back into the screen video's local frame so
-  // screen-horizontal movement controls the lean even when the video is rotated.
+  // rotation reacts to the cursor's motion relative to the recorded screen,
+  // even when the video node itself is rotated on the artboard.
   const rad = (-video.rotation * Math.PI) / 180
   const cos = Math.cos(rad)
   const sin = Math.sin(rad)
   const dxLocal = dxArt * cos - dyArt * sin
+  const dyLocal = dxArt * sin + dyArt * cos
   const velocityX = dxLocal / CURSOR_MOTION_ROTATION_WINDOW_SEC
+  const velocityY = dyLocal / CURSOR_MOTION_ROTATION_WINDOW_SEC
+  const speed = Math.hypot(velocityX, velocityY)
+
+  if (clampCursorMotionRotationMode(mode) === "rotation") {
+    if (speed <= 1e-6) return 0
+    const { angleDeg: cursorForwardDeg, strength } = cursorForwardVector(asset)
+    if (strength <= 0) return 0
+
+    const movementDeg = (Math.atan2(dyLocal, dxLocal) * 180) / Math.PI
+    const targetDeg = normalizeDegrees(movementDeg - cursorForwardDeg)
+    const speedScale = Math.min(
+      1,
+      speed / CURSOR_MOTION_ROTATION_SATURATION_PX_PER_SEC
+    )
+    const maxDeg = CURSOR_MOTION_ROTATION_DIRECTION_MAX_DEG * intensity
+    return (
+      Math.min(maxDeg, Math.max(-maxDeg, targetDeg * speedScale)) * strength
+    )
+  }
+
   const normalizedVelocity = Math.min(
     1,
     Math.max(-1, velocityX / CURSOR_MOTION_ROTATION_SATURATION_PX_PER_SEC)
   )
-  return normalizedVelocity * CURSOR_MOTION_ROTATION_MAX_DEG * intensity
+  return (
+    normalizedVelocity * CURSOR_MOTION_ROTATION_SIDE_LEAN_MAX_DEG * intensity
+  )
 }
 
 /**
@@ -398,6 +549,8 @@ export function placeCursor(
     referenceSize?: CursorReferenceSize
     alwaysUsePointer?: boolean
     motionRotation?: number
+    motionRotationMode?: CursorMotionRotationMode
+    smoothingMode?: CursorSmoothingMode
   } = {}
 ): CursorPlacement | null {
   const {
@@ -407,6 +560,8 @@ export function placeCursor(
     referenceSize,
     alwaysUsePointer = false,
     motionRotation = CURSOR_MOTION_ROTATION_DEFAULT,
+    motionRotationMode = CURSOR_MOTION_ROTATION_MODE_DEFAULT,
+    smoothingMode = CURSOR_SMOOTHING_MODE_DEFAULT,
   } = options
   const sample = sampleCursorAtTime(track, sourceSeconds * 1000)
   if (!sample) return null
@@ -422,9 +577,11 @@ export function placeCursor(
   const motionRotationDeg = cursorMotionRotationAt(
     track,
     video,
+    asset,
     sourceSeconds,
-    mapped,
-    motionRotation
+    motionRotation,
+    motionRotationMode,
+    smoothingMode
   )
 
   const targetSize = referenceSize ?? {
@@ -506,6 +663,8 @@ export function computeCursorBlur(
     referenceSize?: CursorReferenceSize
     alwaysUsePointer?: boolean
     motionRotation?: number
+    motionRotationMode?: CursorMotionRotationMode
+    smoothingMode?: CursorSmoothingMode
   }
 ): MotionBlurOptions | null {
   const intensity = clampCursorMotionBlur(options.intensity)
@@ -518,6 +677,8 @@ export function computeCursorBlur(
     referenceSize: options.referenceSize,
     alwaysUsePointer: options.alwaysUsePointer,
     motionRotation: options.motionRotation,
+    motionRotationMode: options.motionRotationMode,
+    smoothingMode: options.smoothingMode,
   }
   const cur = placeCursor(track, video, sourceSeconds, placeOpts)
   const prev = placeCursor(

@@ -19,6 +19,7 @@ const ARTBOARD: EditorArtboard = {
   cursorSizeMultiplier: 1,
   cursorMotionBlur: 0,
   cursorMotionRotation: 0.35,
+  cursorMotionRotationMode: "side-lean",
   cursorMotionBlurBackend: "gpu",
   cursorSmoothingMode: "default",
   cursorClickPressScale: 0.88,
@@ -179,6 +180,49 @@ describe("cursor motion rotation persistence", () => {
 
     expect(parsed).not.toBeNull()
     expect(parsed!.artboard.cursorMotionRotation).toBe(0.72)
+  })
+
+  it("preserves the selected motion rotation mode through a round-trip", () => {
+    const parsed = roundTrip(
+      serializeProjectState(
+        { ...ARTBOARD, cursorMotionRotationMode: "rotation" },
+        [canvasVideo({ id: "a" })],
+        []
+      )
+    )
+
+    expect(parsed).not.toBeNull()
+    expect(parsed!.artboard.cursorMotionRotationMode).toBe("rotation")
+  })
+
+  it("defaults missing and invalid motion rotation mode to side-lean", () => {
+    const base = {
+      presetId: "wide",
+      width: 1920,
+      height: 1080,
+      background: null,
+      padding: 0,
+      grain: 0,
+    }
+    const legacy = parseProjectState({
+      version: 1,
+      artboard: base,
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+    const invalid = parseProjectState({
+      version: 1,
+      artboard: { ...base, cursorMotionRotationMode: "spin" },
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+
+    expect(legacy).not.toBeNull()
+    expect(legacy!.artboard.cursorMotionRotationMode).toBe("side-lean")
+    expect(invalid).not.toBeNull()
+    expect(invalid!.artboard.cursorMotionRotationMode).toBe("side-lean")
   })
 
   it("defaults missing and invalid motion rotation to 0.35", () => {

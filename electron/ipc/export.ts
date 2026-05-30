@@ -35,8 +35,8 @@ interface RegisterExportHandlersOptions {
   getEditorWindow: () => BrowserWindow | null
   openExportWindow: () => void
   closeExportWindow: () => void
-  hideEditorWindow: () => void
-  showEditorWindow: () => void
+  hideEditorWindow: (window?: BrowserWindow | null) => void
+  showEditorWindow: (window?: BrowserWindow | null) => void
 }
 
 const EXPORT_SETTINGS_FILE = 'export-settings.json'
@@ -110,6 +110,7 @@ function defaultProgress(): ExportProgress {
 }
 
 let pendingStartPayload: ExportStartPayload | null = null
+let sourceEditorWindow: BrowserWindow | null = null
 
 const state: ExportJobState = {
   phase: 'idle',
@@ -144,8 +145,22 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function getSourceEditorWindow(fallback: () => BrowserWindow | null): BrowserWindow | null {
+  if (sourceEditorWindow && !sourceEditorWindow.isDestroyed()) {
+    return sourceEditorWindow
+  }
+  sourceEditorWindow = fallback()
+  return sourceEditorWindow
+}
+
+export function getExportSourceEditorWindow(): BrowserWindow | null {
+  return sourceEditorWindow && !sourceEditorWindow.isDestroyed()
+    ? sourceEditorWindow
+    : null
+}
+
 export function registerExportHandlers(options: RegisterExportHandlersOptions): void {
-  ipcMain.handle('export:openWindow', (_event, payload: ExportStartPayload) => {
+  ipcMain.handle('export:openWindow', (event, payload: ExportStartPayload) => {
     // If the export window is already open, just bring it forward —
     // regardless of whether an encode is in flight. We don't reset state
     // or replace the payload, since the existing window's form / progress
@@ -158,6 +173,7 @@ export function registerExportHandlers(options: RegisterExportHandlersOptions): 
       existing.focus()
       return
     }
+    sourceEditorWindow = BrowserWindow.fromWebContents(event.sender) ?? options.getEditorWindow()
     pendingStartPayload = payload && typeof payload === 'object' ? payload : null
     // Fresh window — wipe job state so we start clean.
     state.phase = 'idle'
@@ -248,7 +264,7 @@ export function registerExportHandlers(options: RegisterExportHandlersOptions): 
         state.phase = 'error'
         state.lastError = errorMessage(error)
         broadcastState(options.getExportWindow())
-        options.showEditorWindow()
+        options.showEditorWindow(getSourceEditorWindow(options.getEditorWindow))
         throw error
       }
 
@@ -267,7 +283,7 @@ export function registerExportHandlers(options: RegisterExportHandlersOptions): 
     state.phase = 'error'
     state.lastError = typeof message === 'string' ? message : 'Export failed.'
     broadcastState(options.getExportWindow())
-    options.showEditorWindow()
+    options.showEditorWindow(getSourceEditorWindow(options.getEditorWindow))
   })
 
   ipcMain.handle('export:cancel', () => {
@@ -294,7 +310,7 @@ export function registerExportHandlers(options: RegisterExportHandlersOptions): 
     // v2). reportDone is the only place we touch disk, so cancellation
     // before that is a clean teardown.
     broadcastState(options.getExportWindow())
-    options.showEditorWindow()
+    options.showEditorWindow(getSourceEditorWindow(options.getEditorWindow))
   })
 
   ipcMain.handle('export:revealOutput', async (_event, target: string) => {
@@ -324,7 +340,7 @@ export function registerExportHandlers(options: RegisterExportHandlersOptions): 
       return
     }
     // No window to close — make sure the editor is visible anyway.
-    options.showEditorWindow()
+    options.showEditorWindow(getSourceEditorWindow(options.getEditorWindow))
   })
 
   // The renderer-side state machine signals when it has begun the long-running
@@ -337,7 +353,7 @@ export function registerExportHandlers(options: RegisterExportHandlersOptions): 
     state.startedAtUnixMs = null
     state.lastError = null
     broadcastState(options.getExportWindow())
-    options.hideEditorWindow()
+    options.hideEditorWindow(getSourceEditorWindow(options.getEditorWindow))
   })
 }
 
@@ -359,6 +375,7 @@ export function registerExportHandlers(options: RegisterExportHandlersOptions): 
  */
 export function disposeExportPendingPayload(): void {
   pendingStartPayload = null
+  sourceEditorWindow = null
   if (
     state.outputPath &&
     state.phase !== 'done' &&

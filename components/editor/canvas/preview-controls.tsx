@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import { HugeiconsIcon } from "@hugeicons/react"
-import { Cancel01Icon, PauseIcon, PlayIcon } from "@hugeicons/core-free-icons"
+import { Cancel01Icon, PauseIcon } from "@hugeicons/core-free-icons"
 
 import {
   useEditorCanvasActions,
@@ -26,6 +26,15 @@ function formatClock(seconds: number) {
   }
 
   return `${minutes}:${String(secs).padStart(2, "0")}`
+}
+
+function FilledPlayGlyph({ className = "" }: { className?: string }) {
+  return (
+    <span
+      aria-hidden="true"
+      className={`block h-4 w-4 bg-current [clip-path:polygon(18%_8%,18%_92%,92%_50%)] ${className}`}
+    />
+  )
 }
 
 // Fullscreen preview player chrome: a transparent click-to-toggle surface, an
@@ -193,7 +202,7 @@ export function PreviewControls() {
             }}
             className="pointer-events-auto flex items-center gap-2 rounded-full bg-white/10 px-6 py-3 text-base font-medium text-white backdrop-blur transition-colors hover:bg-white/20"
           >
-            <HugeiconsIcon icon={PlayIcon} size={22} color="currentColor" />
+            <FilledPlayGlyph className="h-[18px] w-[18px]" />
             Replay
           </button>
         </div>
@@ -214,11 +223,11 @@ export function PreviewControls() {
           }}
           className="flex size-10 shrink-0 items-center justify-center rounded-full text-white/90 transition-colors hover:bg-white/10 hover:text-white"
         >
-          <HugeiconsIcon
-            icon={isTimelinePlaying ? PauseIcon : PlayIcon}
-            size={22}
-            color="currentColor"
-          />
+          {isTimelinePlaying ? (
+            <HugeiconsIcon icon={PauseIcon} size={22} color="currentColor" />
+          ) : (
+            <FilledPlayGlyph className="ml-0.5" />
+          )}
         </button>
 
         <span

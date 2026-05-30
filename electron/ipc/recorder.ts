@@ -261,7 +261,7 @@ const state: RecorderState = {
     cameraDeviceId: null,
     cameraLabel: NO_CAMERA_LABEL,
     hideCameraPreview: false,
-    hideCursor: false,
+    hideCursor: true,
     systemAudioScope: 'all',
     systemAudioApplications: [],
     captureKeystrokes: false,
@@ -714,7 +714,7 @@ function recorderSettingsMenuTemplate(): MenuItemConstructorOptions[] {
     },
     { type: 'separator' },
     {
-      label: 'Open project…',
+      label: 'Open project',
       enabled: canChangeSettings(),
       click: () => openProjectFromDialogRef?.(),
     },

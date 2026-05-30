@@ -13,6 +13,7 @@ import {
   clampCursorMotionBlur,
   clampCursorMotionBlurBackend,
   clampCursorMotionRotation,
+  clampCursorMotionRotationMode,
   clampCursorSetId,
   clampCursorSmoothingMode,
   clampCursorSize,
@@ -20,6 +21,7 @@ import {
   CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   CURSOR_MOTION_BLUR_DEFAULT,
   CURSOR_MOTION_ROTATION_DEFAULT,
+  CURSOR_MOTION_ROTATION_MODE_DEFAULT,
   CURSOR_POINTER_CURSOR_ID,
   CURSOR_SMOOTHING_MODE_DEFAULT,
   CURSOR_SET_DEFAULT,
@@ -34,6 +36,10 @@ import {
 } from "@/lib/motion-blur/sprite-motion-blur"
 import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
 import type { CursorSetId } from "@/lib/cursors/cursor-manifest"
+import type {
+  CursorMotionRotationMode,
+  CursorSmoothingMode,
+} from "@/types/editor-canvas"
 import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
 import { getWallpaperFullUrl, isWallpaperId } from "@/lib/wallpapers"
 
@@ -85,6 +91,10 @@ export interface ExportCursorHandle {
   motionBlur: number
   /** Cursor motion-rotation amount (0..1); threaded into placement per frame. */
   motionRotation: number
+  /** Cursor motion-rotation behavior; threaded into placement per frame. */
+  motionRotationMode: CursorMotionRotationMode
+  /** Cursor smoothing preset; also controls deterministic rotation smoothing. */
+  smoothingMode: CursorSmoothingMode
   /** Requested cursor-blur backend, defaulting to GPU for preview parity. */
   motionBlurBackend: "gpu" | "cpu"
   /** Sprite-blur renderer, reused across frames. GPU falls back to CPU if unavailable. */
@@ -355,6 +365,10 @@ async function buildCursorOverlay(opts: {
   const motionRotation = clampCursorMotionRotation(
     state.artboard.cursorMotionRotation ?? CURSOR_MOTION_ROTATION_DEFAULT
   )
+  const motionRotationMode = clampCursorMotionRotationMode(
+    state.artboard.cursorMotionRotationMode ??
+      CURSOR_MOTION_ROTATION_MODE_DEFAULT
+  )
   const motionBlurBackend = clampCursorMotionBlurBackend(
     state.artboard.cursorMotionBlurBackend ?? CURSOR_MOTION_BLUR_BACKEND_DEFAULT
   )
@@ -378,6 +392,8 @@ async function buildCursorOverlay(opts: {
     cursorSetId,
     motionBlur,
     motionRotation,
+    motionRotationMode,
+    smoothingMode,
     motionBlurBackend,
     renderer,
     images,

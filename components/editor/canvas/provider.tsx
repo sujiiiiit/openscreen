@@ -32,6 +32,7 @@ import type {
   CanvasVideoSource,
   CanvasVideoTransformPatch,
   CursorMotionBlurBackend,
+  CursorMotionRotationMode,
   CursorSetId,
   CursorSmoothingMode,
   EditorArtboard,
@@ -63,6 +64,7 @@ import {
   CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   CURSOR_MOTION_BLUR_DEFAULT,
   CURSOR_MOTION_ROTATION_DEFAULT,
+  CURSOR_MOTION_ROTATION_MODE_DEFAULT,
   CURSOR_SET_DEFAULT,
   CURSOR_SMOOTHING_MODE_DEFAULT,
   CURSOR_SIZE_DEFAULT,
@@ -72,6 +74,7 @@ import {
   clampCursorMotionBlur,
   clampCursorMotionBlurBackend,
   clampCursorMotionRotation,
+  clampCursorMotionRotationMode,
   clampCursorSetId,
   clampCursorSmoothingMode,
 } from "@/components/editor/canvas/cursor-scene"
@@ -90,6 +93,7 @@ const DEFAULT_ARTBOARD: EditorArtboard = {
   cursorSizeMultiplier: CURSOR_SIZE_DEFAULT,
   cursorMotionBlur: CURSOR_MOTION_BLUR_DEFAULT,
   cursorMotionRotation: CURSOR_MOTION_ROTATION_DEFAULT,
+  cursorMotionRotationMode: CURSOR_MOTION_ROTATION_MODE_DEFAULT,
   cursorMotionBlurBackend: CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   cursorSmoothingMode: CURSOR_SMOOTHING_MODE_DEFAULT,
   cursorClickPressScale: CURSOR_CLICK_PRESS_SCALE_DEFAULT,
@@ -220,6 +224,7 @@ type EditorCanvasContextValue = {
   setCursorClickPressScale: (scale: number) => void
   setCursorAlwaysUsePointer: (enabled: boolean) => void
   setCursorMotionRotation: (amount: number) => void
+  setCursorMotionRotationMode: (mode: CursorMotionRotationMode) => void
   setCursorMotionBlur: (intensity: number) => void
   setCursorMotionBlurBackend: (backend: CursorMotionBlurBackend) => void
   setViewportSize: (size: CanvasSize) => void
@@ -314,6 +319,7 @@ type EditorCanvasActionsContextValue = Pick<
   | "setCursorClickPressScale"
   | "setCursorAlwaysUsePointer"
   | "setCursorMotionRotation"
+  | "setCursorMotionRotationMode"
   | "setCursorMotionBlur"
   | "setCursorMotionBlurBackend"
   | "setViewportSize"
@@ -1614,6 +1620,38 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     return null
   }, [])
 
+  const getCurrentPlaybackTimelineTime = useCallback(() => {
+    const fallbackTime = timelineTimeRef.current
+    const visibleIds = timelineVisibleVideoIdsRef.current
+    if (visibleIds.size === 0) return fallbackTime
+
+    const primaryId = primaryAudioVideoIdRef.current
+    const candidateIds =
+      primaryId && visibleIds.has(primaryId)
+        ? [
+            primaryId,
+            ...Array.from(visibleIds).filter(
+              (videoId) => videoId !== primaryId
+            ),
+          ]
+        : Array.from(visibleIds)
+
+    for (const videoId of candidateIds) {
+      const element = timelineVideoElementsRef.current.get(videoId)
+      const clip = timelineClipByVideoIdRef.current.get(videoId)
+      if (!element || !clip || !Number.isFinite(element.currentTime)) continue
+
+      const projectedTime = clip.start + (element.currentTime - clip.sourceIn)
+      const boundedTime = Math.min(
+        clip.end,
+        Math.max(clip.start, projectedTime)
+      )
+      return clampTimelineTime(boundedTime, timelineDurationRef.current)
+    }
+
+    return fallbackTime
+  }, [])
+
   // Issues exactly one hover-driven seek for one video element. The caller
   // must have already confirmed there is no in-flight entry for this id. A
   // safety timeout force-clears the entry if `seeked` never fires (rare; e.g.
@@ -1840,23 +1878,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     ]
   )
 
-  // If the page goes hidden mid-hover, drop the preview state entirely so
-  // queued seeked events don't paint stale frames after the user returns.
-  useEffect(() => {
-    if (typeof document === "undefined") return
-    const handleVisibilityChange = () => {
-      if (!document.hidden) return
-      if (!hoverPreviewActiveRef.current) return
-      cancelInFlightHoverSeeks()
-      notifyHoverTimeSubscribers(null)
-      syncTimelineMedia(timelineTimeRef.current, isTimelinePlayingRef.current)
-    }
-    document.addEventListener("visibilitychange", handleVisibilityChange)
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibilityChange)
-    }
-  }, [cancelInFlightHoverSeeks, notifyHoverTimeSubscribers, syncTimelineMedia])
-
   // Commit the React `timelineTime` mirror at once, cancelling any pending
   // throttled commit. Used by discrete transitions (play, pause, clamp) where
   // the value must land immediately.
@@ -1936,11 +1957,17 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     timelinePreviousFrameMsRef.current = null
     isTimelinePlayingRef.current = false
     setIsTimelinePlaying(false)
-    const time = timelineTimeRef.current
+    const time = getCurrentPlaybackTimelineTime()
+    timelineTimeRef.current = time
     commitTimelineTimeState(time)
     notifyTimelineSubscribers(time)
     syncTimelineMedia(time, false)
-  }, [commitTimelineTimeState, notifyTimelineSubscribers, syncTimelineMedia])
+  }, [
+    commitTimelineTimeState,
+    getCurrentPlaybackTimelineTime,
+    notifyTimelineSubscribers,
+    syncTimelineMedia,
+  ])
 
   const playTimeline = useCallback(() => {
     if (isTimelinePlayingRef.current) return
@@ -2030,6 +2057,52 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     notifyTimelineSubscribers,
     syncTimelineMedia,
     syncTimelineMediaPlayback,
+  ])
+
+  // If the page is hidden or fullscreen preview loses focus, pause through the
+  // same committed-time path as the Pause button. This prevents rAF throttling
+  // or browser media suspension from leaving the cursor clock ahead of/behind
+  // the actual video frame when the app becomes visible again.
+  useEffect(() => {
+    if (typeof document === "undefined" || typeof window === "undefined") {
+      return
+    }
+
+    const pauseHiddenPlayback = () => {
+      if (!document.hidden) return
+
+      const hadHover = hoverPreviewActiveRef.current
+      if (hadHover) {
+        cancelInFlightHoverSeeks()
+        notifyHoverTimeSubscribers(null)
+      }
+
+      if (isTimelinePlayingRef.current) {
+        pauseTimeline()
+        return
+      }
+
+      if (hadHover) {
+        syncTimelineMedia(timelineTimeRef.current, false)
+      }
+    }
+
+    const pauseBlurredPreview = () => {
+      if (!isPreviewModeRef.current || !isTimelinePlayingRef.current) return
+      pauseTimeline()
+    }
+
+    document.addEventListener("visibilitychange", pauseHiddenPlayback)
+    window.addEventListener("blur", pauseBlurredPreview)
+    return () => {
+      document.removeEventListener("visibilitychange", pauseHiddenPlayback)
+      window.removeEventListener("blur", pauseBlurredPreview)
+    }
+  }, [
+    cancelInFlightHoverSeeks,
+    notifyHoverTimeSubscribers,
+    pauseTimeline,
+    syncTimelineMedia,
   ])
 
   const toggleTimelinePlayback = useCallback(() => {
@@ -2301,6 +2374,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const prevCursorSize = artboardRef.current.cursorSizeMultiplier
       const prevCursorMotionBlur = artboardRef.current.cursorMotionBlur
       const prevCursorMotionRotation = artboardRef.current.cursorMotionRotation
+      const prevCursorMotionRotationMode =
+        artboardRef.current.cursorMotionRotationMode
       const prevCursorMotionBlurBackend =
         artboardRef.current.cursorMotionBlurBackend
       const prevCursorSmoothingMode = artboardRef.current.cursorSmoothingMode
@@ -2323,6 +2398,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           cursorSizeMultiplier: prevCursorSize,
           cursorMotionBlur: prevCursorMotionBlur,
           cursorMotionRotation: prevCursorMotionRotation,
+          cursorMotionRotationMode: prevCursorMotionRotationMode,
           cursorMotionBlurBackend: prevCursorMotionBlurBackend,
           cursorSmoothingMode: prevCursorSmoothingMode,
           cursorClickPressScale: prevCursorClickPressScale,
@@ -2342,6 +2418,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           cursorSizeMultiplier: prevCursorSize,
           cursorMotionBlur: prevCursorMotionBlur,
           cursorMotionRotation: prevCursorMotionRotation,
+          cursorMotionRotationMode: prevCursorMotionRotationMode,
           cursorMotionBlurBackend: prevCursorMotionBlurBackend,
           cursorSmoothingMode: prevCursorSmoothingMode,
           cursorClickPressScale: prevCursorClickPressScale,
@@ -2870,6 +2947,22 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     setArtboard(nextArtboard)
   }, [])
 
+  const setCursorMotionRotationMode = useCallback(
+    (mode: CursorMotionRotationMode) => {
+      const current = artboardRef.current
+      const clamped = clampCursorMotionRotationMode(mode)
+      if (current.cursorMotionRotationMode === clamped) return
+      historyCommitTagRef.current = "cursor-motion-rotation-mode"
+      const nextArtboard: EditorArtboard = {
+        ...current,
+        cursorMotionRotationMode: clamped,
+      }
+      artboardRef.current = nextArtboard
+      setArtboard(nextArtboard)
+    },
+    []
+  )
+
   // Cursor motion-blur intensity (0..1). The blur velocity is derived from
   // cursor speed (see cursor-scene.ts `computeCursorBlur`); this is the single
   // user-facing amount. Applied identically by the editor overlay and export.
@@ -3276,6 +3369,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           savedState.artboard.cursorMotionRotation ??
             CURSOR_MOTION_ROTATION_DEFAULT
         ),
+        cursorMotionRotationMode: clampCursorMotionRotationMode(
+          savedState.artboard.cursorMotionRotationMode
+        ),
         cursorMotionBlurBackend: clampCursorMotionBlurBackend(
           savedState.artboard.cursorMotionBlurBackend
         ),
@@ -3502,6 +3598,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setCursorClickPressScale,
       setCursorAlwaysUsePointer,
       setCursorMotionRotation,
+      setCursorMotionRotationMode,
       setCursorMotionBlur,
       setCursorMotionBlurBackend,
       setViewportSize,
@@ -3531,6 +3628,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setCursorClickPressScale,
       setCursorAlwaysUsePointer,
       setCursorMotionRotation,
+      setCursorMotionRotationMode,
       setCursorMotionBlur,
       setCursorMotionBlurBackend,
       setViewportSize,
@@ -3690,6 +3788,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           savedState.artboard.cursorMotionRotation ??
             CURSOR_MOTION_ROTATION_DEFAULT
         ),
+        cursorMotionRotationMode: clampCursorMotionRotationMode(
+          savedState.artboard.cursorMotionRotationMode
+        ),
         cursorMotionBlurBackend: clampCursorMotionBlurBackend(
           savedState.artboard.cursorMotionBlurBackend
         ),
@@ -3826,6 +3927,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const previousCursorMotionBlur = artboardRef.current.cursorMotionBlur
       const previousCursorMotionRotation =
         artboardRef.current.cursorMotionRotation
+      const previousCursorMotionRotationMode =
+        artboardRef.current.cursorMotionRotationMode
       const previousCursorMotionBlurBackend =
         artboardRef.current.cursorMotionBlurBackend
       const previousCursorSmoothingMode =
@@ -3850,6 +3953,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               cursorSizeMultiplier: previousCursorSize,
               cursorMotionBlur: previousCursorMotionBlur,
               cursorMotionRotation: previousCursorMotionRotation,
+              cursorMotionRotationMode: previousCursorMotionRotationMode,
               cursorMotionBlurBackend: previousCursorMotionBlurBackend,
               cursorSmoothingMode: previousCursorSmoothingMode,
               cursorClickPressScale: previousCursorClickPressScale,
@@ -3871,6 +3975,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               cursorSizeMultiplier: previousCursorSize,
               cursorMotionBlur: previousCursorMotionBlur,
               cursorMotionRotation: previousCursorMotionRotation,
+              cursorMotionRotationMode: previousCursorMotionRotationMode,
               cursorMotionBlurBackend: previousCursorMotionBlurBackend,
               cursorSmoothingMode: previousCursorSmoothingMode,
               cursorClickPressScale: previousCursorClickPressScale,

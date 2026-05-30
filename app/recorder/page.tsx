@@ -38,7 +38,7 @@ const EMPTY_STATE: RecorderState = {
     cameraDeviceId: null,
     cameraLabel: "No camera",
     hideCameraPreview: false,
-    hideCursor: false,
+    hideCursor: true,
     systemAudioScope: "all",
     systemAudioApplications: [],
     captureKeystrokes: false,

@@ -83,7 +83,7 @@ export function projectsRoot(): string {
 }
 
 // Sticky "active project" — the folder the user last explicitly opened
-// (settings menu "Open project…") or last successfully recorded into.
+// (settings menu "Open project") or last successfully recorded into.
 // Persists in-memory across renderer reloads AND on disk across app
 // restarts, so refreshing the editor window always returns the user to the
 // project they were working on, not "the newest folder by mtime". Cleared
@@ -627,8 +627,9 @@ export function registerProjectsHandlers(
 
   ipcMain.handle(
     "projects:pickAndOpen",
-    async (): Promise<ProjectSummary | null> => {
-      const parent = options.getMainWindow()
+    async (event): Promise<ProjectSummary | null> => {
+      const parent =
+        BrowserWindow.fromWebContents(event.sender) ?? options.getMainWindow()
       const defaultPath = projectsRoot()
       const result = parent
         ? await dialog.showOpenDialog(parent, {

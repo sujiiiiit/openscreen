@@ -9,6 +9,7 @@ import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
 import {
   buildCursorTrack,
   computeCursorBlur,
+  CURSOR_MOTION_ROTATION_DIRECTION_MAX_DEG,
   CURSOR_MOTION_ROTATION_MAX_DEG,
   placeCursor,
   type CursorVideoGeometry,
@@ -176,9 +177,65 @@ describe("placeCursor motion rotation", () => {
     expect(placement.motionRotationDeg).toBeCloseTo(0, 6)
   })
 
+  it("direction-rotation mode responds to vertical motion", () => {
+    const movingDown = track([100, 100, 100], [0, 50, 100])
+    const placement = placeCursor(movingDown, geometry(), 0.1, {
+      motionRotation: 1,
+      motionRotationMode: "rotation",
+    })!
+
+    expect(Math.abs(placement.motionRotationDeg)).toBeGreaterThan(1)
+    expect(Math.abs(placement.motionRotationDeg)).toBeLessThanOrEqual(
+      CURSOR_MOTION_ROTATION_DIRECTION_MAX_DEG
+    )
+  })
+
+  it("direction-rotation mode follows the full travel vector", () => {
+    const placement = placeCursor(movingRight, geometry(), 0.1, {
+      motionRotation: 1,
+      motionRotationMode: "rotation",
+    })!
+
+    expect(placement.motionRotationDeg).toBeGreaterThan(
+      CURSOR_MOTION_ROTATION_MAX_DEG
+    )
+    expect(placement.motionRotationDeg).toBeLessThanOrEqual(
+      CURSOR_MOTION_ROTATION_DIRECTION_MAX_DEG
+    )
+  })
+
+  it("uses the cursor smoothing preset to soften rotation changes", () => {
+    const turning = track([0, 100, 100, 100, 100], [50, 50, 150, 250, 350], 100)
+    const rapidBefore = placeCursor(turning, geometry(), 0.1, {
+      motionRotation: 1,
+      motionRotationMode: "rotation",
+      smoothingMode: "rapid",
+    })!.motionRotationDeg
+    const rapidAfter = placeCursor(turning, geometry(), 0.16, {
+      motionRotation: 1,
+      motionRotationMode: "rotation",
+      smoothingMode: "rapid",
+    })!.motionRotationDeg
+    const slowBefore = placeCursor(turning, geometry(), 0.1, {
+      motionRotation: 1,
+      motionRotationMode: "rotation",
+      smoothingMode: "slow",
+    })!.motionRotationDeg
+    const slowAfter = placeCursor(turning, geometry(), 0.16, {
+      motionRotation: 1,
+      motionRotationMode: "rotation",
+      smoothingMode: "slow",
+    })!.motionRotationDeg
+
+    expect(Math.abs(slowAfter - slowBefore)).toBeLessThan(
+      Math.abs(rapidAfter - rapidBefore)
+    )
+  })
+
   it("can be disabled with a zero amount", () => {
     const placement = placeCursor(movingRight, geometry(), 0.1, {
       motionRotation: 0,
+      motionRotationMode: "rotation",
     })!
 
     expect(placement.motionRotationDeg).toBe(0)

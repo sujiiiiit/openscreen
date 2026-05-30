@@ -13,6 +13,7 @@ export type ArtboardBackground =
   | { type: "color"; value: string }
 
 export type CursorMotionBlurBackend = "gpu" | "cpu"
+export type CursorMotionRotationMode = "side-lean" | "rotation"
 export type CursorSmoothingMode = "rapid" | "quick" | "default" | "slow"
 
 export type EditorArtboard = CanvasSize & {
@@ -37,8 +38,12 @@ export type EditorArtboard = CanvasSize & {
   // CURSOR_MOTION_BLUR_DEFAULT / computeCursorBlur.
   cursorMotionBlur: number
   // Cursor motion-rotation amount, 0..1 (0 = off). Horizontal cursor velocity
-  // adds a subtle lean around the existing hotspot; shared by preview/export.
+  // adds a subtle lean, or full 2D motion direction adds a bounded rotation,
+  // around the existing hotspot; shared by preview/export.
   cursorMotionRotation: number
+  // Cursor motion-rotation behavior. Default is the Screen-Studio-style side
+  // lean; rotation follows the 2D travel vector with the same amount slider.
+  cursorMotionRotationMode: CursorMotionRotationMode
   // Renderer backend for cursor motion blur. GPU is the default for responsive
   // preview; CPU is kept as a project-level fallback/comparison mode.
   cursorMotionBlurBackend: CursorMotionBlurBackend
