@@ -13,4 +13,6 @@ export interface CommonProp extends RequiredEditData {
   timelineWidth: number;
   /** Shared flag set while the main cursor is being dragged so the time-area can suppress hover events */
   draggingCursorRef?: MutableRefObject<boolean>;
+  /** Shared flag set while a clip/row is being moved or resized so the timeline can suppress hover events */
+  draggingActionRef?: MutableRefObject<boolean>;
 }

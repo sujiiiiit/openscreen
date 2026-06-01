@@ -25,6 +25,8 @@ import { useProject } from "@/components/editor/project/provider"
 import type {
   ArtboardBackground,
   CanvasTimelineClip,
+  CanvasZoomClip,
+  CanvasZoomClipPatch,
   CanvasSize,
   CanvasVideoAppearancePatch,
   CanvasVideoItem,
@@ -47,8 +49,20 @@ import {
   fingerprintProjectState,
   projectClipToCanvasClip,
   projectVideoToCanvasVideo,
+  projectZoomClipToCanvasClip,
   serializeProjectState,
 } from "@/components/editor/canvas/persistence"
+import {
+  createZoomClipId,
+  MIN_ZOOM_CLIP_SECONDS,
+  normalizeZoomClips,
+  placeZoomSpan,
+  sanitizeZoomClipPatch,
+  withZoomClipDefaults,
+  zoomRadialBlurSettingsEqual,
+  zoomSpanOverlaps,
+  zoomTransitionSettingsEqual,
+} from "@/lib/zoom-clips"
 import {
   applyHistoryCommit,
   canRedoHistory,
@@ -190,6 +204,8 @@ type EditorCanvasContextValue = {
   selectedVideo: CanvasVideoItem | null
   timelineClips: CanvasTimelineClip[]
   selectedTimelineClip: CanvasTimelineClip | null
+  zoomClips: CanvasZoomClip[]
+  selectedZoomClipId: string | null
   timelineTime: number
   timelineDuration: number
   timelineZoom: number
@@ -240,7 +256,7 @@ type EditorCanvasContextValue = {
   onTimelineVideoSeeked: (
     id: string,
     element: HTMLVideoElement,
-    redrawLayer: () => void
+    redrawLayer: (afterDraw?: () => void) => void
   ) => void
   updateHoverPreviewTime: (time: number | null) => void
   subscribeHoverTime: (subscriber: HoverTimeSubscriber) => () => void
@@ -258,6 +274,17 @@ type EditorCanvasContextValue = {
     end: number,
     direction: TimelineResizeDirection
   ) => void
+  addZoomClip: (start: number, end: number) => void
+  moveZoomClip: (id: string, start: number) => void
+  resizeZoomClip: (
+    id: string,
+    start: number,
+    end: number,
+    direction: "left" | "right"
+  ) => void
+  updateZoomClip: (id: string, patch: CanvasZoomClipPatch) => void
+  removeZoomClip: (id: string) => void
+  selectZoomClip: (id: string | null) => void
   subscribeTimelineTicks: (subscriber: TimelineTickSubscriber) => () => void
   stepTimelineFrame: (direction: number) => void
   registerTimelineVideoFps: (id: string, fps: number) => void
@@ -286,6 +313,8 @@ type EditorCanvasTimelineContextValue = Pick<
   EditorCanvasContextValue,
   | "timelineClips"
   | "selectedTimelineClip"
+  | "zoomClips"
+  | "selectedZoomClipId"
   | "timelineTime"
   | "timelineDuration"
   | "timelineZoom"
@@ -345,6 +374,12 @@ type EditorCanvasTimelineActionsContextValue = Pick<
   | "fitTimelineToWidth"
   | "moveTimelineClip"
   | "resizeTimelineClip"
+  | "addZoomClip"
+  | "moveZoomClip"
+  | "resizeZoomClip"
+  | "updateZoomClip"
+  | "removeZoomClip"
+  | "selectZoomClip"
   | "subscribeTimelineTicks"
   | "stepTimelineFrame"
   | "registerTimelineVideoFps"
@@ -645,6 +680,17 @@ function buildTimelineClipByVideoId(clips: CanvasTimelineClip[]) {
   return new Map(clips.map((clip) => [clip.videoId, clip]))
 }
 
+function getTimelineDurationForClips(clips: readonly CanvasTimelineClip[]) {
+  if (clips.length === 0) return 0
+
+  const clipDuration = clips.reduce(
+    (duration, clip) => Math.max(duration, clip.end),
+    0
+  )
+
+  return Math.max(TIMELINE_MIN_CLIP_DURATION_SECONDS, clipDuration)
+}
+
 function areSetsEqual<T>(left: ReadonlySet<T>, right: ReadonlySet<T>) {
   if (left.size !== right.size) return false
 
@@ -681,6 +727,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const [isPreviewMode, setIsPreviewMode] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
   const [timelineClips, setTimelineClips] = useState<CanvasTimelineClip[]>([])
+  // Manual Zoom-track clips (persisted) + the session-only selected zoom clip.
+  // Selection is intentionally NOT persisted (mirrors `selectedItemId`).
+  const [zoomClips, setZoomClips] = useState<CanvasZoomClip[]>([])
+  const [selectedZoomClipId, setSelectedZoomClipId] = useState<string | null>(
+    null
+  )
   const [timelineTime, setTimelineTimeState] = useState(0)
   const [timelineZoom, setTimelineZoom] = useState(1)
   const [isTimelineFit, setIsTimelineFit] = useState(true)
@@ -707,6 +759,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const timelineClipByVideoIdRef = useRef(
     buildTimelineClipByVideoId(timelineClips)
   )
+  const zoomClipsRef = useRef(zoomClips)
+  const selectedZoomClipIdRef = useRef(selectedZoomClipId)
   const timelineTimeRef = useRef(timelineTime)
   const timelineDurationRef = useRef(0)
   const isTimelinePlayingRef = useRef(isTimelinePlaying)
@@ -902,7 +956,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
             artboardRef.current,
             videosRef.current,
             timelineClipsRef.current,
-            detachedVideosRef.current
+            detachedVideosRef.current,
+            zoomClipsRef.current
           )
           const fingerprint = fingerprintProjectState(snapshot)
           // Snapshot the tag at the same instant as the state so a user
@@ -1002,7 +1057,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       artboardRef.current,
       videosRef.current,
       timelineClipsRef.current,
-      detachedVideosRef.current
+      detachedVideosRef.current,
+      zoomClipsRef.current
     )
     const fingerprint = fingerprintProjectState(snapshot)
     const capturedTag = historyCommitTagRef.current
@@ -1037,6 +1093,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     []
   )
 
+  const commitZoomClipsRef = useCallback((nextClips: CanvasZoomClip[]) => {
+    zoomClipsRef.current = nextClips
+  }, [])
+
   useEffect(() => {
     commitVideosRef(videos)
   }, [commitVideosRef, videos])
@@ -1048,6 +1108,14 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     commitTimelineClipsRef(timelineClips)
   }, [commitTimelineClipsRef, timelineClips])
+
+  useEffect(() => {
+    commitZoomClipsRef(zoomClips)
+  }, [commitZoomClipsRef, zoomClips])
+
+  useEffect(() => {
+    selectedZoomClipIdRef.current = selectedZoomClipId
+  }, [selectedZoomClipId])
 
   useEffect(() => {
     timelineTimeRef.current = timelineTime
@@ -1081,14 +1149,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     // An empty timeline has no duration — report 0 so the transport reads
     // 00:00.00. The minimum-clip floor only applies once at least one clip
     // exists, to guarantee a non-zero scrub range.
-    if (timelineClips.length === 0) return 0
-
-    const clipDuration = timelineClips.reduce(
-      (duration, clip) => Math.max(duration, clip.end),
-      0
-    )
-
-    return Math.max(TIMELINE_MIN_CLIP_DURATION_SECONDS, clipDuration)
+    return getTimelineDurationForClips(timelineClips)
   }, [timelineClips])
 
   const primaryAudioVideoId = useMemo(
@@ -2258,7 +2319,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       artboardRef.current,
       videosRef.current,
       timelineClipsRef.current,
-      detachedVideosRef.current
+      detachedVideosRef.current,
+      zoomClipsRef.current
     )
     historyRef.current = {
       past: [
@@ -2572,6 +2634,164 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     [commitTimelineClipsRef, syncTimelineMedia]
   )
 
+  // --- Manual Zoom-track clips ---------------------------------------------
+  // Zoom clips are output camera effects. Mutations update persisted state and
+  // the workspace/export paths sample the current list by composition time.
+  // Reads use the live ref so consecutive actions in one tick see fresh state.
+  const selectZoomClip = useCallback((id: string | null) => {
+    selectedZoomClipIdRef.current = id
+    setSelectedZoomClipId((current) => (current === id ? current : id))
+    // A zoom clip and a video are never co-selected: the right-panel inspector
+    // and canvas Transformer key off `selectedItemId`, so clear it.
+    if (id !== null) {
+      selectedItemIdRef.current = null
+      setSelectedItemId((current) => (current === null ? current : null))
+    }
+  }, [])
+
+  const addZoomClip = useCallback(
+    (start: number, end: number) => {
+      const placed = placeZoomSpan(
+        zoomClipsRef.current,
+        timelineDurationRef.current,
+        start,
+        end,
+        null
+      )
+      if (!placed) return
+      const clip = withZoomClipDefaults({
+        id: createZoomClipId(),
+        start: placed.start,
+        end: placed.end,
+      })
+      const next = [...zoomClipsRef.current, clip].sort(
+        (a, b) => a.start - b.start
+      )
+      historyCommitTagRef.current = "zoom-add"
+      commitZoomClipsRef(next)
+      setZoomClips(next)
+      selectZoomClip(clip.id)
+    },
+    [commitZoomClipsRef, selectZoomClip]
+  )
+
+  const moveZoomClip = useCallback(
+    (id: string, start: number) => {
+      const clip = zoomClipsRef.current.find((c) => c.id === id)
+      if (!clip) return
+      const duration = Math.max(MIN_ZOOM_CLIP_SECONDS, clip.end - clip.start)
+      const timelineDuration = Math.max(0, timelineDurationRef.current)
+      const maxStart = Math.max(0, timelineDuration - duration)
+      const nextStart = Math.max(
+        0,
+        Math.min(Number.isFinite(start) ? start : 0, maxStart)
+      )
+      const nextEnd = nextStart + duration
+      if (nextStart === clip.start) return
+      // Safety net only — real-time `onActionMoving` blocks overlap during the
+      // drag, so the committed position should already be clear.
+      const overlaps = zoomSpanOverlaps(
+        zoomClipsRef.current,
+        nextStart,
+        nextEnd,
+        id
+      )
+      if (overlaps) return
+      historyCommitTagRef.current = "zoom-move"
+      const next = zoomClipsRef.current
+        .map((c) =>
+          c.id === id ? { ...c, start: nextStart, end: nextEnd } : c
+        )
+        .sort((a, b) => a.start - b.start)
+      commitZoomClipsRef(next)
+      setZoomClips(next)
+    },
+    [commitZoomClipsRef]
+  )
+
+  const resizeZoomClip = useCallback(
+    (id: string, start: number, end: number, direction: "left" | "right") => {
+      const clip = zoomClipsRef.current.find((c) => c.id === id)
+      if (!clip) return
+      const timelineDuration = Math.max(0, timelineDurationRef.current)
+      let nextStart = clip.start
+      let nextEnd = clip.end
+      if (direction === "left") {
+        nextStart = Math.max(
+          0,
+          Math.min(start, clip.end - MIN_ZOOM_CLIP_SECONDS)
+        )
+      } else {
+        nextEnd = Math.min(
+          timelineDuration,
+          Math.max(end, clip.start + MIN_ZOOM_CLIP_SECONDS)
+        )
+      }
+      if (nextStart === clip.start && nextEnd === clip.end) return
+      const overlaps = zoomSpanOverlaps(
+        zoomClipsRef.current,
+        nextStart,
+        nextEnd,
+        id
+      )
+      if (overlaps) return
+      historyCommitTagRef.current = "zoom-resize"
+      const next = zoomClipsRef.current
+        .map((c) =>
+          c.id === id ? { ...c, start: nextStart, end: nextEnd } : c
+        )
+        .sort((a, b) => a.start - b.start)
+      commitZoomClipsRef(next)
+      setZoomClips(next)
+    },
+    [commitZoomClipsRef]
+  )
+
+  const updateZoomClip = useCallback(
+    (id: string, patch: CanvasZoomClipPatch) => {
+      const current = zoomClipsRef.current.find((c) => c.id === id)
+      if (!current) return
+      const sanitized = sanitizeZoomClipPatch(patch)
+      if (Object.keys(sanitized).length === 0) return
+      const nextClip = withZoomClipDefaults({ ...current, ...sanitized })
+      const changed =
+        nextClip.enabled !== current.enabled ||
+        nextClip.focus.x !== current.focus.x ||
+        nextClip.focus.y !== current.focus.y ||
+        nextClip.scale !== current.scale ||
+        nextClip.radialBlur !== current.radialBlur ||
+        !zoomRadialBlurSettingsEqual(
+          nextClip.radialBlurSettings,
+          current.radialBlurSettings
+        ) ||
+        !zoomTransitionSettingsEqual(nextClip.transition, current.transition) ||
+        nextClip.easePreset !== current.easePreset
+      if (!changed) return
+      historyCommitTagRef.current = "zoom-settings"
+      const next = zoomClipsRef.current.map((clip) =>
+        clip.id === id ? nextClip : clip
+      )
+      commitZoomClipsRef(next)
+      setZoomClips(next)
+    },
+    [commitZoomClipsRef]
+  )
+
+  const removeZoomClip = useCallback(
+    (id: string) => {
+      if (!zoomClipsRef.current.some((c) => c.id === id)) return
+      historyCommitTagRef.current = "zoom-remove"
+      const next = zoomClipsRef.current.filter((c) => c.id !== id)
+      commitZoomClipsRef(next)
+      setZoomClips(next)
+      if (selectedZoomClipIdRef.current === id) {
+        selectedZoomClipIdRef.current = null
+        setSelectedZoomClipId(null)
+      }
+    },
+    [commitZoomClipsRef]
+  )
+
   const addVideoFile = useCallback(
     async (file: File) => {
       if (!file.type.startsWith("video/")) {
@@ -2830,6 +3050,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const selectItem = useCallback((id: string | null) => {
     selectedItemIdRef.current = id
     setSelectedItemId((current) => (current === id ? current : id))
+    // A zoom clip and a video are never co-selected; selecting a video clears
+    // any zoom-clip selection.
+    if (id !== null && selectedZoomClipIdRef.current !== null) {
+      selectedZoomClipIdRef.current = null
+      setSelectedZoomClipId(null)
+    }
   }, [])
 
   const setArtboardGrain = useCallback((grain: number) => {
@@ -3403,6 +3629,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const restoredClips: CanvasTimelineClip[] = savedState.timelineClips
         .filter((clip) => restoredVideoIds.has(clip.videoId))
         .map(projectClipToCanvasClip)
+      const restoredZoomClips = normalizeZoomClips(
+        (savedState.zoomClips ?? []).map(projectZoomClipToCanvasClip),
+        getTimelineDurationForClips(restoredClips)
+      )
 
       restoringFromHistoryRef.current = true
       historyRef.current = {
@@ -3415,10 +3645,21 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       commitVideosRef(restoredVideos)
       commitDetachedVideosRef(restoredDetached)
       commitTimelineClipsRef(restoredClips)
+      commitZoomClipsRef(restoredZoomClips)
       setArtboard(savedArtboard)
       setVideos(restoredVideos)
       setDetachedVideos(restoredDetached)
       setTimelineClips(restoredClips)
+      setZoomClips(restoredZoomClips)
+      // Drop the zoom selection if the restored set no longer contains it
+      // (session-only state isn't part of the snapshot).
+      if (
+        selectedZoomClipIdRef.current !== null &&
+        !restoredZoomClips.some((c) => c.id === selectedZoomClipIdRef.current)
+      ) {
+        selectedZoomClipIdRef.current = null
+        setSelectedZoomClipId(null)
+      }
 
       // If the restored artboard has different dimensions, refit the view
       // to it — matches `setArtboardPreset`'s behavior so undoing/redoing
@@ -3451,13 +3692,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
 
       // Clamp the playhead if the restored timeline is shorter than the
       // current position. Sync media so the canvas catches up immediately.
-      const newDuration = Math.max(
-        TIMELINE_MIN_CLIP_DURATION_SECONDS,
-        restoredClips.reduce(
-          (duration, clip) => Math.max(duration, clip.end),
-          0
-        )
-      )
+      const newDuration = getTimelineDurationForClips(restoredClips)
       if (timelineTimeRef.current > newDuration) {
         const clamped = clampTimelineTime(timelineTimeRef.current, newDuration)
         timelineTimeRef.current = clamped
@@ -3478,6 +3713,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     [
       commitDetachedVideosRef,
       commitTimelineClipsRef,
+      commitZoomClipsRef,
       commitVideosRef,
       resolveObjectUrlForRestore,
       resolveFileSizeForRestore,
@@ -3551,6 +3787,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     () => ({
       timelineClips,
       selectedTimelineClip,
+      zoomClips,
+      selectedZoomClipId,
       timelineTime,
       timelineDuration,
       timelineZoom,
@@ -3567,6 +3805,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       isTimelinePlaying,
       primaryAudioVideoId,
       selectedTimelineClip,
+      zoomClips,
+      selectedZoomClipId,
       timelineFitRequestId,
       timelineVisibleVideoIds,
       timelineClips,
@@ -3655,6 +3895,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       fitTimelineToWidth,
       moveTimelineClip,
       resizeTimelineClip,
+      addZoomClip,
+      moveZoomClip,
+      resizeZoomClip,
+      updateZoomClip,
+      removeZoomClip,
+      selectZoomClip,
       subscribeTimelineTicks,
       stepTimelineFrame,
       registerTimelineVideoFps,
@@ -3674,6 +3920,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       zoomTimelineOut,
       moveTimelineClip,
       resizeTimelineClip,
+      addZoomClip,
+      moveZoomClip,
+      resizeZoomClip,
+      updateZoomClip,
+      removeZoomClip,
+      selectZoomClip,
       subscribeTimelineTicks,
       stepTimelineFrame,
       registerTimelineVideoFps,
@@ -3740,6 +3992,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       commitVideosRef([])
       commitDetachedVideosRef([])
       commitTimelineClipsRef([])
+      commitZoomClipsRef([])
       timelineCanvasNodesRef.current.forEach((node) => {
         node.visible(false)
         node.listening(false)
@@ -3750,13 +4003,16 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       isTimelinePlayingRef.current = false
       isPreviewModeRef.current = false
       selectedItemIdRef.current = null
+      selectedZoomClipIdRef.current = null
       setVideos([])
       setDetachedVideos([])
       setTimelineClips([])
+      setZoomClips([])
       setTimelineTimeState(0)
       setIsTimelinePlaying(false)
       setIsPreviewMode(false)
       setSelectedItemId(null)
+      setSelectedZoomClipId(null)
     }
 
     hydrationGenerationRef.current += 1
@@ -3858,6 +4114,16 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       commitTimelineClipsRef(restoredClips)
       setTimelineClips(restoredClips)
 
+      // Zoom clips reference no video, but they are still clamped to the live
+      // timeline and normalized into one non-overlapping lane. This keeps old
+      // or hand-edited project.json files from resurrecting collisions.
+      const restoredZoomClips = normalizeZoomClips(
+        (savedState.zoomClips ?? []).map(projectZoomClipToCanvasClip),
+        getTimelineDurationForClips(restoredClips)
+      )
+      commitZoomClipsRef(restoredZoomClips)
+      setZoomClips(restoredZoomClips)
+
       // Seed the last-written fingerprint with the hydrated snapshot so the
       // autosave effect's immediate post-hydration run sees "no diff" and
       // skips the IPC. Without this, every project open pays an extra
@@ -3866,7 +4132,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         savedArtboard,
         restoredVideos,
         restoredClips,
-        restoredDetached
+        restoredDetached,
+        restoredZoomClips
       )
       const hydratedFingerprint = fingerprintProjectState(hydratedSnapshot)
       lastWrittenSerializedRef.current = hydratedFingerprint
@@ -4005,7 +4272,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         artboardRef.current,
         videosRef.current,
         timelineClipsRef.current,
-        detachedVideosRef.current
+        detachedVideosRef.current,
+        zoomClipsRef.current
       )
       lastWrittenSerializedRef.current =
         fingerprintProjectState(baselineSnapshot)
@@ -4061,6 +4329,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     addRemoteVideo,
     commitDetachedVideosRef,
     commitTimelineClipsRef,
+    commitZoomClipsRef,
     commitTimelineVisibleVideoIds,
     commitVideosRef,
     project,
@@ -4102,7 +4371,15 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         autosaveRetryTimerRef.current = null
       }
     }
-  }, [artboard, videos, detachedVideos, timelineClips, project, flushAutosave])
+  }, [
+    artboard,
+    videos,
+    detachedVideos,
+    timelineClips,
+    zoomClips,
+    project,
+    flushAutosave,
+  ])
 
   // Window-level flush hooks. We only react if the gate (project + hydrated)
   // passes — otherwise blur during boot would otherwise trigger an empty save.

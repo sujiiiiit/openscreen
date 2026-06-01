@@ -145,11 +145,39 @@ export interface ProjectTimelineClip {
   sourceOut: number
 }
 
+// Manual zoom-track segment (timeline seconds). The optional settings were
+// added without a version bump so span-only legacy clips keep loading and pick
+// up renderer defaults in the renderer.
+export interface ProjectZoomClip {
+  id: string
+  start: number
+  end: number
+  enabled?: boolean
+  focus?: { x: number; y: number }
+  scale?: number
+  radialBlur?: number
+  radialBlurSettings?: {
+    strength?: number
+    falloff?: number
+    centerSize?: number
+    centerSharpness?: number
+  }
+  transition?: {
+    easeIn?: number
+    easeOut?: number
+    curve?: "linear" | "smoothstep" | "smootherstep" | "ease-out-cubic"
+  }
+  // Legacy preset field. New saves prefer explicit `transition`.
+  easePreset?: "smooth" | "snappy" | "slow"
+}
+
 export interface ProjectStateV1 {
   version: 1
   artboard: ProjectArtboard
   videos: ProjectVideo[]
   timelineClips: ProjectTimelineClip[]
+  // Optional: absent in projects saved before the Zoom track shipped.
+  zoomClips?: ProjectZoomClip[]
   updatedAtUnixMs: number
 }
 
@@ -189,6 +217,10 @@ export function parseProjectState(input: unknown): ProjectStateV1 | null {
   const timelineClips = parseArray(input["timelineClips"], parseTimelineClip)
   if (!timelineClips) return null
 
+  // Optional + tolerant: absent → undefined (legacy projects); malformed
+  // entries are dropped rather than rejecting the whole project.
+  const zoomClips = parseZoomClips(input["zoomClips"])
+
   const updatedAtUnixMs =
     typeof input["updatedAtUnixMs"] === "number" &&
     Number.isFinite(input["updatedAtUnixMs"])
@@ -200,6 +232,7 @@ export function parseProjectState(input: unknown): ProjectStateV1 | null {
     artboard,
     videos,
     timelineClips,
+    ...(zoomClips ? { zoomClips } : {}),
     updatedAtUnixMs,
   }
 }
@@ -490,4 +523,123 @@ function parseTimelineClip(value: unknown): ProjectTimelineClip | null {
     sourceIn: value["sourceIn"] as number,
     sourceOut: value["sourceOut"] as number,
   }
+}
+
+const ZOOM_EASE_PRESETS = ["smooth", "snappy", "slow"] as const
+const ZOOM_TRANSITION_CURVES = [
+  "linear",
+  "smoothstep",
+  "smootherstep",
+  "ease-out-cubic",
+] as const
+
+function clampUnit(value: number) {
+  return Math.min(1, Math.max(0, value))
+}
+
+function clampRange(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value))
+}
+
+function parseZoomClip(value: unknown): ProjectZoomClip | null {
+  if (!isRecord(value)) return null
+  if (typeof value["id"] !== "string" || !value["id"]) return null
+  if (!isFiniteNumber(value["start"]) || !isFiniteNumber(value["end"])) {
+    return null
+  }
+  const start = value["start"] as number
+  const end = value["end"] as number
+  // Drop degenerate/negative spans defensively; a manual zoom clip is always a
+  // forward, in-bounds range.
+  if (start < 0 || end <= start) return null
+
+  const focus = (() => {
+    const raw = value["focus"]
+    if (!isRecord(raw)) return undefined
+    if (!isFiniteNumber(raw["x"]) || !isFiniteNumber(raw["y"])) {
+      return undefined
+    }
+    return {
+      x: clampUnit(raw["x"] as number),
+      y: clampUnit(raw["y"] as number),
+    }
+  })()
+  const scale = isFiniteNumber(value["scale"])
+    ? Math.min(2.5, Math.max(1, value["scale"] as number))
+    : undefined
+  const radialBlur = isFiniteNumber(value["radialBlur"])
+    ? clampUnit(value["radialBlur"] as number)
+    : undefined
+  const radialBlurSettings = (() => {
+    const raw = value["radialBlurSettings"]
+    if (!isRecord(raw)) return undefined
+    const settings: NonNullable<ProjectZoomClip["radialBlurSettings"]> = {}
+    if (isFiniteNumber(raw["strength"])) {
+      settings.strength = clampRange(raw["strength"] as number, 0, 2)
+    }
+    if (isFiniteNumber(raw["falloff"])) {
+      settings.falloff = clampRange(raw["falloff"] as number, 0.05, 1)
+    }
+    if (isFiniteNumber(raw["centerSize"])) {
+      settings.centerSize = clampRange(raw["centerSize"] as number, 0.02, 0.5)
+    }
+    if (isFiniteNumber(raw["centerSharpness"])) {
+      settings.centerSharpness = clampUnit(raw["centerSharpness"] as number)
+    }
+    return Object.keys(settings).length > 0 ? settings : undefined
+  })()
+  const transition = (() => {
+    const raw = value["transition"]
+    if (!isRecord(raw)) return undefined
+    const settings: NonNullable<ProjectZoomClip["transition"]> = {}
+    if (isFiniteNumber(raw["easeIn"])) {
+      settings.easeIn = clampRange(raw["easeIn"] as number, 0, 0.75)
+    }
+    if (isFiniteNumber(raw["easeOut"])) {
+      settings.easeOut = clampRange(raw["easeOut"] as number, 0, 0.75)
+    }
+    if (
+      ZOOM_TRANSITION_CURVES.includes(
+        raw["curve"] as (typeof ZOOM_TRANSITION_CURVES)[number]
+      )
+    ) {
+      settings.curve = raw["curve"] as (typeof ZOOM_TRANSITION_CURVES)[number]
+    }
+    return Object.keys(settings).length > 0 ? settings : undefined
+  })()
+  const easePreset = ZOOM_EASE_PRESETS.includes(
+    value["easePreset"] as (typeof ZOOM_EASE_PRESETS)[number]
+  )
+    ? (value["easePreset"] as (typeof ZOOM_EASE_PRESETS)[number])
+    : undefined
+
+  return {
+    id: value["id"] as string,
+    start,
+    end,
+    ...(typeof value["enabled"] === "boolean"
+      ? { enabled: value["enabled"] as boolean }
+      : {}),
+    ...(focus ? { focus } : {}),
+    ...(typeof scale === "number" ? { scale } : {}),
+    ...(typeof radialBlur === "number" ? { radialBlur } : {}),
+    ...(radialBlurSettings ? { radialBlurSettings } : {}),
+    ...(transition ? { transition } : {}),
+    ...(easePreset ? { easePreset } : {}),
+  }
+}
+
+// Tolerant by design: a malformed `zoomClips` array (or individual entry) must
+// never reject the whole project — unlike the required `timelineClips`. Absent
+// or non-array input returns `undefined` so the serialized state can omit the
+// key entirely for legacy projects.
+function parseZoomClips(value: unknown): ProjectZoomClip[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) return undefined
+  const out: ProjectZoomClip[] = []
+  for (const raw of value) {
+    const parsed = parseZoomClip(raw)
+    if (parsed) out.push(parsed)
+  }
+  return out
 }

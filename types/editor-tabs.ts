@@ -1,15 +1,16 @@
-import type { ReactNode } from "react";
+import type { ReactNode } from "react"
 
 export type TabId =
   | "background"
   | "cursor"
+  | "zoom"
   | "video"
   | "subtitle"
-  | "audio";
+  | "audio"
 
 export type TabItem = {
-  id: TabId;
-  label: string;
-  icon: ReactNode;
-  content: ReactNode;
-};
+  id: TabId
+  label: string
+  icon: ReactNode
+  content: ReactNode
+}

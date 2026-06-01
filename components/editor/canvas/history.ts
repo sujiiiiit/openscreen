@@ -37,6 +37,11 @@ export type HistoryCommitTag =
   | "cursor-motion-blur-backend"
   | "clip-move"
   | "clip-resize"
+  | "zoom-add"
+  | "zoom-move"
+  | "zoom-resize"
+  | "zoom-settings"
+  | "zoom-remove"
   | "unknown"
 
 export interface HistoryEntry {

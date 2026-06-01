@@ -19,6 +19,13 @@ import { CanvasCursorOverlay } from "@/components/editor/canvas/canvas-cursor-ov
 import { CanvasVideoNode } from "@/components/editor/canvas/canvas-video-node"
 import { PreviewControls } from "@/components/editor/canvas/preview-controls"
 import {
+  IDENTITY_ZOOM_CAMERA,
+  applyZoomCamera,
+  sampleZoomCameraAtTime,
+  zoomCamerasEqual,
+  type ZoomCamera,
+} from "@/components/editor/canvas/zoom-scene"
+import {
   HOVER_OUTLINE_STROKE,
   HOVER_OUTLINE_STROKE_WIDTH,
   KEYBOARD_NUDGE_LARGE_STEP,
@@ -65,11 +72,16 @@ import {
 } from "@/lib/editor-canvas-snap"
 import {
   ARTBOARD_SELECTION_ID,
+  type CanvasZoomClip,
   type CanvasVideoItem,
   type EditorArtboard,
   type ViewTransform,
 } from "@/types/editor-canvas"
 import { useSidebarTabsContext } from "@/components/editor/sidebar/tabs-provider"
+import {
+  createRadialZoomBlurRenderer,
+  type RadialZoomBlurRenderer,
+} from "@/lib/motion-blur/radial-zoom-blur"
 
 const SELECTION_TOOLBAR_GAP = 18
 const SELECTION_TOOLBAR_VIEWPORT_MARGIN = 12
@@ -177,8 +189,14 @@ function getVideoNodeScreenRect(
 export default function EditorWorkspace() {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const stageRef = useRef<Konva.Stage | null>(null)
+  const backgroundLayerRef = useRef<Konva.Layer | null>(null)
   const contentLayerRef = useRef<Konva.Layer | null>(null)
   const overlayLayerRef = useRef<Konva.Layer | null>(null)
+  const backgroundCameraGroupRef = useRef<Konva.Group | null>(null)
+  const contentCameraGroupRef = useRef<Konva.Group | null>(null)
+  const zoomBlurCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const zoomBlurRendererRef = useRef<RadialZoomBlurRenderer | null>(null)
+  const lastZoomCameraRef = useRef<ZoomCamera>(IDENTITY_ZOOM_CAMERA)
   const artboardBackdropRef = useRef<HTMLDivElement | null>(null)
   const selectionToolbarRef = useRef<HTMLDivElement | null>(null)
   const rotationReadoutRef = useRef<HTMLDivElement | null>(null)
@@ -187,8 +205,12 @@ export default function EditorWorkspace() {
   const viewportSizeRef = useRef({ width: 0, height: 0 })
   const toolbarSizeRef = useRef(DEFAULT_SELECTION_TOOLBAR_SIZE)
   const selectedItemIdRef = useRef<string | null>(null)
+  const selectedZoomClipIdRef = useRef<string | null>(null)
   const selectedVideoRef = useRef<CanvasVideoItem | null>(null)
   const timelineVisibleVideoIdsRef = useRef<ReadonlySet<string>>(new Set())
+  const zoomClipsRef = useRef<CanvasZoomClip[]>([])
+  const timelineTimeRef = useRef(0)
+  const hoverPreviewTimeRef = useRef<number | null>(null)
   const videoNodeMapRef = useRef(new Map<string, Konva.Image>())
   const isSpacePressedRef = useRef(false)
   const isPanningRef = useRef(false)
@@ -214,8 +236,13 @@ export default function EditorWorkspace() {
   const artboardRef = useRef<EditorArtboard | null>(null)
   const nudgeGuideClearTimerRef = useRef<number | null>(null)
   const { videos, selectedItemId, selectedVideo } = useEditorCanvasMedia()
-  const { primaryAudioVideoId, timelineVisibleVideoIds } =
-    useEditorCanvasTimeline()
+  const {
+    primaryAudioVideoId,
+    timelineVisibleVideoIds,
+    selectedZoomClipId,
+    zoomClips,
+    timelineTime,
+  } = useEditorCanvasTimeline()
   const { artboard } = useEditorCanvasArtboard()
   const { viewportSize, viewTransform, isPreviewMode } = useEditorCanvasView()
   const {
@@ -239,6 +266,9 @@ export default function EditorWorkspace() {
     playTimeline,
     pauseTimeline,
     toggleTimelinePlayback,
+    removeZoomClip,
+    subscribeTimelineTicks,
+    subscribeHoverTime,
   } = useEditorCanvasTimelineActions()
   const { undo, redo } = useEditorHistory()
   const { selectTab: selectSidebarTab, open: openSidebar } =
@@ -482,6 +512,154 @@ export default function EditorWorkspace() {
     [updateRotationReadout, updateSelectionToolbarPosition]
   )
 
+  const setZoomSourceLayerOpacity = useCallback((opacity: "0" | "1") => {
+    for (const layer of [backgroundLayerRef.current, contentLayerRef.current]) {
+      const canvas = (
+        layer?.getCanvas() as unknown as { _canvas?: HTMLCanvasElement }
+      )?._canvas
+      if (canvas) canvas.style.opacity = opacity
+    }
+  }, [])
+
+  const hideZoomBlurOverlay = useCallback(() => {
+    const canvas = zoomBlurCanvasRef.current
+    if (canvas) {
+      canvas.style.visibility = "hidden"
+      const ctx = canvas.getContext("2d")
+      ctx?.clearRect(0, 0, canvas.width, canvas.height)
+    }
+    setZoomSourceLayerOpacity("1")
+  }, [setZoomSourceLayerOpacity])
+
+  const renderZoomBlurOverlay = useCallback(
+    (camera: ZoomCamera) => {
+      const canvas = zoomBlurCanvasRef.current
+      const backgroundLayer = backgroundLayerRef.current
+      const contentLayer = contentLayerRef.current
+      const viewport = viewportSizeRef.current
+      const artboard = artboardRef.current
+      if (
+        !canvas ||
+        !backgroundLayer ||
+        !contentLayer ||
+        !artboard ||
+        camera.radialBlur <= 0 ||
+        viewport.width <= 0 ||
+        viewport.height <= 0
+      ) {
+        hideZoomBlurOverlay()
+        return
+      }
+
+      let renderer = zoomBlurRendererRef.current
+      if (!renderer) {
+        renderer = createRadialZoomBlurRenderer()
+        zoomBlurRendererRef.current = renderer
+      }
+      if (!renderer) {
+        hideZoomBlurOverlay()
+        return
+      }
+
+      const width = Math.max(1, Math.round(viewport.width))
+      const height = Math.max(1, Math.round(viewport.height))
+      if (canvas.width !== width) canvas.width = width
+      if (canvas.height !== height) canvas.height = height
+
+      const ctx = canvas.getContext("2d")
+      if (!ctx) {
+        hideZoomBlurOverlay()
+        return
+      }
+
+      ctx.clearRect(0, 0, width, height)
+      const backgroundCanvas = (
+        backgroundLayer.getCanvas() as unknown as {
+          _canvas?: HTMLCanvasElement
+        }
+      )._canvas
+      const contentCanvas = (
+        contentLayer.getCanvas() as unknown as { _canvas?: HTMLCanvasElement }
+      )._canvas
+      if (backgroundCanvas) ctx.drawImage(backgroundCanvas, 0, 0, width, height)
+      if (contentCanvas) ctx.drawImage(contentCanvas, 0, 0, width, height)
+
+      const stage = stageRef.current
+      const fallbackView = viewTransformRef.current
+      const activeView = {
+        x: stage?.x() ?? fallbackView.x,
+        y: stage?.y() ?? fallbackView.y,
+        scale: stage?.scaleX() ?? fallbackView.scale,
+      }
+      const blurred = renderer.render(canvas, width, height, {
+        centerX: activeView.x + (artboard.width / 2) * activeView.scale,
+        centerY: activeView.y + (artboard.height / 2) * activeView.scale,
+        amount: camera.radialBlur,
+        ...camera.radialBlurSettings,
+      })
+      ctx.clearRect(0, 0, width, height)
+      ctx.drawImage(blurred, 0, 0)
+      ctx.save()
+      ctx.strokeStyle = "rgba(0,0,0,0.10)"
+      ctx.lineWidth = 1
+      ctx.strokeRect(
+        activeView.x + 0.5,
+        activeView.y + 0.5,
+        Math.max(0, artboard.width * activeView.scale - 1),
+        Math.max(0, artboard.height * activeView.scale - 1)
+      )
+      ctx.restore()
+      canvas.style.visibility = "visible"
+      setZoomSourceLayerOpacity("0")
+    },
+    [hideZoomBlurOverlay, setZoomSourceLayerOpacity]
+  )
+
+  const applyManualZoomAtTime = useCallback(
+    (time: number) => {
+      const artboard = artboardRef.current
+      if (!artboard) return
+      const camera = sampleZoomCameraAtTime(
+        zoomClipsRef.current,
+        artboard,
+        time
+      )
+      const didChange = !zoomCamerasEqual(lastZoomCameraRef.current, camera)
+      lastZoomCameraRef.current = camera
+
+      applyZoomCamera(backgroundCameraGroupRef.current, camera)
+      applyZoomCamera(contentCameraGroupRef.current, camera)
+      if (didChange) {
+        backgroundLayerRef.current?.batchDraw()
+        contentLayerRef.current?.batchDraw()
+      }
+      renderZoomBlurOverlay(camera)
+    },
+    [renderZoomBlurOverlay]
+  )
+
+  const applyManualZoomAtPreviewTime = useCallback(() => {
+    applyManualZoomAtTime(
+      hoverPreviewTimeRef.current ?? timelineTimeRef.current
+    )
+  }, [applyManualZoomAtTime])
+
+  const handleTimelineVideoSeeked = useCallback(
+    (
+      id: string,
+      element: HTMLVideoElement,
+      redrawLayer: (afterDraw?: () => void) => void
+    ) => {
+      onTimelineVideoSeeked(id, element, (afterDraw) => {
+        redrawLayer(() => {
+          afterDraw?.()
+          renderZoomBlurOverlay(lastZoomCameraRef.current)
+        })
+      })
+    },
+    [onTimelineVideoSeeked, renderZoomBlurOverlay]
+  )
+
   useLayoutEffect(() => {
     viewTransformRef.current = viewTransform
 
@@ -500,7 +678,13 @@ export default function EditorWorkspace() {
     }
 
     applyStageViewTransform(viewTransform)
-  }, [applyStageViewTransform, isPreviewMode, viewTransform])
+    renderZoomBlurOverlay(lastZoomCameraRef.current)
+  }, [
+    applyStageViewTransform,
+    isPreviewMode,
+    renderZoomBlurOverlay,
+    viewTransform,
+  ])
 
   useEffect(() => {
     viewportSizeRef.current = viewportSize
@@ -571,6 +755,22 @@ export default function EditorWorkspace() {
   }, [applyStageViewTransform, artboard, isPreviewMode, viewportSize])
 
   useLayoutEffect(() => {
+    selectedZoomClipIdRef.current = selectedZoomClipId
+  }, [selectedZoomClipId])
+
+  useLayoutEffect(() => {
+    zoomClipsRef.current = zoomClips
+    applyManualZoomAtPreviewTime()
+  }, [applyManualZoomAtPreviewTime, zoomClips])
+
+  useLayoutEffect(() => {
+    timelineTimeRef.current = timelineTime
+    if (hoverPreviewTimeRef.current === null) {
+      applyManualZoomAtTime(timelineTime)
+    }
+  }, [applyManualZoomAtTime, timelineTime])
+
+  useLayoutEffect(() => {
     selectedItemIdRef.current = selectedItemId
     selectedVideoRef.current = selectedVideo
     hideRotationReadout()
@@ -586,9 +786,33 @@ export default function EditorWorkspace() {
     videosRef.current = videos
   }, [videos])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     artboardRef.current = artboard
-  }, [artboard])
+    applyManualZoomAtPreviewTime()
+  }, [applyManualZoomAtPreviewTime, artboard])
+
+  useEffect(() => {
+    return subscribeTimelineTicks((time) => {
+      timelineTimeRef.current = time
+      if (hoverPreviewTimeRef.current === null) {
+        applyManualZoomAtTime(time)
+      }
+    })
+  }, [applyManualZoomAtTime, subscribeTimelineTicks])
+
+  useEffect(() => {
+    return subscribeHoverTime((time) => {
+      hoverPreviewTimeRef.current = time
+      applyManualZoomAtPreviewTime()
+    })
+  }, [applyManualZoomAtPreviewTime, subscribeHoverTime])
+
+  useEffect(() => {
+    return () => {
+      zoomBlurRendererRef.current?.destroy()
+      zoomBlurRendererRef.current = null
+    }
+  }, [])
 
   useLayoutEffect(() => {
     updateSelectionToolbarPosition()
@@ -832,6 +1056,17 @@ export default function EditorWorkspace() {
         } else {
           undo()
         }
+        return
+      }
+
+      // A selected zoom clip is removed independently of any video selection
+      // (the two are mutually exclusive — see the provider's select* actions).
+      if (
+        selectedZoomClipIdRef.current &&
+        (event.code === "Delete" || event.code === "Backspace")
+      ) {
+        event.preventDefault()
+        removeZoomClip(selectedZoomClipIdRef.current)
         return
       }
 
@@ -1084,6 +1319,7 @@ export default function EditorWorkspace() {
     duplicateVideo,
     fitArtboardToViewport,
     redo,
+    removeZoomClip,
     setVideoLocked,
     stepTimelineFrame,
     toggleTimelinePlayback,
@@ -1363,120 +1599,136 @@ export default function EditorWorkspace() {
             onDragEnd={handleDragEnd}
             style={{ position: "relative", zIndex: 1 }}
           >
-          <Layer listening={false}>
-            <Group>
-              <ArtboardBackground artboard={artboard} />
-              <ArtboardGrain artboard={artboard} />
-              <ArtboardPixelGrid artboard={artboard} />
-            </Group>
-          </Layer>
-          <Layer ref={contentLayerRef}>
-            <Group>
-              <Rect
-                x={0}
-                y={0}
-                width={artboard.width}
-                height={artboard.height}
-                fill="rgba(255,255,255,0)"
-                perfectDrawEnabled={false}
-                onMouseDown={(event) => {
-                  if (isPreviewModeRef.current) return
-                  event.cancelBubble = true
-                  selectArtboard()
-                }}
-                onTap={(event) => {
-                  if (isPreviewModeRef.current) return
-                  event.cancelBubble = true
-                  selectArtboard()
-                }}
-              />
+            <Layer ref={backgroundLayerRef} listening={false}>
               <Group
                 clipX={0}
                 clipY={0}
                 clipWidth={artboard.width}
                 clipHeight={artboard.height}
               >
-                {videos.map((video) => (
-                  <CanvasVideoNode
-                    key={video.id}
-                    video={video}
-                    isPanMode={isSpacePressed || isPanning}
-                    shouldPlayAudio={video.id === primaryAudioVideoId}
-                    contentLayerRef={contentLayerRef}
-                    onNodeChange={registerVideoNode}
-                    onVideoElementChange={registerTimelineVideoElement}
-                    onVideoSeeked={onTimelineVideoSeeked}
-                    onVideoFpsMeasured={registerTimelineVideoFps}
-                  />
-                ))}
-                <CanvasCursorOverlay />
+                <Group ref={backgroundCameraGroupRef}>
+                  <ArtboardBackground artboard={artboard} />
+                  <ArtboardGrain artboard={artboard} />
+                </Group>
+                <ArtboardPixelGrid artboard={artboard} />
               </Group>
+            </Layer>
+            <Layer ref={contentLayerRef}>
+              <Group>
+                <Rect
+                  x={0}
+                  y={0}
+                  width={artboard.width}
+                  height={artboard.height}
+                  fill="rgba(255,255,255,0)"
+                  perfectDrawEnabled={false}
+                  onMouseDown={(event) => {
+                    if (isPreviewModeRef.current) return
+                    event.cancelBubble = true
+                    selectArtboard()
+                  }}
+                  onTap={(event) => {
+                    if (isPreviewModeRef.current) return
+                    event.cancelBubble = true
+                    selectArtboard()
+                  }}
+                />
+                <Group
+                  clipX={0}
+                  clipY={0}
+                  clipWidth={artboard.width}
+                  clipHeight={artboard.height}
+                >
+                  <Group ref={contentCameraGroupRef}>
+                    {videos.map((video) => (
+                      <CanvasVideoNode
+                        key={video.id}
+                        video={video}
+                        isPanMode={isSpacePressed || isPanning}
+                        shouldPlayAudio={video.id === primaryAudioVideoId}
+                        contentLayerRef={contentLayerRef}
+                        onNodeChange={registerVideoNode}
+                        onVideoElementChange={registerTimelineVideoElement}
+                        onVideoSeeked={handleTimelineVideoSeeked}
+                        onVideoFpsMeasured={registerTimelineVideoFps}
+                      />
+                    ))}
+                    <CanvasCursorOverlay />
+                  </Group>
+                </Group>
+                <Rect
+                  x={0}
+                  y={0}
+                  width={artboard.width}
+                  height={artboard.height}
+                  stroke="rgba(0,0,0,0.10)"
+                  strokeWidth={1}
+                  strokeScaleEnabled={false}
+                  perfectDrawEnabled={false}
+                  shadowForStrokeEnabled={false}
+                  listening={false}
+                />
+              </Group>
+            </Layer>
+            <Layer listening={false}>
+              <SnapGuideOverlay ref={guideOverlayRef} />
+            </Layer>
+            <Layer ref={overlayLayerRef}>
+              <Rect
+                ref={hoverOutlineRef}
+                listening={false}
+                visible={false}
+                stroke={HOVER_OUTLINE_STROKE}
+                strokeWidth={HOVER_OUTLINE_STROKE_WIDTH}
+                strokeScaleEnabled={false}
+                perfectDrawEnabled={false}
+                shadowForStrokeEnabled={false}
+              />
               <Rect
                 x={0}
                 y={0}
                 width={artboard.width}
                 height={artboard.height}
-                stroke="rgba(0,0,0,0.10)"
-                strokeWidth={1}
+                listening={false}
+                visible={
+                  selectedItemId === ARTBOARD_SELECTION_ID && !isPreviewMode
+                }
+                stroke={HOVER_OUTLINE_STROKE}
+                strokeWidth={HOVER_OUTLINE_STROKE_WIDTH}
                 strokeScaleEnabled={false}
                 perfectDrawEnabled={false}
                 shadowForStrokeEnabled={false}
-                listening={false}
               />
-            </Group>
-          </Layer>
-          <Layer listening={false}>
-            <SnapGuideOverlay ref={guideOverlayRef} />
-          </Layer>
-          <Layer ref={overlayLayerRef}>
-            <Rect
-              ref={hoverOutlineRef}
-              listening={false}
-              visible={false}
-              stroke={HOVER_OUTLINE_STROKE}
-              strokeWidth={HOVER_OUTLINE_STROKE_WIDTH}
-              strokeScaleEnabled={false}
-              perfectDrawEnabled={false}
-              shadowForStrokeEnabled={false}
-            />
-            <Rect
-              x={0}
-              y={0}
-              width={artboard.width}
-              height={artboard.height}
-              listening={false}
-              visible={selectedItemId === ARTBOARD_SELECTION_ID && !isPreviewMode}
-              stroke={HOVER_OUTLINE_STROKE}
-              strokeWidth={HOVER_OUTLINE_STROKE_WIDTH}
-              strokeScaleEnabled={false}
-              perfectDrawEnabled={false}
-              shadowForStrokeEnabled={false}
-            />
-            <SelectedVideoTransformer
-              selectedItemId={
-                selectedVideoIsTimelineVisible && !isPreviewMode
-                  ? selectedItemId
-                  : null
-              }
-              selectedVideo={selectedTimelineVideo}
-              isLocked={selectedTimelineVideo?.locked ?? false}
-              nodeVersion={nodeVersion}
-              nodeMapRef={videoNodeMapRef}
-              onTransformFrame={updateSelectionToolbarPosition}
-              onTransformEnd={updateVideoTransform}
-              artboard={artboard}
-              videos={visibleVideos}
-              viewTransform={viewTransform}
-              viewportSize={viewportSize}
-              isSnapDisabledRef={isSnapDisabledRef}
-              guideOverlayRef={guideOverlayRef}
-              onRotationStart={showRotationReadout}
-              onRotationFrame={updateRotationReadout}
-              onRotationEnd={hideRotationReadout}
-              isTransformingRef={isTransformingSelectedNodeRef}
-            />
-          </Layer>
+              <SelectedVideoTransformer
+                selectedItemId={
+                  selectedVideoIsTimelineVisible && !isPreviewMode
+                    ? selectedItemId
+                    : null
+                }
+                selectedVideo={selectedTimelineVideo}
+                isLocked={selectedTimelineVideo?.locked ?? false}
+                nodeVersion={nodeVersion}
+                nodeMapRef={videoNodeMapRef}
+                onTransformFrame={updateSelectionToolbarPosition}
+                onTransformEnd={updateVideoTransform}
+                artboard={artboard}
+                videos={visibleVideos}
+                viewTransform={viewTransform}
+                viewportSize={viewportSize}
+                isSnapDisabledRef={isSnapDisabledRef}
+                guideOverlayRef={guideOverlayRef}
+                onRotationStart={showRotationReadout}
+                onRotationFrame={updateRotationReadout}
+                onRotationEnd={hideRotationReadout}
+                isTransformingRef={isTransformingSelectedNodeRef}
+              />
+            </Layer>
           </Stage>
+          <canvas
+            ref={zoomBlurCanvasRef}
+            aria-hidden="true"
+            className="pointer-events-none invisible absolute inset-0 z-[2]"
+          />
         </>
       ) : null}
       <SelectionToolbar

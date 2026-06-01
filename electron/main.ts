@@ -301,6 +301,28 @@ function loadEditorRoute(win: BrowserWindow, projectPath?: string | null): void 
   void win.loadURL(`app://./index.html${query}`)
 }
 
+function installEditorContextMenu(win: BrowserWindow): void {
+  win.webContents.on('context-menu', (_event, params) => {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) return
+
+    Menu.buildFromTemplate([
+      {
+        label: 'Refresh Page',
+        accelerator: 'CommandOrControl+R',
+        click: () => {
+          if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+            win.webContents.reload()
+          }
+        },
+      },
+    ]).popup({
+      window: win,
+      x: params.x,
+      y: params.y,
+    })
+  })
+}
+
 function createMainWindow(options: CreateMainWindowOptions = {}): BrowserWindow | null {
   if (!hasRequiredPermissions()) {
     createPermissionWindow()
@@ -340,6 +362,7 @@ function createMainWindow(options: CreateMainWindowOptions = {}): BrowserWindow 
   })
   rememberEditorWindow(win)
   watchMainWindowState(win)
+  installEditorContextMenu(win)
 
   win.once('ready-to-show', () => {
     if (hasRequiredPermissions()) {

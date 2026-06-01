@@ -99,6 +99,8 @@ export const EditArea = React.forwardRef<EditAreaState, EditAreaProps>((props, r
     onRowDragStart,
     onRowDragEnd,
     setEditorData,
+    onTimeAreaHover,
+    draggingActionRef,
   } = props;
   const { dragLineData, initDragLine, updateDragLine, disposeDragLine, defaultGetAssistPosition, defaultGetMovePosition } = useDragLine();
   const slots = useTimelineClassNames();
@@ -276,6 +278,10 @@ export const EditArea = React.forwardRef<EditAreaState, EditAreaProps>((props, r
     (row: TimelineRow, rowIndex: number) => {
       if (!enableRowDrag) return;
 
+      if (draggingActionRef) draggingActionRef.current = true;
+      // Drop any active hover preview while the row is being reordered.
+      onTimeAreaHover?.(null);
+
       // Initialize the drag state
       const initialDragState = initializeDragState(row, rowIndex);
       setDragState(initialDragState);
@@ -369,6 +375,7 @@ export const EditArea = React.forwardRef<EditAreaState, EditAreaProps>((props, r
       const handleMouseUp = () => {
         // Stop the drag and the auto-scroll check
         isDragging = false;
+        if (draggingActionRef) draggingActionRef.current = false;
 
         // Cancel pending animation frames
         if (animationFrameId) {
@@ -416,7 +423,7 @@ export const EditArea = React.forwardRef<EditAreaState, EditAreaProps>((props, r
       document.addEventListener('mousemove', handleMouseMove);
       document.addEventListener('mouseup', handleMouseUp);
     },
-    [enableRowDrag, onRowDragStart, initializeDragState, calculateTargetIndex, calculateDragPreviewPosition, updateDragState, handleDragEnd, scrollTop],
+    [enableRowDrag, onRowDragStart, initializeDragState, calculateTargetIndex, calculateDragPreviewPosition, updateDragState, handleDragEnd, scrollTop, onTimeAreaHover, draggingActionRef],
   );
 
   const handleInitDragLine: EditData['onActionMoveStart'] = (data) => {
@@ -482,10 +489,16 @@ export const EditArea = React.forwardRef<EditAreaState, EditAreaProps>((props, r
           handleRowDragStart(params.row, rowIndex);
         }}
         onActionMoveStart={(data) => {
+          if (draggingActionRef) draggingActionRef.current = true;
+          // Drop any active hover preview so the ghost cursor doesn't linger or
+          // chase the clip while it's being dragged.
+          onTimeAreaHover?.(null);
           handleInitDragLine(data);
           return onActionMoveStart && onActionMoveStart(data);
         }}
         onActionResizeStart={(data) => {
+          if (draggingActionRef) draggingActionRef.current = true;
+          onTimeAreaHover?.(null);
           handleInitDragLine(data);
           return onActionResizeStart && onActionResizeStart(data);
         }}
@@ -498,10 +511,12 @@ export const EditArea = React.forwardRef<EditAreaState, EditAreaProps>((props, r
           return onActionResizing && onActionResizing(data);
         }}
         onActionResizeEnd={(data) => {
+          if (draggingActionRef) draggingActionRef.current = false;
           disposeDragLine();
           return onActionResizeEnd && onActionResizeEnd(data);
         }}
         onActionMoveEnd={(data) => {
+          if (draggingActionRef) draggingActionRef.current = false;
           disposeDragLine();
           return onActionMoveEnd && onActionMoveEnd(data);
         }}

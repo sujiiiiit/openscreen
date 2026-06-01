@@ -63,7 +63,7 @@ type CanvasVideoNodeProps = {
   onVideoSeeked: (
     id: string,
     element: HTMLVideoElement,
-    redrawLayer: () => void
+    redrawLayer: (afterDraw?: () => void) => void
   ) => void
   onVideoFpsMeasured?: (id: string, fps: number) => void
 }
@@ -132,7 +132,9 @@ function CanvasVideoNodeComponent({
     const videoElement = videoElementRef.current
     if (!layer || !videoElement || !isVideoReady) return
 
-    const supportsFrameCallback = Boolean(videoElement.requestVideoFrameCallback)
+    const supportsFrameCallback = Boolean(
+      videoElement.requestVideoFrameCallback
+    )
     let frameCallbackId: number | null = null
     let animation: Konva.Animation | null = supportsFrameCallback
       ? null
@@ -150,7 +152,10 @@ function CanvasVideoNodeComponent({
     const measureFps = (metadata: VideoFrameCallbackMetadata | undefined) => {
       if (fpsReported || !onVideoFpsMeasured || !metadata) return
       const { mediaTime, presentedFrames } = metadata
-      if (typeof mediaTime !== "number" || typeof presentedFrames !== "number") {
+      if (
+        typeof mediaTime !== "number" ||
+        typeof presentedFrames !== "number"
+      ) {
         return
       }
       if (prevMediaTime !== null && prevPresentedFrames !== null) {
@@ -211,13 +216,16 @@ function CanvasVideoNodeComponent({
     // immediately, so the layer is composited in lockstep with the seeked frame
     // actually being presented — this is what keeps a fast scrub from flashing
     // the pre-seek frame for a tick before the new one lands.
-    const redrawLayer = () => {
+    const redrawLayer = (afterDraw?: () => void) => {
+      const drawNow = () => {
+        if (cancelled) return
+        layer.draw()
+        afterDraw?.()
+      }
       if (supportsFrameCallback && videoElement.requestVideoFrameCallback) {
-        videoElement.requestVideoFrameCallback(() => {
-          if (!cancelled) layer.batchDraw()
-        })
+        videoElement.requestVideoFrameCallback(drawNow)
       } else {
-        layer.batchDraw()
+        drawNow()
       }
     }
     const drawGatedFrame = () => {
@@ -304,7 +312,7 @@ function CanvasVideoNodeComponent({
         cornerRadius,
         cornerSmoothing,
       }),
-    [width, height, cornerRadius, cornerSmoothing],
+    [width, height, cornerRadius, cornerSmoothing]
   )
   const borderParams = useMemo(
     () =>
@@ -327,7 +335,7 @@ function CanvasVideoNodeComponent({
       borderColor,
       borderOffset,
       borderAlignment,
-    ],
+    ]
   )
   const shadowParams = useMemo(
     () =>
@@ -352,7 +360,7 @@ function CanvasVideoNodeComponent({
       shadowOffsetX,
       shadowOffsetY,
       shadowSpread,
-    ],
+    ]
   )
 
   const drawSquircleVideo = useCallback(
@@ -380,7 +388,7 @@ function CanvasVideoNodeComponent({
           : null,
         squircleParams,
         borderParams,
-        shadowParams,
+        shadowParams
       )
     },
     [squircleParams, borderParams, shadowParams]

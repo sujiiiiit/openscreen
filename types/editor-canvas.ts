@@ -186,3 +186,70 @@ export type CanvasTimelineClip = {
   sourceIn: number
   sourceOut: number
 }
+
+export type CanvasZoomFocus = {
+  /** Normalized artboard X, where 0 = left edge and 1 = right edge. */
+  x: number
+  /** Normalized artboard Y, where 0 = top edge and 1 = bottom edge. */
+  y: number
+}
+
+export type CanvasZoomTransitionCurve =
+  | "linear"
+  | "smoothstep"
+  | "smootherstep"
+  | "ease-out-cubic"
+
+export type CanvasZoomTransitionSettings = {
+  /** Fraction of the clip duration spent ramping from identity to target zoom. */
+  easeIn: number
+  /** Fraction of the clip duration spent ramping from target zoom to identity. */
+  easeOut: number
+  /** Curve applied inside each ramp. */
+  curve: CanvasZoomTransitionCurve
+}
+
+export type CanvasZoomRadialBlurSettings = {
+  /** Multiplier applied after the user-facing radialBlur amount. */
+  strength: number
+  /** Normalized radius where the blur reaches full strength. */
+  falloff: number
+  /** Normalized radius of the preserved focus area. */
+  centerSize: number
+  /** How much sharp detail is mixed back into the focus area. */
+  centerSharpness: number
+}
+
+// Legacy project field kept readable for old project.json files. New editor UI
+// writes explicit CanvasZoomTransitionSettings instead of these named presets.
+export type CanvasZoomEasePreset = "smooth" | "snappy" | "slow"
+
+/**
+ * A manually-placed zoom segment on the timeline's dedicated Zoom track.
+ * `start`/`end` are composition (timeline) seconds and represent the full
+ * effect: identity -> zoom -> hold -> identity. Selecting a zoom clip is
+ * session-only (provider `selectedZoomClipId`), not part of this persisted
+ * shape.
+ */
+export type CanvasZoomClip = {
+  id: string
+  start: number
+  end: number
+  enabled: boolean
+  focus: CanvasZoomFocus
+  scale: number
+  radialBlur: number
+  radialBlurSettings: CanvasZoomRadialBlurSettings
+  transition: CanvasZoomTransitionSettings
+  easePreset: CanvasZoomEasePreset
+}
+
+export type CanvasZoomClipPatch = Partial<
+  Pick<
+    CanvasZoomClip,
+    "enabled" | "focus" | "scale" | "radialBlur" | "easePreset"
+  >
+> & {
+  radialBlurSettings?: Partial<CanvasZoomRadialBlurSettings>
+  transition?: Partial<CanvasZoomTransitionSettings>
+}

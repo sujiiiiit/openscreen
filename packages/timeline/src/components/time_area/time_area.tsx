@@ -22,7 +22,7 @@ export interface TimeAreaHandle {
 }
 
 /** Animation timeline component */
-export const TimeArea = React.forwardRef<TimeAreaHandle, TimeAreaProps>(({ setCursor, maxScaleCount, maxCursorTime, hideCursor, scale, scaleWidth, scaleCount, scaleSplitCount, startLeft, scrollLeft, onScroll, onClickTimeArea, onTimeAreaHover, draggingCursorRef, getScaleRender }, ref) => {
+export const TimeArea = React.forwardRef<TimeAreaHandle, TimeAreaProps>(({ setCursor, maxScaleCount, maxCursorTime, hideCursor, scale, scaleWidth, scaleCount, scaleSplitCount, startLeft, scrollLeft, onScroll, onClickTimeArea, getScaleRender }, ref) => {
   const gridRef = useRef<Grid>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const slots = useTimelineClassNames();
@@ -155,25 +155,9 @@ export const TimeArea = React.forwardRef<TimeAreaHandle, TimeAreaProps>(({ setCu
                   if (result === false) return; // Returning false prevents the time from being set
                   setCursor({ time });
                 }}
-                onMouseMove={(e) => {
-                  if (hideCursor || !onTimeAreaHover) return;
-                  // Skip while the main cursor is being dragged so we don't
-                  // emit two competing time-cursors (the drag handler already
-                  // owns the cursor position for the duration of the drag).
-                  if (draggingCursorRef?.current) return;
-                  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                  const position = e.clientX - rect.x;
-                  const left = Math.max(position + scrollLeft, startLeft);
-                  if (left > maxScaleCount * scaleWidth + startLeft - scrollLeft) return;
-
-                  const rawTime = parserPixelToTime(left, { startLeft, scale, scaleWidth });
-                  const time = Number.isFinite(maxCursorTime) ? Math.min(rawTime, maxCursorTime) : rawTime;
-                  onTimeAreaHover(time);
-                }}
-                onMouseLeave={() => {
-                  if (hideCursor || !onTimeAreaHover) return;
-                  onTimeAreaHover(null);
-                }}
+                // Hover preview emission lives on the timeline root (see
+                // timeline.tsx) so it covers the ruler *and* the tracks; the
+                // ruler overlay only owns click-to-seek now.
                 className={cn('absolute left-0 top-0 cursor-pointer', slots.timeAreaInteract)}
               ></div>
             </>

@@ -291,11 +291,35 @@ export interface ProjectTimelineClip {
   sourceOut: number
 }
 
+export interface ProjectZoomClip {
+  id: string
+  start: number
+  end: number
+  enabled?: boolean
+  focus?: { x: number; y: number }
+  scale?: number
+  radialBlur?: number
+  radialBlurSettings?: {
+    strength?: number
+    falloff?: number
+    centerSize?: number
+    centerSharpness?: number
+  }
+  transition?: {
+    easeIn?: number
+    easeOut?: number
+    curve?: "linear" | "smoothstep" | "smootherstep" | "ease-out-cubic"
+  }
+  /** Legacy preset field. New saves prefer explicit `transition`. */
+  easePreset?: "smooth" | "snappy" | "slow"
+}
+
 export interface ProjectStateV1 {
   version: 1
   artboard: ProjectArtboard
   videos: ProjectVideo[]
   timelineClips: ProjectTimelineClip[]
+  zoomClips?: ProjectZoomClip[]
   updatedAtUnixMs: number
 }
 

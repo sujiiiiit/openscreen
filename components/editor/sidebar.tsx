@@ -8,6 +8,7 @@ import {
   ArrowLeft01Icon,
   ArrowRight01Icon,
   BackgroundIcon,
+  SearchAreaIcon,
   Video01Icon,
   VolumeHighIcon,
 } from "@hugeicons/core-free-icons"
@@ -17,6 +18,7 @@ import { CursorIcon, SubtitleIcon } from "@/components/ui/icons"
 import { BackgroundPanel } from "@/components/editor/background-panel"
 import { CursorPanel } from "@/components/editor/cursor-panel"
 import { VideoPanel } from "@/components/editor/video-panel"
+import { ZoomPanel } from "@/components/editor/zoom-panel"
 import { useSidebarTabsContext } from "@/components/editor/sidebar/tabs-provider"
 import {
   Tooltip,
@@ -56,6 +58,12 @@ const TAB_ITEMS: TabItem[] = [
     label: "Cursor",
     icon: <CursorIcon className="size-4" />,
     content: <CursorPanel />,
+  },
+  {
+    id: "zoom",
+    label: "Zoom",
+    icon: <HugeiconsIcon icon={SearchAreaIcon} className="size-4" />,
+    content: <ZoomPanel />,
   },
   {
     id: "video",

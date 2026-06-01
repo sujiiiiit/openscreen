@@ -130,6 +130,10 @@ export interface EditData {
     },
   ) => void;
   /**
+   * @description Fired with the row + timeline time under the pointer while it moves over a row, and with `time: null` when the pointer leaves the row. Hover sibling of `onClickRow`; used to drive per-row hover affordances (e.g. a ghost insertion preview).
+   */
+  onRowHover?: (param: { row: TimelineRow; time: number | null }) => void;
+  /**
    * @description Action click callback
    */
   onClickAction?: (

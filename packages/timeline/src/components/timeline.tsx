@@ -26,6 +26,8 @@ export const Timeline = React.forwardRef<TimelineState, TimelineEditor>((props, 
     startLeft,
     minScaleCount,
     maxScaleCount,
+    maxCursorTime,
+    onTimeAreaHover,
     onChange,
     engine,
     autoReRender = true,
@@ -35,10 +37,13 @@ export const Timeline = React.forwardRef<TimelineState, TimelineEditor>((props, 
   const engineRef = useRef<ITimelineEngine>(engine || new TimelineEngine());
   const domRef = useRef<HTMLDivElement>(null);
   const areaRef = useRef<HTMLDivElement>(null);
-  // Shared between Cursor (sets on drag) and TimeArea (reads to skip hover
-  // events). Keeps the package from re-emitting hover positions while the
-  // main playhead is being dragged.
+  // Shared between Cursor (sets on drag) and the root hover handler (reads to
+  // skip hover events). Keeps the package from re-emitting hover positions
+  // while the main playhead is being dragged.
   const draggingCursorRef = useRef(false);
+  // Set by EditArea while a clip is being moved/resized (or a row reordered) so
+  // the root hover handler suppresses the preview cursor during the drag.
+  const draggingActionRef = useRef(false);
 
   const scrollSync = useRef<ScrollSync>(null);
   const timeAreaRef = useRef<TimeAreaHandle>(null);
@@ -174,11 +179,40 @@ export const Timeline = React.forwardRef<TimelineState, TimelineEditor>((props, 
     }
   }, []);
 
+  // Emit the timeline time under the pointer for the hover preview cursor.
+  // Lives on the root (not just the ruler) so hovering anywhere over the
+  // timeline — ruler *or* tracks — previews that frame. Suppressed while the
+  // main playhead or a clip is being dragged so we never emit a competing
+  // hover stream over the active interaction. scrollLeft is read live from the
+  // ScrollSync instance to stay correct mid-scroll.
+  const handleRootHoverMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (hideCursor || !onTimeAreaHover) return;
+    if (draggingCursorRef.current || draggingActionRef.current) return;
+    const node = domRef.current;
+    if (!node) return;
+    const rect = node.getBoundingClientRect();
+    const scroll = scrollSync.current?.state.scrollLeft ?? 0;
+    const position = e.clientX - rect.left;
+    const left = Math.max(position + scroll, startLeft);
+    if (left > maxScaleCount * scaleWidth + startLeft - scroll) return;
+
+    const rawTime = parserPixelToTime(left, { startLeft, scale, scaleWidth });
+    const time = Number.isFinite(maxCursorTime) ? Math.min(rawTime, maxCursorTime) : rawTime;
+    onTimeAreaHover(time);
+  };
+
+  const handleRootHoverLeave = () => {
+    if (hideCursor || !onTimeAreaHover) return;
+    onTimeAreaHover(null);
+  };
+
   return (
     <TimelineClassNamesContext.Provider value={classNames ?? {}}>
     <div
       ref={domRef}
       style={style}
+      onMouseMove={handleRootHoverMove}
+      onMouseLeave={handleRootHoverLeave}
       className={cn(
         PREFIX,
         'relative flex h-[600px] w-[600px] min-h-8 flex-col overflow-hidden bg-timeline-bg text-xs',
@@ -202,7 +236,6 @@ export const Timeline = React.forwardRef<TimelineState, TimelineEditor>((props, 
               setScaleCount={handleSetScaleCount}
               onScroll={onScroll}
               scrollLeft={scrollLeft}
-              draggingCursorRef={draggingCursorRef}
             />
             <EditArea
               {...checkedProps}
@@ -211,6 +244,7 @@ export const Timeline = React.forwardRef<TimelineState, TimelineEditor>((props, 
                 (areaRef.current as any) = ref?.domRef.current;
               }}
               disableDrag={disableDrag || isPlaying}
+              draggingActionRef={draggingActionRef}
               editorData={editorData}
               cursorTime={cursorTime}
               scaleCount={scaleCount}

@@ -20,7 +20,7 @@ export function TitleBarExportButton() {
   const { project } = useProject()
   const { videos } = useEditorCanvasMedia()
   const { artboard } = useEditorCanvasArtboard()
-  const { timelineClips } = useEditorCanvasTimeline()
+  const { timelineClips, zoomClips } = useEditorCanvasTimeline()
 
   const isExportable =
     project !== null && timelineClips.length > 0 && videos.length > 0
@@ -29,10 +29,16 @@ export function TitleBarExportButton() {
     if (!project || !isExportable) return
     const api = window.api?.export
     if (!api) return
-    const state = serializeProjectState(artboard, videos, timelineClips)
+    const state = serializeProjectState(
+      artboard,
+      videos,
+      timelineClips,
+      [],
+      zoomClips
+    )
     const assetUrlsByVideoId = buildExportAssetUrlsByVideoId(
       videos,
-      project.assetUrlsByVideoId,
+      project.assetUrlsByVideoId
     )
     void api.openWindow({
       settings: defaultExportSettings(),
@@ -40,7 +46,7 @@ export function TitleBarExportButton() {
       assetUrlsByVideoId,
       outputBaseName: project.name,
     })
-  }, [project, isExportable, artboard, videos, timelineClips])
+  }, [project, isExportable, artboard, videos, timelineClips, zoomClips])
 
   return (
     <Button

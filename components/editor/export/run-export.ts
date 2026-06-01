@@ -22,6 +22,13 @@ import {
   computeCursorBlur,
   placeCursor,
 } from "@/components/editor/canvas/cursor-scene"
+import {
+  IDENTITY_ZOOM_CAMERA,
+  applyZoomCamera,
+  sampleZoomCameraAtTime,
+  zoomCamerasEqual,
+} from "@/components/editor/canvas/zoom-scene"
+import { createRadialZoomBlurRenderer } from "@/lib/motion-blur/radial-zoom-blur"
 import { formatToVideoCodec } from "./codec-probe"
 import { buildExportStage } from "./build-stage"
 import { streamTimelineAudio } from "./decode-audio"
@@ -144,6 +151,10 @@ export async function runExport(
     outputSize,
     container,
   })
+  const zoomBlurRenderer =
+    state.zoomClips && state.zoomClips.length > 0
+      ? createRadialZoomBlurRenderer()
+      : null
 
   // From here on, `handles` owns a Konva stage + per-clip <video> elements;
   // every exit path (success, abort, error) must call handles.dispose().
@@ -294,6 +305,7 @@ export async function runExport(
       // re-running `stage.draw()` every iteration wastes ~⅓ of per-frame
       // GPU/CPU work. Konva layer canvases are sticky between draws.
       handles.backgroundLayer.draw()
+      let lastZoomCamera = IDENTITY_ZOOM_CAMERA
 
       let lastProgressAt = 0
       const startWall = performance.now()
@@ -314,6 +326,18 @@ export async function runExport(
 
         const t = frame * frameDuration
         const active = plan.framePlan[frame]
+        const zoomCamera = sampleZoomCameraAtTime(
+          state.zoomClips ?? [],
+          state.artboard,
+          t
+        )
+        const zoomCameraChanged = !zoomCamerasEqual(lastZoomCamera, zoomCamera)
+        applyZoomCamera(handles.backgroundLayer, zoomCamera)
+        applyZoomCamera(handles.contentLayer, zoomCamera)
+        if (zoomCameraChanged) {
+          handles.backgroundLayer.draw()
+          lastZoomCamera = zoomCamera
+        }
 
         // Hide every node first so a clip that ended on the previous frame
         // doesn't ghost a stale image into this one. The visible(true)
@@ -426,10 +450,25 @@ export async function runExport(
           }
         }
 
-        // Only the content layer changes per frame; background stays as
-        // drawn above. ~10–30% faster than stage.draw() at every iteration.
+        // Only the content layer changes per frame; background redraws only
+        // when the manual zoom camera moves.
         handles.contentLayer.draw()
         redrawComposite(handles, compositeCtx)
+        if (zoomCamera.radialBlur > 0 && zoomBlurRenderer) {
+          const blurred = zoomBlurRenderer.render(
+            compositeCtx.canvas,
+            outputSize.width,
+            outputSize.height,
+            {
+              centerX: outputSize.width / 2,
+              centerY: outputSize.height / 2,
+              amount: zoomCamera.radialBlur,
+              ...zoomCamera.radialBlurSettings,
+            }
+          )
+          compositeCtx.clearRect(0, 0, outputSize.width, outputSize.height)
+          compositeCtx.drawImage(blurred, 0, 0)
+        }
 
         await videoSource.add(t, frameDuration)
 
@@ -520,6 +559,7 @@ export async function runExport(
       }
     }
   } finally {
+    zoomBlurRenderer?.destroy()
     try {
       handles.dispose()
     } catch {

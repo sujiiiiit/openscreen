@@ -2,7 +2,10 @@
 
 import { useEffect, useRef } from "react"
 
-import { useEditorCanvasMedia } from "@/components/editor/canvas/provider"
+import {
+  useEditorCanvasMedia,
+  useEditorCanvasTimeline,
+} from "@/components/editor/canvas/provider"
 import { useSidebarTabsContext } from "@/components/editor/sidebar/tabs-provider"
 import { ARTBOARD_SELECTION_ID } from "@/types/editor-canvas"
 
@@ -21,6 +24,7 @@ import { ARTBOARD_SELECTION_ID } from "@/types/editor-canvas"
  */
 export function SidebarSelectionBridge() {
   const { selectedItemId } = useEditorCanvasMedia()
+  const { selectedZoomClipId } = useEditorCanvasTimeline()
   const { activeTab, selectTab, open } = useSidebarTabsContext()
   const lastSelectedRef = useRef<string | null>(null)
   // `selectTab` toggles `isOpen` when called with the already-active tab.
@@ -56,6 +60,15 @@ export function SidebarSelectionBridge() {
     }
     selectTabRef.current("video")
   }, [selectedItemId])
+
+  useEffect(() => {
+    if (selectedZoomClipId === null) return
+    if (activeTabRef.current === "zoom") {
+      openRef.current()
+      return
+    }
+    selectTabRef.current("zoom")
+  }, [selectedZoomClipId])
 
   return null
 }

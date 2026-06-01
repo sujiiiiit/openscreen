@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  projectZoomClipToCanvasClip,
   serializeProjectState,
   serializeVideo,
+  serializeZoomClip,
 } from "@/components/editor/canvas/persistence"
 import { parseProjectState } from "@/electron/ipc/project-schema"
+import { withZoomClipDefaults } from "@/lib/zoom-clips"
 import type { CanvasVideoItem, EditorArtboard } from "@/types/editor-canvas"
 
 const ARTBOARD: EditorArtboard = {
@@ -560,5 +563,158 @@ describe("parseProjectState onCanvas tolerance", () => {
     })
     expect(parsed).not.toBeNull()
     expect(parsed!.videos[0].onCanvas).toBeUndefined()
+  })
+})
+
+describe("zoom clips persistence", () => {
+  it("preserves zoom clips through a round-trip", () => {
+    const parsed = roundTrip(
+      serializeProjectState(
+        ARTBOARD,
+        [canvasVideo({ id: "a" })],
+        [],
+        [],
+        [
+          withZoomClipDefaults({ id: "zoom-1", start: 1, end: 3 }),
+          withZoomClipDefaults({ id: "zoom-2", start: 4, end: 6.5 }),
+        ]
+      )
+    )
+    expect(parsed).not.toBeNull()
+    expect(parsed!.zoomClips).toEqual([
+      { id: "zoom-1", start: 1, end: 3 },
+      { id: "zoom-2", start: 4, end: 6.5 },
+    ])
+  })
+
+  it("preserves non-default zoom clip settings through a round-trip", () => {
+    const parsed = roundTrip(
+      serializeProjectState(
+        ARTBOARD,
+        [canvasVideo({ id: "a" })],
+        [],
+        [],
+        [
+          withZoomClipDefaults({
+            id: "zoom-1",
+            start: 1,
+            end: 3,
+            enabled: false,
+            focus: { x: 0.25, y: 0.75 },
+            scale: 2.25,
+            radialBlur: 0.5,
+            radialBlurSettings: {
+              strength: 1.5,
+              falloff: 0.4,
+              centerSize: 0.18,
+              centerSharpness: 0.6,
+            },
+            transition: {
+              easeIn: 0.16,
+              easeOut: 0.18,
+              curve: "ease-out-cubic",
+            },
+          }),
+        ]
+      )
+    )
+    expect(parsed).not.toBeNull()
+    expect(parsed!.zoomClips).toEqual([
+      {
+        id: "zoom-1",
+        start: 1,
+        end: 3,
+        enabled: false,
+        focus: { x: 0.25, y: 0.75 },
+        scale: 2.25,
+        radialBlur: 0.5,
+        radialBlurSettings: {
+          strength: 1.5,
+          falloff: 0.4,
+          centerSize: 0.18,
+          centerSharpness: 0.6,
+        },
+        transition: {
+          easeIn: 0.16,
+          easeOut: 0.18,
+          curve: "ease-out-cubic",
+        },
+      },
+    ])
+  })
+
+  it("omits zoomClips when empty so legacy project.json stays byte-identical", () => {
+    const serialized = serializeProjectState(
+      ARTBOARD,
+      [canvasVideo({ id: "a" })],
+      [],
+      [],
+      []
+    )
+    expect("zoomClips" in serialized).toBe(false)
+  })
+
+  it("treats absent zoomClips as no zoom clips (legacy projects keep loading)", () => {
+    const parsed = parseProjectState({
+      version: 1,
+      artboard: serializeProjectState(ARTBOARD, [], []).artboard,
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+    expect(parsed).not.toBeNull()
+    expect(parsed!.zoomClips).toBeUndefined()
+  })
+
+  it("drops malformed zoom clips instead of rejecting the whole project", () => {
+    const parsed = parseProjectState({
+      version: 1,
+      artboard: serializeProjectState(ARTBOARD, [], []).artboard,
+      videos: [],
+      timelineClips: [],
+      zoomClips: [
+        { id: "ok", start: 0, end: 2 },
+        { id: "no-end", start: 0 },
+        { id: "reversed", start: 5, end: 1 },
+        { start: 0, end: 2 },
+        "garbage",
+      ],
+      updatedAtUnixMs: 0,
+    })
+    expect(parsed).not.toBeNull()
+    expect(parsed!.zoomClips).toEqual([{ id: "ok", start: 0, end: 2 }])
+  })
+
+  it("expands span-only project zoom clips into runtime defaults", () => {
+    expect(
+      projectZoomClipToCanvasClip({ id: "legacy", start: 1, end: 2 })
+    ).toEqual(
+      withZoomClipDefaults({
+        id: "legacy",
+        start: 1,
+        end: 2,
+      })
+    )
+  })
+
+  it("hydrates legacy zoom ease presets into explicit transition settings", () => {
+    expect(
+      projectZoomClipToCanvasClip({
+        id: "legacy",
+        start: 1,
+        end: 2,
+        easePreset: "slow",
+      }).transition
+    ).toEqual({ easeIn: 0.34, easeOut: 0.36, curve: "smoothstep" })
+  })
+
+  it("elides default-valued zoom settings from project state", () => {
+    expect(
+      serializeZoomClip(withZoomClipDefaults({ id: "z", start: 1, end: 2 }))
+    ).toEqual({
+      id: "z",
+      start: 1,
+      end: 2,
+    })
   })
 })

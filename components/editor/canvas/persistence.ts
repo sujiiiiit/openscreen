@@ -3,12 +3,24 @@ import type {
   ProjectStateV1,
   ProjectTimelineClip,
   ProjectVideo,
+  ProjectZoomClip,
 } from "@/types/api"
 import type {
   CanvasTimelineClip,
   CanvasVideoItem,
+  CanvasZoomClip,
   EditorArtboard,
 } from "@/types/editor-canvas"
+import {
+  ZOOM_FOCUS_DEFAULT,
+  ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT,
+  ZOOM_RADIAL_BLUR_DEFAULT,
+  ZOOM_SCALE_DEFAULT,
+  ZOOM_TRANSITION_DEFAULT,
+  withZoomClipDefaults,
+  zoomRadialBlurSettingsEqual,
+  zoomTransitionSettingsEqual,
+} from "@/lib/zoom-clips"
 
 export const PROJECT_STATE_AUTOSAVE_DEBOUNCE_MS = 500
 // How long to wait after a save error before retrying. Long enough to avoid
@@ -30,6 +42,10 @@ export function fingerprintProjectState(
       artboard: snapshot.artboard,
       videos: snapshot.videos,
       timelineClips: snapshot.timelineClips,
+      // Included so a zoom-clip edit changes the fingerprint and triggers a
+      // save. `undefined` (empty/omitted) stringifies away, so legacy projects
+      // with no zoom clips keep a stable, no-op fingerprint.
+      zoomClips: snapshot.zoomClips,
     })
   } catch {
     return null
@@ -124,6 +140,76 @@ export function serializeTimelineClip(
   }
 }
 
+function serializeZoomTransition(
+  transition: CanvasZoomClip["transition"]
+): ProjectZoomClip["transition"] | undefined {
+  if (zoomTransitionSettingsEqual(transition, ZOOM_TRANSITION_DEFAULT)) {
+    return undefined
+  }
+  return {
+    ...(transition.easeIn !== ZOOM_TRANSITION_DEFAULT.easeIn
+      ? { easeIn: transition.easeIn }
+      : {}),
+    ...(transition.easeOut !== ZOOM_TRANSITION_DEFAULT.easeOut
+      ? { easeOut: transition.easeOut }
+      : {}),
+    ...(transition.curve !== ZOOM_TRANSITION_DEFAULT.curve
+      ? { curve: transition.curve }
+      : {}),
+  }
+}
+
+function serializeZoomRadialBlurSettings(
+  settings: CanvasZoomClip["radialBlurSettings"]
+): ProjectZoomClip["radialBlurSettings"] | undefined {
+  if (
+    zoomRadialBlurSettingsEqual(settings, ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT)
+  ) {
+    return undefined
+  }
+  return {
+    ...(settings.strength !== ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.strength
+      ? { strength: settings.strength }
+      : {}),
+    ...(settings.falloff !== ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.falloff
+      ? { falloff: settings.falloff }
+      : {}),
+    ...(settings.centerSize !== ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.centerSize
+      ? { centerSize: settings.centerSize }
+      : {}),
+    ...(settings.centerSharpness !==
+    ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.centerSharpness
+      ? { centerSharpness: settings.centerSharpness }
+      : {}),
+  }
+}
+
+export function serializeZoomClip(clip: CanvasZoomClip): ProjectZoomClip {
+  const normalized = withZoomClipDefaults(clip)
+  const transition = serializeZoomTransition(normalized.transition)
+  const radialBlurSettings = serializeZoomRadialBlurSettings(
+    normalized.radialBlurSettings
+  )
+  return {
+    id: normalized.id,
+    start: normalized.start,
+    end: normalized.end,
+    ...(normalized.enabled === false ? { enabled: false } : {}),
+    ...(normalized.focus.x !== ZOOM_FOCUS_DEFAULT.x ||
+    normalized.focus.y !== ZOOM_FOCUS_DEFAULT.y
+      ? { focus: { x: normalized.focus.x, y: normalized.focus.y } }
+      : {}),
+    ...(normalized.scale !== ZOOM_SCALE_DEFAULT
+      ? { scale: normalized.scale }
+      : {}),
+    ...(normalized.radialBlur !== ZOOM_RADIAL_BLUR_DEFAULT
+      ? { radialBlur: normalized.radialBlur }
+      : {}),
+    ...(radialBlurSettings ? { radialBlurSettings } : {}),
+    ...(transition ? { transition } : {}),
+  }
+}
+
 // Detached videos (removed from the canvas but still part of the project) are
 // appended after the on-canvas videos so they survive a refresh. They carry
 // `onCanvas: false` and have no timeline clip. The default `[]` keeps callers
@@ -132,7 +218,11 @@ export function serializeProjectState(
   artboard: EditorArtboard,
   videos: CanvasVideoItem[],
   timelineClips: CanvasTimelineClip[],
-  detachedVideos: CanvasVideoItem[] = []
+  detachedVideos: CanvasVideoItem[] = [],
+  // Trailing optional so every existing call site (export snapshot, tests)
+  // stays valid. Omitted from the output when empty so legacy `project.json`
+  // files stay byte-identical until the first zoom clip is added.
+  zoomClips: CanvasZoomClip[] = []
 ): ProjectStateV1 {
   return {
     version: 1,
@@ -142,6 +232,9 @@ export function serializeProjectState(
       ...detachedVideos.map((video) => serializeVideo(video, false)),
     ],
     timelineClips: timelineClips.map(serializeTimelineClip),
+    ...(zoomClips.length > 0
+      ? { zoomClips: zoomClips.map(serializeZoomClip) }
+      : {}),
     updatedAtUnixMs: Date.now(),
   }
 }
@@ -202,4 +295,21 @@ export function projectClipToCanvasClip(
     sourceIn: clip.sourceIn,
     sourceOut: clip.sourceOut,
   }
+}
+
+export function projectZoomClipToCanvasClip(
+  clip: ProjectZoomClip
+): CanvasZoomClip {
+  return withZoomClipDefaults({
+    id: clip.id,
+    start: clip.start,
+    end: clip.end,
+    enabled: clip.enabled,
+    focus: clip.focus,
+    scale: clip.scale,
+    radialBlur: clip.radialBlur,
+    radialBlurSettings: clip.radialBlurSettings,
+    transition: clip.transition,
+    easePreset: clip.easePreset,
+  })
 }

@@ -27,7 +27,7 @@ export type EditRowProps = CommonProp & {
 };
 
 export const EditRow: FC<EditRowProps> = (props) => {
-  const { rowData, style = {}, onClickRow, onDoubleClickRow, onContextMenuRow, areaRef, scrollLeft, startLeft, scale, scaleWidth, enableRowDrag, onRowDragStart, rowIndex = -1, dragState } = props;
+  const { rowData, style = {}, onClickRow, onRowHover, onDoubleClickRow, onContextMenuRow, areaRef, scrollLeft, startLeft, scale, scaleWidth, enableRowDrag, onRowDragStart, rowIndex = -1, dragState } = props;
   const slots = useTimelineClassNames();
   const isDraggedRow = dragState?.isDragging && dragState.draggedIndex === rowIndex;
 
@@ -69,6 +69,16 @@ export const EditRow: FC<EditRowProps> = (props) => {
         if (rowData && onClickRow) {
           const time = handleTime(e);
           onClickRow(e, { row: rowData, time: time });
+        }
+      }}
+      onMouseMove={(e) => {
+        if (rowData && onRowHover) {
+          onRowHover({ row: rowData, time: handleTime(e) });
+        }
+      }}
+      onMouseLeave={() => {
+        if (rowData && onRowHover) {
+          onRowHover({ row: rowData, time: null });
         }
       }}
       onDoubleClick={(e) => {
