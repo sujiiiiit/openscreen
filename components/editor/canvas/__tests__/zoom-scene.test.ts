@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   IDENTITY_ZOOM_CAMERA,
   clampZoomFocusForScale,
+  getZoomCameraCenterForTarget,
   getZoomVisibleWindow,
   sampleZoomCameraAtTime,
 } from "../zoom-scene"
@@ -26,12 +27,55 @@ describe("manual zoom camera", () => {
       x: 0.25,
       y: 0.75,
     })
+    expect(getZoomCameraCenterForTarget({ x: 1, y: 0 }, 2, artboard)).toEqual({
+      x: 0.75,
+      y: 0.25,
+    })
     expect(getZoomVisibleWindow({ x: 0.5, y: 0.5 }, 2, artboard)).toEqual({
       x: 0.25,
       y: 0.25,
       width: 0.5,
       height: 0.5,
     })
+    expect(getZoomVisibleWindow({ x: 1, y: 0 }, 2, artboard)).toEqual({
+      x: 0.5,
+      y: 0,
+      width: 0.5,
+      height: 0.5,
+    })
+  })
+
+  it("lets the stored target sit on an edge while clamping the camera window", () => {
+    const clip = withZoomClipDefaults({
+      id: "z",
+      start: 0,
+      end: 4,
+      focus: { x: 1, y: 0 },
+      scale: 2,
+    })
+
+    const camera = sampleZoomCameraAtTime([clip], artboard, 2)
+    expect(camera.scale).toBeCloseTo(2)
+    expect(camera.offsetX).toBeCloseTo(-1000)
+    expect(camera.offsetY).toBeCloseTo(0)
+    expect(camera.radialBlurCenterX).toBeCloseTo(1)
+    expect(camera.radialBlurCenterY).toBeCloseTo(0)
+  })
+
+  it("uses the rendered target point as the radial blur origin", () => {
+    const clip = withZoomClipDefaults({
+      id: "z",
+      start: 0,
+      end: 4,
+      focus: { x: 0, y: 1 },
+      scale: 2,
+      radialBlur: 1,
+    })
+
+    const camera = sampleZoomCameraAtTime([clip], artboard, 0.6)
+    expect(camera.radialBlur).toBeGreaterThan(0)
+    expect(camera.radialBlurCenterX).toBeCloseTo(0)
+    expect(camera.radialBlurCenterY).toBeCloseTo(1)
   })
 
   it("eases identity -> zoom -> hold -> identity with velocity-shaped blur", () => {

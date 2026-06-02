@@ -10,10 +10,7 @@ import {
   useEditorCanvasTimeline,
   useEditorCanvasTimelineActions,
 } from "@/components/editor/canvas/provider"
-import {
-  clampZoomFocusForScale,
-  getZoomVisibleWindow,
-} from "@/components/editor/canvas/zoom-scene"
+import { getZoomVisibleWindow } from "@/components/editor/canvas/zoom-scene"
 import { Button } from "@/components/ui/button"
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
@@ -172,16 +169,8 @@ function ZoomFocusPreview({
     [clip.start, timelineClips, videos]
   )
 
-  const effectiveFocus = clampZoomFocusForScale(
-    clip.focus,
-    clip.scale,
-    artboard
-  )
-  const visibleWindow = getZoomVisibleWindow(
-    effectiveFocus,
-    clip.scale,
-    artboard
-  )
+  const targetFocus = clampZoomFocus(clip.focus)
+  const visibleWindow = getZoomVisibleWindow(targetFocus, clip.scale, artboard)
 
   const writeFocusFromEvent = (event: React.PointerEvent<HTMLDivElement>) => {
     const node = previewRef.current
@@ -192,7 +181,7 @@ function ZoomFocusPreview({
       x: (event.clientX - rect.left) / rect.width,
       y: (event.clientY - rect.top) / rect.height,
     })
-    onFocusChange(clampZoomFocusForScale(raw, clip.scale, artboard))
+    onFocusChange(raw)
   }
 
   return (
@@ -240,8 +229,8 @@ function ZoomFocusPreview({
       <div
         className="pointer-events-none absolute size-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white bg-violet-500 shadow-[0_0_0_4px_rgba(139,92,246,0.3),0_8px_18px_rgba(0,0,0,0.25)]"
         style={{
-          left: `${effectiveFocus.x * 100}%`,
-          top: `${effectiveFocus.y * 100}%`,
+          left: `${targetFocus.x * 100}%`,
+          top: `${targetFocus.y * 100}%`,
         }}
       />
     </div>
@@ -250,7 +239,6 @@ function ZoomFocusPreview({
 
 export function ZoomPanel() {
   const { zoomClips, selectedZoomClipId } = useEditorCanvasTimeline()
-  const { artboard } = useEditorCanvasArtboard()
   const { updateZoomClip } = useEditorCanvasTimelineActions()
   const selectedClip =
     zoomClips.find((clip) => clip.id === selectedZoomClipId) ?? null
@@ -320,19 +308,11 @@ export function ZoomPanel() {
         formatValue={(value) => `${Math.round(value)}%`}
         onValueChange={(value) => {
           const scale = value / 100
-          updateZoomClip(selectedClip.id, {
-            scale,
-            focus: clampZoomFocusForScale(selectedClip.focus, scale, artboard),
-          })
+          updateZoomClip(selectedClip.id, { scale })
         }}
         onReset={() =>
           updateZoomClip(selectedClip.id, {
             scale: ZOOM_SCALE_DEFAULT,
-            focus: clampZoomFocusForScale(
-              selectedClip.focus,
-              ZOOM_SCALE_DEFAULT,
-              artboard
-            ),
           })
         }
         resetDisabled={selectedClip.scale === ZOOM_SCALE_DEFAULT}

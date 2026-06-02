@@ -188,9 +188,9 @@ export type CanvasTimelineClip = {
 }
 
 export type CanvasZoomFocus = {
-  /** Normalized artboard X, where 0 = left edge and 1 = right edge. */
+  /** Normalized target X, where 0 = left edge and 1 = right edge. */
   x: number
-  /** Normalized artboard Y, where 0 = top edge and 1 = bottom edge. */
+  /** Normalized target Y, where 0 = top edge and 1 = bottom edge. */
   y: number
 }
 
@@ -236,6 +236,7 @@ export type CanvasZoomClip = {
   start: number
   end: number
   enabled: boolean
+  /** User-picked target point. The camera center is derived/clamped at render time. */
   focus: CanvasZoomFocus
   scale: number
   radialBlur: number

@@ -153,6 +153,8 @@ export interface ProjectZoomClip {
   start: number
   end: number
   enabled?: boolean
+  // Normalized full-artboard target point. The renderer derives/clamps the
+  // camera center from this at preview/export time.
   focus?: { x: number; y: number }
   scale?: number
   radialBlur?: number

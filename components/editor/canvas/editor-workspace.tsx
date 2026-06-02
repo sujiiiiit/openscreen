@@ -668,8 +668,8 @@ export default function EditorWorkspace() {
       }
 
       const blurred = renderer.render(source, boardW, boardH, {
-        centerX: boardW / 2,
-        centerY: boardH / 2,
+        centerX: camera.radialBlurCenterX * boardW,
+        centerY: camera.radialBlurCenterY * boardH,
         amount: camera.radialBlur,
         ...camera.radialBlurSettings,
       })

@@ -600,7 +600,7 @@ describe("zoom clips persistence", () => {
             start: 1,
             end: 3,
             enabled: false,
-            focus: { x: 0.25, y: 0.75 },
+            focus: { x: 1, y: 0 },
             scale: 2.25,
             radialBlur: 0.8,
             transition: {
@@ -621,7 +621,7 @@ describe("zoom clips persistence", () => {
         start: 1,
         end: 3,
         enabled: false,
-        focus: { x: 0.25, y: 0.75 },
+        focus: { x: 1, y: 0 },
         scale: 2.25,
         radialBlur: 0.8,
         transition: {

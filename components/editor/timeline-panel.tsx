@@ -43,7 +43,10 @@ import type {
 const START_LEFT = 30
 const ROW_HEIGHT = 46
 const MIN_CLIP_DURATION_SECONDS = 1 / 30
-const ENABLE_TIMELINE_GRID_SNAP = true
+// Grid snap (snapping clip edges to the ruler's fixed time grid) is disabled —
+// clips move/resize continuously. Guide-line snap below stays on, so edges
+// still magnetize to other clip edges and the playhead.
+const ENABLE_TIMELINE_GRID_SNAP = false
 const ENABLE_TIMELINE_AUXILIARY_LINE_SNAP = true
 const ENABLE_TIMELINE_AUTO_SCROLL = true
 const TIMELINE_SKIP_SECONDS = 5

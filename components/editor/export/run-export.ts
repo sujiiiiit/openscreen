@@ -460,8 +460,8 @@ export async function runExport(
             outputSize.width,
             outputSize.height,
             {
-              centerX: outputSize.width / 2,
-              centerY: outputSize.height / 2,
+              centerX: zoomCamera.radialBlurCenterX * outputSize.width,
+              centerY: zoomCamera.radialBlurCenterY * outputSize.height,
               amount: zoomCamera.radialBlur,
               ...zoomCamera.radialBlurSettings,
             }

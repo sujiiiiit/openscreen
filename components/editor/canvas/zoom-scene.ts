@@ -26,6 +26,8 @@ export type ZoomCamera = {
   offsetX: number
   offsetY: number
   radialBlur: number
+  radialBlurCenterX: number
+  radialBlurCenterY: number
   radialBlurSettings: CanvasZoomRadialBlurSettings
   clipId: string | null
 }
@@ -42,6 +44,8 @@ export const IDENTITY_ZOOM_CAMERA: ZoomCamera = {
   offsetX: 0,
   offsetY: 0,
   radialBlur: 0,
+  radialBlurCenterX: 0.5,
+  radialBlurCenterY: 0.5,
   radialBlurSettings: ZOOM_RADIAL_BLUR_SHADER,
   clipId: null,
 }
@@ -146,41 +150,55 @@ function sampleZoomProgress(
   return { progress: 1, velocity: 0 }
 }
 
-export function clampZoomFocusForScale(
-  focus: CanvasZoomFocus,
+export function getZoomCameraCenterForTarget(
+  target: CanvasZoomFocus,
   scale: number,
   artboard: ArtboardSize
 ): CanvasZoomFocus {
-  const safeFocus = clampZoomFocus(focus)
+  const safeTarget = clampZoomFocus(target)
   const safeScale = clampZoomScale(scale)
   if (
     safeScale <= 1 + ZOOM_IDENTITY_EPSILON ||
     artboard.width <= 0 ||
     artboard.height <= 0
   ) {
-    return safeFocus
+    return safeTarget
   }
 
   const halfWindowX = 1 / (2 * safeScale)
   const halfWindowY = 1 / (2 * safeScale)
   return {
-    x: Math.min(1 - halfWindowX, Math.max(halfWindowX, safeFocus.x)),
-    y: Math.min(1 - halfWindowY, Math.max(halfWindowY, safeFocus.y)),
+    x: Math.min(1 - halfWindowX, Math.max(halfWindowX, safeTarget.x)),
+    y: Math.min(1 - halfWindowY, Math.max(halfWindowY, safeTarget.y)),
   }
 }
 
-export function getZoomVisibleWindow(
+// Legacy name kept for older call sites/tests. The returned value is the
+// clamped camera center, not necessarily the stored target point.
+export function clampZoomFocusForScale(
   focus: CanvasZoomFocus,
+  scale: number,
+  artboard: ArtboardSize
+): CanvasZoomFocus {
+  return getZoomCameraCenterForTarget(focus, scale, artboard)
+}
+
+export function getZoomVisibleWindow(
+  target: CanvasZoomFocus,
   scale: number,
   artboard: ArtboardSize
 ): ZoomVisibleWindow {
   const safeScale = clampZoomScale(scale)
-  const clampedFocus = clampZoomFocusForScale(focus, safeScale, artboard)
+  const cameraCenter = getZoomCameraCenterForTarget(
+    target,
+    safeScale,
+    artboard
+  )
   const width = 1 / safeScale
   const height = 1 / safeScale
   return {
-    x: clampedFocus.x - width / 2,
-    y: clampedFocus.y - height / 2,
+    x: cameraCenter.x - width / 2,
+    y: cameraCenter.y - height / 2,
     width,
     height,
   }
@@ -216,16 +234,25 @@ export function sampleZoomCameraAtTime(
   const scaleVelocity = (targetScale - 1) * velocity
   const motion = clampUnit((scaleVelocity / scale) * ZOOM_BLUR_MOTION_GAIN)
 
-  const focus = clampZoomFocusForScale(clip.focus, scale, artboard)
-  const focusX = focus.x * artboard.width
-  const focusY = focus.y * artboard.height
-  const offsetX = artboard.width / 2 - scale * focusX
-  const offsetY = artboard.height / 2 - scale * focusY
+  const cameraCenter = getZoomCameraCenterForTarget(
+    clip.focus,
+    scale,
+    artboard
+  )
+  const target = clampZoomFocus(clip.focus)
+  const centerX = cameraCenter.x * artboard.width
+  const centerY = cameraCenter.y * artboard.height
+  const offsetX = artboard.width / 2 - scale * centerX
+  const offsetY = artboard.height / 2 - scale * centerY
+  const targetX = offsetX + scale * target.x * artboard.width
+  const targetY = offsetY + scale * target.y * artboard.height
   return {
     scale,
     offsetX,
     offsetY,
     radialBlur: clampUnit(clip.radialBlur * motion),
+    radialBlurCenterX: clampUnit(targetX / Math.max(1, artboard.width)),
+    radialBlurCenterY: clampUnit(targetY / Math.max(1, artboard.height)),
     radialBlurSettings: ZOOM_RADIAL_BLUR_SHADER,
     clipId: clip.id,
   }
@@ -248,6 +275,10 @@ export function zoomCamerasEqual(a: ZoomCamera, b: ZoomCamera) {
     Math.abs(a.offsetX - b.offsetX) < ZOOM_IDENTITY_EPSILON &&
     Math.abs(a.offsetY - b.offsetY) < ZOOM_IDENTITY_EPSILON &&
     Math.abs(a.radialBlur - b.radialBlur) < ZOOM_IDENTITY_EPSILON &&
+    Math.abs(a.radialBlurCenterX - b.radialBlurCenterX) <
+      ZOOM_IDENTITY_EPSILON &&
+    Math.abs(a.radialBlurCenterY - b.radialBlurCenterY) <
+      ZOOM_IDENTITY_EPSILON &&
     zoomRadialBlurSettingsEqual(a.radialBlurSettings, b.radialBlurSettings) &&
     a.clipId === b.clipId
   )
