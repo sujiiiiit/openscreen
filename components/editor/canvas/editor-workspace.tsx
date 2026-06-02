@@ -562,6 +562,12 @@ export default function EditorWorkspace() {
         return
       }
 
+      // The DOM blur overlay samples the layer canvases immediately. Konva's
+      // batchDraw() is scheduled for the next animation frame, so force the
+      // scene canvases current before cropping during an active blur frame.
+      backgroundLayer.drawScene()
+      contentLayer.drawScene()
+
       // Blur **only the artboard region**, so the blur texture *is* the artboard
       // — pixel-identical to the exporter (same center, same radius
       // normalization, same edge clamp) with no workspace margin for the streak
@@ -1008,6 +1014,7 @@ export default function EditorWorkspace() {
 
       viewTransformRef.current = clampedTransform
       applyStageViewTransform(clampedTransform)
+      renderZoomBlurOverlay(lastZoomCameraRef.current)
       pendingViewTransformRef.current = clampedTransform
 
       if (viewTransformFrameRef.current !== null) return
@@ -1023,7 +1030,13 @@ export default function EditorWorkspace() {
         }
       })
     },
-    [applyStageViewTransform, artboard, setViewTransform, viewportSize]
+    [
+      applyStageViewTransform,
+      artboard,
+      renderZoomBlurOverlay,
+      setViewTransform,
+      viewportSize,
+    ]
   )
 
   const flushPendingViewTransform = useCallback(() => {

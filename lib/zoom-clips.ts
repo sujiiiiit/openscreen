@@ -28,10 +28,10 @@ export const ZOOM_BLUR_FALLOFF_MAX = 1
 export const ZOOM_BLUR_FALLOFF_DEFAULT = 0.65
 export const ZOOM_BLUR_CENTER_SIZE_MIN = 0.02
 export const ZOOM_BLUR_CENTER_SIZE_MAX = 0.5
-export const ZOOM_BLUR_CENTER_SIZE_DEFAULT = 0.26
+export const ZOOM_BLUR_CENTER_SIZE_DEFAULT = 0.12
 export const ZOOM_BLUR_CENTER_SHARPNESS_MIN = 0
 export const ZOOM_BLUR_CENTER_SHARPNESS_MAX = 1
-export const ZOOM_BLUR_CENTER_SHARPNESS_DEFAULT = 0.75
+export const ZOOM_BLUR_CENTER_SHARPNESS_DEFAULT = 1
 export const ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT: CanvasZoomRadialBlurSettings = {
   strength: ZOOM_BLUR_STRENGTH_DEFAULT,
   falloff: ZOOM_BLUR_FALLOFF_DEFAULT,
@@ -40,15 +40,13 @@ export const ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT: CanvasZoomRadialBlurSettings = {
 }
 // Baked radial-blur shader tuning. The per-clip "Blur filter" controls were
 // removed in favour of one good look, so every zoom clip renders with these
-// constants — shared by the editor overlay and the exporter so the two stay
-// pixel-identical. Tuned for a visible-but-readable Screen-Studio-style streak
-// (reaches into the mid-frame, keeps a small sharp focal core). Adjust the look
-// here, not per clip.
+// constants except the user-adjustable clear center radius. Shared by the
+// editor overlay and the exporter so the two stay pixel-identical.
 export const ZOOM_RADIAL_BLUR_SHADER: CanvasZoomRadialBlurSettings = {
   strength: 1,
   falloff: 0.42,
-  centerSize: 0.12,
-  centerSharpness: 0.55,
+  centerSize: ZOOM_BLUR_CENTER_SIZE_DEFAULT,
+  centerSharpness: ZOOM_BLUR_CENTER_SHARPNESS_DEFAULT,
 }
 // Converts on-screen zoom velocity into a 0..1 motion-blur amount: higher means
 // more blur for the same zoom speed. Kept conservative so short/snappy clips —
@@ -78,21 +76,29 @@ export const ZOOM_TRANSITION_FRACTION_MAX = 0.75
 export const ZOOM_TRANSITION_DEFAULT: CanvasZoomTransitionSettings = {
   easeIn: 0.3,
   easeOut: 0.3,
+  speed: 1,
   curve: ZOOM_TRANSITION_CURVE_DEFAULT,
 }
-// The single "Smoothness" control edits easeIn/easeOut together (symmetric
-// ramp); the curve stays baked. Min is kept above zero so a zoom never hard-cuts
-// (which would spike the velocity blur for one frame).
-export const ZOOM_SMOOTHNESS_MIN = 0.08
-export const ZOOM_SMOOTHNESS_MAX = ZOOM_TRANSITION_FRACTION_MAX
-export const ZOOM_SMOOTHNESS_DEFAULT = ZOOM_TRANSITION_DEFAULT.easeIn
+export const ZOOM_TRANSITION_SPEED_MIN = 0.25
+export const ZOOM_TRANSITION_SPEED_MAX = 4
+export const ZOOM_TRANSITION_SPEED_DEFAULT = ZOOM_TRANSITION_DEFAULT.speed
 export const ZOOM_EASE_PRESET_TRANSITIONS: Record<
   CanvasZoomEasePreset,
   CanvasZoomTransitionSettings
 > = {
   smooth: ZOOM_TRANSITION_DEFAULT,
-  snappy: { easeIn: 0.16, easeOut: 0.18, curve: "smoothstep" },
-  slow: { easeIn: 0.34, easeOut: 0.36, curve: "smoothstep" },
+  snappy: {
+    easeIn: 0.16,
+    easeOut: 0.18,
+    speed: ZOOM_TRANSITION_SPEED_DEFAULT,
+    curve: "smoothstep",
+  },
+  slow: {
+    easeIn: 0.34,
+    easeOut: 0.36,
+    speed: ZOOM_TRANSITION_SPEED_DEFAULT,
+    curve: "smoothstep",
+  },
 }
 
 export type CanvasZoomClipInput = Pick<CanvasZoomClip, "id" | "start" | "end"> &
@@ -209,6 +215,13 @@ export function clampZoomTransitionSettings(
       ZOOM_TRANSITION_FRACTION_MIN,
       ZOOM_TRANSITION_FRACTION_MAX
     ),
+    speed: clamp(
+      Number.isFinite(transition?.speed)
+        ? (transition?.speed as number)
+        : ZOOM_TRANSITION_DEFAULT.speed,
+      ZOOM_TRANSITION_SPEED_MIN,
+      ZOOM_TRANSITION_SPEED_MAX
+    ),
     curve: clampZoomTransitionCurve(transition?.curve),
   }
 }
@@ -252,7 +265,12 @@ export function zoomTransitionSettingsEqual(
   a: CanvasZoomTransitionSettings,
   b: CanvasZoomTransitionSettings
 ) {
-  return a.easeIn === b.easeIn && a.easeOut === b.easeOut && a.curve === b.curve
+  return (
+    a.easeIn === b.easeIn &&
+    a.easeOut === b.easeOut &&
+    a.speed === b.speed &&
+    a.curve === b.curve
+  )
 }
 
 export function zoomRadialBlurSettingsEqual(

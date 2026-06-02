@@ -8,9 +8,9 @@ export interface RadialZoomBlurOptions {
   strength?: number
   /** Normalized radius where blur reaches full strength. */
   falloff?: number
-  /** Normalized radius of the preserved focus area. */
+  /** Normalized radius that remains fully sharp around the focus point. */
   centerSize?: number
-  /** How much sharp detail is mixed back into the focus area. */
+  /** How much sharp detail is mixed back into the clear area. */
   centerSharpness?: number
 }
 
@@ -72,9 +72,10 @@ void main(void) {
 
   vec4 blurred = color / max(total, 0.0001);
   vec4 sharp = texture(uTex, vUv);
-  float centerPreserve = (1.0 - smoothstep(0.0, max(0.001, uCenterSize), radius)) * uCenterSharpness;
+  float centerFeather = max(0.002, uCenterSize * 0.35);
+  float centerPreserve = (1.0 - smoothstep(uCenterSize, uCenterSize + centerFeather, radius)) * uCenterSharpness;
   float subtlePreserve = (1.0 - uAmount) * 0.04;
-  outColor = mix(blurred, sharp, clamp(centerPreserve + subtlePreserve, 0.0, 0.85));
+  outColor = mix(blurred, sharp, clamp(centerPreserve + subtlePreserve, 0.0, 1.0));
 }
 `
 
@@ -194,10 +195,7 @@ export function createRadialZoomBlurRenderer(): RadialZoomBlurRenderer | null {
     const strength = Math.min(2, Math.max(0, options.strength ?? 1))
     const falloff = Math.min(1, Math.max(0.05, options.falloff ?? 0.42))
     const centerSize = Math.min(0.5, Math.max(0.02, options.centerSize ?? 0.12))
-    const centerSharpness = Math.min(
-      1,
-      Math.max(0, options.centerSharpness ?? 0.55)
-    )
+    const centerSharpness = Math.min(1, Math.max(0, options.centerSharpness ?? 1))
     g.uniform2f(uTexSize, canvas.width, canvas.height)
     // Shutter = how far samples are stretched along the radial zoom direction.
     // Scaled by the motion amount so blur grows with zoom speed; capped low so a

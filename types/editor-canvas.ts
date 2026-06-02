@@ -205,6 +205,8 @@ export type CanvasZoomTransitionSettings = {
   easeIn: number
   /** Fraction of the clip duration spent ramping from target zoom to identity. */
   easeOut: number
+  /** Multiplier applied to transition ramp velocity; 2 is twice as fast. */
+  speed: number
   /** Curve applied inside each ramp. */
   curve: CanvasZoomTransitionCurve
 }
@@ -236,7 +238,7 @@ export type CanvasZoomClip = {
   start: number
   end: number
   enabled: boolean
-  /** User-picked target point. The camera center is derived/clamped at render time. */
+  /** User-picked anchor point; the zoom scales around this fixed artboard point. */
   focus: CanvasZoomFocus
   scale: number
   radialBlur: number

@@ -153,8 +153,8 @@ export interface ProjectZoomClip {
   start: number
   end: number
   enabled?: boolean
-  // Normalized full-artboard target point. The renderer derives/clamps the
-  // camera center from this at preview/export time.
+  // Normalized full-artboard anchor point. Preview/export scale around this
+  // fixed point instead of panning toward a separately clamped center.
   focus?: { x: number; y: number }
   scale?: number
   radialBlur?: number
@@ -167,6 +167,7 @@ export interface ProjectZoomClip {
   transition?: {
     easeIn?: number
     easeOut?: number
+    speed?: number
     curve?: "linear" | "smoothstep" | "smootherstep" | "ease-out-cubic"
   }
   // Legacy preset field. New saves prefer explicit `transition`.
@@ -599,6 +600,9 @@ function parseZoomClip(value: unknown): ProjectZoomClip | null {
     }
     if (isFiniteNumber(raw["easeOut"])) {
       settings.easeOut = clampRange(raw["easeOut"] as number, 0, 0.75)
+    }
+    if (isFiniteNumber(raw["speed"])) {
+      settings.speed = clampRange(raw["speed"] as number, 0.25, 4)
     }
     if (
       ZOOM_TRANSITION_CURVES.includes(

@@ -603,9 +603,13 @@ describe("zoom clips persistence", () => {
             focus: { x: 1, y: 0 },
             scale: 2.25,
             radialBlur: 0.8,
+            radialBlurSettings: {
+              centerSize: 0.24,
+            },
             transition: {
               easeIn: 0.16,
               easeOut: 0.18,
+              speed: 2,
               curve: "ease-out-cubic",
             },
           }),
@@ -613,8 +617,8 @@ describe("zoom clips persistence", () => {
       )
     )
     expect(parsed).not.toBeNull()
-    // The per-clip "Blur filter" settings are baked now, so they're never
-    // written; everything else non-default still round-trips.
+    // Strength/falloff/sharpness stay baked in the shader; the user-facing
+    // clear radius is the only radialBlurSettings field written now.
     expect(parsed!.zoomClips).toEqual([
       {
         id: "zoom-1",
@@ -624,9 +628,13 @@ describe("zoom clips persistence", () => {
         focus: { x: 1, y: 0 },
         scale: 2.25,
         radialBlur: 0.8,
+        radialBlurSettings: {
+          centerSize: 0.24,
+        },
         transition: {
           easeIn: 0.16,
           easeOut: 0.18,
+          speed: 2,
           curve: "ease-out-cubic",
         },
       },
@@ -695,7 +703,12 @@ describe("zoom clips persistence", () => {
         end: 2,
         easePreset: "slow",
       }).transition
-    ).toEqual({ easeIn: 0.34, easeOut: 0.36, curve: "smoothstep" })
+    ).toEqual({
+      easeIn: 0.34,
+      easeOut: 0.36,
+      speed: 1,
+      curve: "smoothstep",
+    })
   })
 
   it("elides default-valued zoom settings from project state", () => {

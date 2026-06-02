@@ -296,7 +296,7 @@ export interface ProjectZoomClip {
   start: number
   end: number
   enabled?: boolean
-  /** Normalized full-artboard target point; camera center is derived at render time. */
+  /** Normalized full-artboard anchor point; zoom scales around this fixed point. */
   focus?: { x: number; y: number }
   scale?: number
   radialBlur?: number
@@ -309,6 +309,8 @@ export interface ProjectZoomClip {
   transition?: {
     easeIn?: number
     easeOut?: number
+    /** Transition ramp speed multiplier; 2 is twice as fast as 1. */
+    speed?: number
     curve?: "linear" | "smoothstep" | "smootherstep" | "ease-out-cubic"
   }
   /** Legacy preset field. New saves prefer explicit `transition`. */

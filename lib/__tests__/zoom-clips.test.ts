@@ -51,6 +51,7 @@ describe("withZoomClipDefaults", () => {
         transition: {
           easeIn: 99,
           easeOut: -1,
+          speed: 99,
           curve: "unknown" as never,
         },
         easePreset: "unknown" as never,
@@ -69,6 +70,7 @@ describe("withZoomClipDefaults", () => {
       transition: {
         easeIn: 0.75,
         easeOut: 0,
+        speed: 4,
         curve: ZOOM_TRANSITION_DEFAULT.curve,
       },
       easePreset: ZOOM_EASE_PRESET_DEFAULT,
@@ -83,7 +85,12 @@ describe("withZoomClipDefaults", () => {
         end: 3,
         easePreset: "snappy",
       }).transition
-    ).toEqual({ easeIn: 0.16, easeOut: 0.18, curve: "smoothstep" })
+    ).toEqual({
+      easeIn: 0.16,
+      easeOut: 0.18,
+      speed: ZOOM_TRANSITION_DEFAULT.speed,
+      curve: "smoothstep",
+    })
   })
 })
 

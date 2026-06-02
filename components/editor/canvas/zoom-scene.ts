@@ -21,6 +21,8 @@ const ZOOM_IDENTITY_EPSILON = 1e-4
 
 type ArtboardSize = { width: number; height: number }
 
+const ZOOM_FOCUS_CENTER: CanvasZoomFocus = { x: 0.5, y: 0.5 }
+
 export type ZoomCamera = {
   scale: number
   offsetX: number
@@ -99,8 +101,9 @@ function easeTiming(clip: CanvasZoomClip): {
 } {
   const duration = Math.max(0, clip.end - clip.start)
   const transition = clampZoomTransitionSettings(clip.transition)
-  const easeInSeconds = duration * transition.easeIn
-  const easeOutSeconds = duration * transition.easeOut
+  const speed = Math.max(transition.speed, 1e-6)
+  const easeInSeconds = (duration * transition.easeIn) / speed
+  const easeOutSeconds = (duration * transition.easeOut) / speed
   const total = easeInSeconds + easeOutSeconds
   if (total <= duration) return { easeInSeconds, easeOutSeconds }
   const scale = duration / Math.max(total, 1e-6)
@@ -162,19 +165,19 @@ export function getZoomCameraCenterForTarget(
     artboard.width <= 0 ||
     artboard.height <= 0
   ) {
-    return safeTarget
+    return ZOOM_FOCUS_CENTER
   }
 
-  const halfWindowX = 1 / (2 * safeScale)
-  const halfWindowY = 1 / (2 * safeScale)
+  const width = 1 / safeScale
+  const height = 1 / safeScale
   return {
-    x: Math.min(1 - halfWindowX, Math.max(halfWindowX, safeTarget.x)),
-    y: Math.min(1 - halfWindowY, Math.max(halfWindowY, safeTarget.y)),
+    x: safeTarget.x * (1 - width) + width / 2,
+    y: safeTarget.y * (1 - height) + height / 2,
   }
 }
 
-// Legacy name kept for older call sites/tests. The returned value is the
-// clamped camera center, not necessarily the stored target point.
+// Legacy name kept for older call sites/tests. The returned value is the camera
+// center of the focus-anchored visible window, not the stored focus point.
 export function clampZoomFocusForScale(
   focus: CanvasZoomFocus,
   scale: number,
@@ -189,16 +192,12 @@ export function getZoomVisibleWindow(
   artboard: ArtboardSize
 ): ZoomVisibleWindow {
   const safeScale = clampZoomScale(scale)
-  const cameraCenter = getZoomCameraCenterForTarget(
-    target,
-    safeScale,
-    artboard
-  )
+  const safeTarget = clampZoomFocus(target)
   const width = 1 / safeScale
   const height = 1 / safeScale
   return {
-    x: cameraCenter.x - width / 2,
-    y: cameraCenter.y - height / 2,
+    x: artboard.width > 0 ? safeTarget.x * (1 - width) : 0,
+    y: artboard.height > 0 ? safeTarget.y * (1 - height) : 0,
     width,
     height,
   }
@@ -234,26 +233,25 @@ export function sampleZoomCameraAtTime(
   const scaleVelocity = (targetScale - 1) * velocity
   const motion = clampUnit((scaleVelocity / scale) * ZOOM_BLUR_MOTION_GAIN)
 
-  const cameraCenter = getZoomCameraCenterForTarget(
-    clip.focus,
-    scale,
-    artboard
-  )
   const target = clampZoomFocus(clip.focus)
-  const centerX = cameraCenter.x * artboard.width
-  const centerY = cameraCenter.y * artboard.height
-  const offsetX = artboard.width / 2 - scale * centerX
-  const offsetY = artboard.height / 2 - scale * centerY
-  const targetX = offsetX + scale * target.x * artboard.width
-  const targetY = offsetY + scale * target.y * artboard.height
+  // Anchor the zoom at the user's focus point for the entire transition. The
+  // focus stays fixed in rendered artboard coordinates while every other pixel
+  // scales radially around it, avoiding a separate pan-then-zoom drift near
+  // edges.
+  const offsetX = target.x * artboard.width * (1 - scale)
+  const offsetY = target.y * artboard.height * (1 - scale)
+  const radialBlurSettings: CanvasZoomRadialBlurSettings = {
+    ...ZOOM_RADIAL_BLUR_SHADER,
+    centerSize: clip.radialBlurSettings.centerSize,
+  }
   return {
     scale,
     offsetX,
     offsetY,
     radialBlur: clampUnit(clip.radialBlur * motion),
-    radialBlurCenterX: clampUnit(targetX / Math.max(1, artboard.width)),
-    radialBlurCenterY: clampUnit(targetY / Math.max(1, artboard.height)),
-    radialBlurSettings: ZOOM_RADIAL_BLUR_SHADER,
+    radialBlurCenterX: target.x,
+    radialBlurCenterY: target.y,
+    radialBlurSettings,
     clipId: clip.id,
   }
 }

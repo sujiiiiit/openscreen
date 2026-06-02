@@ -12,6 +12,7 @@ import type {
   EditorArtboard,
 } from "@/types/editor-canvas"
 import {
+  ZOOM_BLUR_CENTER_SIZE_DEFAULT,
   ZOOM_FOCUS_DEFAULT,
   ZOOM_RADIAL_BLUR_DEFAULT,
   ZOOM_SCALE_DEFAULT,
@@ -151,20 +152,31 @@ function serializeZoomTransition(
     ...(transition.easeOut !== ZOOM_TRANSITION_DEFAULT.easeOut
       ? { easeOut: transition.easeOut }
       : {}),
+    ...(transition.speed !== ZOOM_TRANSITION_DEFAULT.speed
+      ? { speed: transition.speed }
+      : {}),
     ...(transition.curve !== ZOOM_TRANSITION_DEFAULT.curve
       ? { curve: transition.curve }
       : {}),
   }
 }
 
-// The per-clip "Blur filter" settings (strength/falloff/centerSize/
-// centerSharpness) are no longer user-editable — the radial-blur look is baked
-// in ZOOM_RADIAL_BLUR_SHADER and shared by the editor and exporter — so they're
-// no longer written. Old project.json files that still carry them keep loading:
-// withZoomClipDefaults parses the optional field, and the renderer ignores it.
+function serializeZoomRadialBlurSettings(
+  settings: CanvasZoomClip["radialBlurSettings"]
+): ProjectZoomClip["radialBlurSettings"] | undefined {
+  if (settings.centerSize === ZOOM_BLUR_CENTER_SIZE_DEFAULT) return undefined
+  return { centerSize: settings.centerSize }
+}
+
+// The old per-clip "Blur filter" panel exposed strength/falloff/centerSize/
+// centerSharpness. Only centerSize is user-editable now as the clear radius;
+// strength/falloff/centerSharpness stay baked in the shared shader look.
 export function serializeZoomClip(clip: CanvasZoomClip): ProjectZoomClip {
   const normalized = withZoomClipDefaults(clip)
   const transition = serializeZoomTransition(normalized.transition)
+  const radialBlurSettings = serializeZoomRadialBlurSettings(
+    normalized.radialBlurSettings
+  )
   return {
     id: normalized.id,
     start: normalized.start,
@@ -180,6 +192,7 @@ export function serializeZoomClip(clip: CanvasZoomClip): ProjectZoomClip {
     ...(normalized.radialBlur !== ZOOM_RADIAL_BLUR_DEFAULT
       ? { radialBlur: normalized.radialBlur }
       : {}),
+    ...(radialBlurSettings ? { radialBlurSettings } : {}),
     ...(transition ? { transition } : {}),
   }
 }

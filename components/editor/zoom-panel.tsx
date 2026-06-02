@@ -15,12 +15,15 @@ import { Button } from "@/components/ui/button"
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
 import {
+  ZOOM_BLUR_CENTER_SIZE_DEFAULT,
+  ZOOM_BLUR_CENTER_SIZE_MAX,
+  ZOOM_BLUR_CENTER_SIZE_MIN,
   ZOOM_FOCUS_DEFAULT,
   ZOOM_RADIAL_BLUR_DEFAULT,
   ZOOM_SCALE_DEFAULT,
-  ZOOM_SMOOTHNESS_DEFAULT,
-  ZOOM_SMOOTHNESS_MAX,
-  ZOOM_SMOOTHNESS_MIN,
+  ZOOM_TRANSITION_SPEED_DEFAULT,
+  ZOOM_TRANSITION_SPEED_MAX,
+  ZOOM_TRANSITION_SPEED_MIN,
   clampZoomFocus,
 } from "@/lib/zoom-clips"
 import { cn } from "@/lib/utils"
@@ -256,6 +259,9 @@ export function ZoomPanel() {
 
   const scalePct = Math.round(selectedClip.scale * 100)
   const blurPct = Math.round(selectedClip.radialBlur * 100)
+  const clearRadiusPct = Math.round(
+    selectedClip.radialBlurSettings.centerSize * 100
+  )
 
   return (
     <section className="flex w-full flex-col gap-6 pb-6">
@@ -336,22 +342,49 @@ export function ZoomPanel() {
         resetDisabled={selectedClip.radialBlur === ZOOM_RADIAL_BLUR_DEFAULT}
       />
 
+      <AdjustmentRow
+        label="Clear radius"
+        value={clearRadiusPct}
+        min={ZOOM_BLUR_CENTER_SIZE_MIN * 100}
+        max={ZOOM_BLUR_CENTER_SIZE_MAX * 100}
+        step={1}
+        formatValue={(value) => `${Math.round(value)}%`}
+        onValueChange={(value) =>
+          updateZoomClip(selectedClip.id, {
+            radialBlurSettings: {
+              ...selectedClip.radialBlurSettings,
+              centerSize: value / 100,
+            },
+          })
+        }
+        onReset={() =>
+          updateZoomClip(selectedClip.id, {
+            radialBlurSettings: {
+              ...selectedClip.radialBlurSettings,
+              centerSize: ZOOM_BLUR_CENTER_SIZE_DEFAULT,
+            },
+          })
+        }
+        resetDisabled={
+          selectedClip.radialBlurSettings.centerSize ===
+          ZOOM_BLUR_CENTER_SIZE_DEFAULT
+        }
+      />
+
       <div className="space-y-3 border-t border-border/60 pt-4">
         <h4 className="text-xs font-semibold select-none">Transition</h4>
         <AdjustmentRow
-          label="Smoothness"
-          value={selectedClip.transition.easeIn * 100}
-          min={ZOOM_SMOOTHNESS_MIN * 100}
-          max={ZOOM_SMOOTHNESS_MAX * 100}
-          step={1}
+          label="Speed"
+          value={selectedClip.transition.speed * 100}
+          min={ZOOM_TRANSITION_SPEED_MIN * 100}
+          max={ZOOM_TRANSITION_SPEED_MAX * 100}
+          step={5}
           formatValue={(value) => `${Math.round(value)}%`}
           onValueChange={(value) => {
-            const fraction = value / 100
             updateZoomClip(selectedClip.id, {
               transition: {
                 ...selectedClip.transition,
-                easeIn: fraction,
-                easeOut: fraction,
+                speed: value / 100,
               },
             })
           }}
@@ -359,14 +392,12 @@ export function ZoomPanel() {
             updateZoomClip(selectedClip.id, {
               transition: {
                 ...selectedClip.transition,
-                easeIn: ZOOM_SMOOTHNESS_DEFAULT,
-                easeOut: ZOOM_SMOOTHNESS_DEFAULT,
+                speed: ZOOM_TRANSITION_SPEED_DEFAULT,
               },
             })
           }
           resetDisabled={
-            selectedClip.transition.easeIn === ZOOM_SMOOTHNESS_DEFAULT &&
-            selectedClip.transition.easeOut === ZOOM_SMOOTHNESS_DEFAULT
+            selectedClip.transition.speed === ZOOM_TRANSITION_SPEED_DEFAULT
           }
         />
       </div>
