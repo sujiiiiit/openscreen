@@ -13,12 +13,10 @@ import type {
 } from "@/types/editor-canvas"
 import {
   ZOOM_FOCUS_DEFAULT,
-  ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT,
   ZOOM_RADIAL_BLUR_DEFAULT,
   ZOOM_SCALE_DEFAULT,
   ZOOM_TRANSITION_DEFAULT,
   withZoomClipDefaults,
-  zoomRadialBlurSettingsEqual,
   zoomTransitionSettingsEqual,
 } from "@/lib/zoom-clips"
 
@@ -159,37 +157,14 @@ function serializeZoomTransition(
   }
 }
 
-function serializeZoomRadialBlurSettings(
-  settings: CanvasZoomClip["radialBlurSettings"]
-): ProjectZoomClip["radialBlurSettings"] | undefined {
-  if (
-    zoomRadialBlurSettingsEqual(settings, ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT)
-  ) {
-    return undefined
-  }
-  return {
-    ...(settings.strength !== ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.strength
-      ? { strength: settings.strength }
-      : {}),
-    ...(settings.falloff !== ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.falloff
-      ? { falloff: settings.falloff }
-      : {}),
-    ...(settings.centerSize !== ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.centerSize
-      ? { centerSize: settings.centerSize }
-      : {}),
-    ...(settings.centerSharpness !==
-    ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.centerSharpness
-      ? { centerSharpness: settings.centerSharpness }
-      : {}),
-  }
-}
-
+// The per-clip "Blur filter" settings (strength/falloff/centerSize/
+// centerSharpness) are no longer user-editable — the radial-blur look is baked
+// in ZOOM_RADIAL_BLUR_SHADER and shared by the editor and exporter — so they're
+// no longer written. Old project.json files that still carry them keep loading:
+// withZoomClipDefaults parses the optional field, and the renderer ignores it.
 export function serializeZoomClip(clip: CanvasZoomClip): ProjectZoomClip {
   const normalized = withZoomClipDefaults(clip)
   const transition = serializeZoomTransition(normalized.transition)
-  const radialBlurSettings = serializeZoomRadialBlurSettings(
-    normalized.radialBlurSettings
-  )
   return {
     id: normalized.id,
     start: normalized.start,
@@ -205,7 +180,6 @@ export function serializeZoomClip(clip: CanvasZoomClip): ProjectZoomClip {
     ...(normalized.radialBlur !== ZOOM_RADIAL_BLUR_DEFAULT
       ? { radialBlur: normalized.radialBlur }
       : {}),
-    ...(radialBlurSettings ? { radialBlurSettings } : {}),
     ...(transition ? { transition } : {}),
   }
 }

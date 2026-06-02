@@ -6,7 +6,7 @@ import {
   getZoomVisibleWindow,
   sampleZoomCameraAtTime,
 } from "../zoom-scene"
-import { withZoomClipDefaults } from "@/lib/zoom-clips"
+import { ZOOM_RADIAL_BLUR_SHADER, withZoomClipDefaults } from "@/lib/zoom-clips"
 
 const artboard = { width: 1000, height: 500 }
 
@@ -34,35 +34,39 @@ describe("manual zoom camera", () => {
     })
   })
 
-  it("uses the clip as the full normal-to-zoom-to-normal effect", () => {
+  it("eases identity -> zoom -> hold -> identity with velocity-shaped blur", () => {
     const clip = withZoomClipDefaults({
       id: "z",
       start: 0,
       end: 4,
       focus: { x: 0.5, y: 0.5 },
       scale: 2,
-      radialBlur: 0.35,
+      radialBlur: 0.5,
     })
-    const easeMid = sampleZoomCameraAtTime([clip], artboard, 0.48)
-    expect(easeMid.scale).toBeCloseTo(1.5, 2)
-    expect(easeMid.radialBlur).toBeGreaterThan(0.34)
 
+    // Held middle: fully zoomed but not moving -> no motion blur.
     const hold = sampleZoomCameraAtTime([clip], artboard, 2)
     expect(hold.scale).toBeCloseTo(2)
     expect(hold.radialBlur).toBe(0)
 
-    const endMid = sampleZoomCameraAtTime([clip], artboard, 3.44)
-    expect(endMid.scale).toBeCloseTo(1.5, 1)
-    expect(endMid.radialBlur).toBeGreaterThan(0)
+    // Mid ease-in and mid ease-out: partially zoomed and moving -> blur present.
+    const easeInMid = sampleZoomCameraAtTime([clip], artboard, 0.6)
+    expect(easeInMid.scale).toBeGreaterThan(1)
+    expect(easeInMid.scale).toBeLessThan(2)
+    expect(easeInMid.radialBlur).toBeGreaterThan(0)
+
+    const easeOutMid = sampleZoomCameraAtTime([clip], artboard, 3.4)
+    expect(easeOutMid.scale).toBeGreaterThan(1)
+    expect(easeOutMid.scale).toBeLessThan(2)
+    expect(easeOutMid.radialBlur).toBeGreaterThan(0)
   })
 
-  it("uses explicit transition settings and carries blur shader settings", () => {
+  it("ignores per-clip blur settings and uses the baked shader look", () => {
     const clip = withZoomClipDefaults({
       id: "z",
       start: 0,
       end: 4,
       scale: 2,
-      transition: { easeIn: 0.5, easeOut: 0.25, curve: "linear" },
       radialBlurSettings: {
         strength: 1.4,
         falloff: 0.5,
@@ -71,14 +75,33 @@ describe("manual zoom camera", () => {
       },
     })
 
-    const camera = sampleZoomCameraAtTime([clip], artboard, 1)
-    expect(camera.scale).toBeCloseTo(1.5)
-    expect(camera.radialBlurSettings).toEqual({
-      strength: 1.4,
-      falloff: 0.5,
-      centerSize: 0.2,
-      centerSharpness: 0.6,
+    const camera = sampleZoomCameraAtTime([clip], artboard, 0.6)
+    expect(camera.radialBlur).toBeGreaterThan(0)
+    expect(camera.radialBlurSettings).toEqual(ZOOM_RADIAL_BLUR_SHADER)
+  })
+
+  it("blurs more for a snappier (shorter) ease", () => {
+    const snappy = withZoomClipDefaults({
+      id: "z",
+      start: 0,
+      end: 4,
+      scale: 2,
+      radialBlur: 1,
+      transition: { easeIn: 0.12, easeOut: 0.12, curve: "smootherstep" },
     })
+    const slow = withZoomClipDefaults({
+      id: "z",
+      start: 0,
+      end: 4,
+      scale: 2,
+      radialBlur: 1,
+      transition: { easeIn: 0.5, easeOut: 0.5, curve: "smootherstep" },
+    })
+
+    // Sample each at the midpoint of its ease-in ramp (peak velocity).
+    const snappyPeak = sampleZoomCameraAtTime([snappy], artboard, 0.24)
+    const slowPeak = sampleZoomCameraAtTime([slow], artboard, 1)
+    expect(snappyPeak.radialBlur).toBeGreaterThan(slowPeak.radialBlur)
   })
 
   it("ignores disabled clips", () => {

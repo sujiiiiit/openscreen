@@ -47,7 +47,7 @@ uniform float uFalloff;
 uniform float uCenterSize;
 uniform float uCenterSharpness;
 
-const int SAMPLE_COUNT = 31;
+const int SAMPLE_COUNT = 41;
 
 void main(void) {
   vec2 dir = vUv - uCenter;
@@ -73,8 +73,8 @@ void main(void) {
   vec4 blurred = color / max(total, 0.0001);
   vec4 sharp = texture(uTex, vUv);
   float centerPreserve = (1.0 - smoothstep(0.0, max(0.001, uCenterSize), radius)) * uCenterSharpness;
-  float subtlePreserve = (1.0 - uAmount) * 0.12;
-  outColor = mix(blurred, sharp, clamp(centerPreserve + subtlePreserve, 0.0, 0.78));
+  float subtlePreserve = (1.0 - uAmount) * 0.04;
+  outColor = mix(blurred, sharp, clamp(centerPreserve + subtlePreserve, 0.0, 0.85));
 }
 `
 
@@ -192,14 +192,18 @@ export function createRadialZoomBlurRenderer(): RadialZoomBlurRenderer | null {
     )
     const amount = Math.min(1, Math.max(0, options.amount))
     const strength = Math.min(2, Math.max(0, options.strength ?? 1))
-    const falloff = Math.min(1, Math.max(0.05, options.falloff ?? 0.65))
-    const centerSize = Math.min(0.5, Math.max(0.02, options.centerSize ?? 0.26))
+    const falloff = Math.min(1, Math.max(0.05, options.falloff ?? 0.42))
+    const centerSize = Math.min(0.5, Math.max(0.02, options.centerSize ?? 0.12))
     const centerSharpness = Math.min(
       1,
-      Math.max(0, options.centerSharpness ?? 0.75)
+      Math.max(0, options.centerSharpness ?? 0.55)
     )
     g.uniform2f(uTexSize, canvas.width, canvas.height)
-    g.uniform1f(uStrength, Math.min(0.2, amount * strength * 0.12))
+    // Shutter = how far samples are stretched along the radial zoom direction.
+    // Scaled by the motion amount so blur grows with zoom speed; capped low so a
+    // fast zoom streaks visibly but never smears the frame into an unreadable
+    // mess (the cap maps to roughly an 8% streak at the artboard edge).
+    g.uniform1f(uStrength, Math.min(0.16, amount * strength * 0.45))
     g.uniform1f(uAmount, amount)
     g.uniform1f(uFalloff, falloff)
     g.uniform1f(uCenterSize, centerSize)

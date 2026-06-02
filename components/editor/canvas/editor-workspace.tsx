@@ -195,6 +195,7 @@ export default function EditorWorkspace() {
   const backgroundCameraGroupRef = useRef<Konva.Group | null>(null)
   const contentCameraGroupRef = useRef<Konva.Group | null>(null)
   const zoomBlurCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const zoomBlurSourceCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const zoomBlurRendererRef = useRef<RadialZoomBlurRenderer | null>(null)
   const lastZoomCameraRef = useRef<ZoomCamera>(IDENTITY_ZOOM_CAMERA)
   const artboardBackdropRef = useRef<HTMLDivElement | null>(null)
@@ -561,18 +562,12 @@ export default function EditorWorkspace() {
         return
       }
 
-      const width = Math.max(1, Math.round(viewport.width))
-      const height = Math.max(1, Math.round(viewport.height))
-      if (canvas.width !== width) canvas.width = width
-      if (canvas.height !== height) canvas.height = height
-
-      const ctx = canvas.getContext("2d")
-      if (!ctx) {
-        hideZoomBlurOverlay()
-        return
-      }
-
-      ctx.clearRect(0, 0, width, height)
+      // Blur **only the artboard region**, so the blur texture *is* the artboard
+      // — pixel-identical to the exporter (same center, same radius
+      // normalization, same edge clamp) with no workspace margin for the streak
+      // to smear into. Work in the layers' device pixels (Konva.pixelRatio, up to
+      // 3x); sampling into a CSS-sized buffer used to halve the resolution and
+      // visibly soften the frame the instant blur engaged.
       const backgroundCanvas = (
         backgroundLayer.getCanvas() as unknown as {
           _canvas?: HTMLCanvasElement
@@ -581,8 +576,34 @@ export default function EditorWorkspace() {
       const contentCanvas = (
         contentLayer.getCanvas() as unknown as { _canvas?: HTMLCanvasElement }
       )._canvas
-      if (backgroundCanvas) ctx.drawImage(backgroundCanvas, 0, 0, width, height)
-      if (contentCanvas) ctx.drawImage(contentCanvas, 0, 0, width, height)
+      const pixelRatio = backgroundCanvas
+        ? backgroundCanvas.width / Math.max(1, viewport.width)
+        : Konva.pixelRatio || 1
+
+      // The visible overlay spans the whole viewport (device px) so it lines up
+      // 1:1 with the stage it temporarily replaces.
+      //
+      // Keep the CSS box in viewport pixels explicitly. A canvas is a replaced
+      // element, so relying on `absolute inset-0` alone lets the intrinsic
+      // backing-store size (`viewport * pixelRatio`) influence layout on some
+      // browsers. That made the blurred artboard draw onto an oversized DOM
+      // canvas, which looked like the zoomed video escaped the artboard even
+      // though the Konva clip and export were correct.
+      const cssWidth = `${viewport.width}px`
+      const cssHeight = `${viewport.height}px`
+      if (canvas.style.width !== cssWidth) canvas.style.width = cssWidth
+      if (canvas.style.height !== cssHeight) canvas.style.height = cssHeight
+
+      const viewW = Math.max(1, Math.round(viewport.width * pixelRatio))
+      const viewH = Math.max(1, Math.round(viewport.height * pixelRatio))
+      if (canvas.width !== viewW) canvas.width = viewW
+      if (canvas.height !== viewH) canvas.height = viewH
+
+      const ctx = canvas.getContext("2d")
+      if (!ctx) {
+        hideZoomBlurOverlay()
+        return
+      }
 
       const stage = stageRef.current
       const fallbackView = viewTransformRef.current
@@ -591,22 +612,78 @@ export default function EditorWorkspace() {
         y: stage?.y() ?? fallbackView.y,
         scale: stage?.scaleX() ?? fallbackView.scale,
       }
-      const blurred = renderer.render(canvas, width, height, {
-        centerX: activeView.x + (artboard.width / 2) * activeView.scale,
-        centerY: activeView.y + (artboard.height / 2) * activeView.scale,
+      // Artboard rectangle on screen, in device px (integer-aligned for a crisp
+      // crop + redraw).
+      const boardX = Math.round(activeView.x * pixelRatio)
+      const boardY = Math.round(activeView.y * pixelRatio)
+      const boardW = Math.max(
+        1,
+        Math.round(artboard.width * activeView.scale * pixelRatio)
+      )
+      const boardH = Math.max(
+        1,
+        Math.round(artboard.height * activeView.scale * pixelRatio)
+      )
+
+      // Crop the already-drawn artboard region out of the layer canvases into a
+      // dedicated, reused source canvas sized to the artboard.
+      let source = zoomBlurSourceCanvasRef.current
+      if (!source) {
+        source = document.createElement("canvas")
+        zoomBlurSourceCanvasRef.current = source
+      }
+      if (source.width !== boardW) source.width = boardW
+      if (source.height !== boardH) source.height = boardH
+      const sourceCtx = source.getContext("2d")
+      if (!sourceCtx) {
+        hideZoomBlurOverlay()
+        return
+      }
+      sourceCtx.clearRect(0, 0, boardW, boardH)
+      if (backgroundCanvas) {
+        sourceCtx.drawImage(
+          backgroundCanvas,
+          boardX,
+          boardY,
+          boardW,
+          boardH,
+          0,
+          0,
+          boardW,
+          boardH
+        )
+      }
+      if (contentCanvas) {
+        sourceCtx.drawImage(
+          contentCanvas,
+          boardX,
+          boardY,
+          boardW,
+          boardH,
+          0,
+          0,
+          boardW,
+          boardH
+        )
+      }
+
+      const blurred = renderer.render(source, boardW, boardH, {
+        centerX: boardW / 2,
+        centerY: boardH / 2,
         amount: camera.radialBlur,
         ...camera.radialBlurSettings,
       })
-      ctx.clearRect(0, 0, width, height)
-      ctx.drawImage(blurred, 0, 0)
+
+      ctx.clearRect(0, 0, viewW, viewH)
+      ctx.drawImage(blurred, boardX, boardY)
       ctx.save()
       ctx.strokeStyle = "rgba(0,0,0,0.10)"
-      ctx.lineWidth = 1
+      ctx.lineWidth = Math.max(1, pixelRatio)
       ctx.strokeRect(
-        activeView.x + 0.5,
-        activeView.y + 0.5,
-        Math.max(0, artboard.width * activeView.scale - 1),
-        Math.max(0, artboard.height * activeView.scale - 1)
+        boardX + 0.5,
+        boardY + 0.5,
+        Math.max(0, boardW - 1),
+        Math.max(0, boardH - 1)
       )
       ctx.restore()
       canvas.style.visibility = "visible"
@@ -1727,7 +1804,7 @@ export default function EditorWorkspace() {
           <canvas
             ref={zoomBlurCanvasRef}
             aria-hidden="true"
-            className="pointer-events-none invisible absolute inset-0 z-[2]"
+            className="pointer-events-none invisible absolute inset-0 z-[2] h-full w-full"
           />
         </>
       ) : null}

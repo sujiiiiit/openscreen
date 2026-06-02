@@ -18,29 +18,16 @@ import { Button } from "@/components/ui/button"
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
 import {
-  ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT,
-  ZOOM_TRANSITION_DEFAULT,
-  ZOOM_TRANSITION_CURVES,
   ZOOM_FOCUS_DEFAULT,
   ZOOM_RADIAL_BLUR_DEFAULT,
   ZOOM_SCALE_DEFAULT,
+  ZOOM_SMOOTHNESS_DEFAULT,
+  ZOOM_SMOOTHNESS_MAX,
+  ZOOM_SMOOTHNESS_MIN,
   clampZoomFocus,
-  zoomRadialBlurSettingsEqual,
-  zoomTransitionSettingsEqual,
 } from "@/lib/zoom-clips"
 import { cn } from "@/lib/utils"
-import type {
-  CanvasVideoItem,
-  CanvasZoomClip,
-  CanvasZoomTransitionCurve,
-} from "@/types/editor-canvas"
-
-const CURVE_LABELS: Record<CanvasZoomTransitionCurve, string> = {
-  linear: "linear",
-  smoothstep: "smoothstep",
-  smootherstep: "smootherstep",
-  "ease-out-cubic": "ease-out-cubic",
-}
+import type { CanvasVideoItem, CanvasZoomClip } from "@/types/editor-canvas"
 
 function AdjustmentRow({
   label,
@@ -352,7 +339,7 @@ export function ZoomPanel() {
       />
 
       <AdjustmentRow
-        label="Radial blur"
+        label="Motion blur"
         value={blurPct}
         min={0}
         max={100}
@@ -369,246 +356,37 @@ export function ZoomPanel() {
         resetDisabled={selectedClip.radialBlur === ZOOM_RADIAL_BLUR_DEFAULT}
       />
 
-      <div className="space-y-4 border-t border-border/60 pt-4">
-        <div className="flex items-center justify-between gap-3">
-          <h4 className="text-xs font-semibold select-none">Transition</h4>
-          <Button
-            type="button"
-            variant="link"
-            size="sm"
-            onClick={() =>
-              updateZoomClip(selectedClip.id, {
-                transition: ZOOM_TRANSITION_DEFAULT,
-              })
-            }
-            disabled={zoomTransitionSettingsEqual(
-              selectedClip.transition,
-              ZOOM_TRANSITION_DEFAULT
-            )}
-          >
-            Reset
-          </Button>
-        </div>
-
-        <div className="space-y-2">
-          <h5 className="text-[11px] font-medium text-muted-foreground select-none">
-            Curve
-          </h5>
-          <div className="grid grid-cols-2 gap-1">
-            {ZOOM_TRANSITION_CURVES.map((curve) => (
-              <Button
-                key={curve}
-                type="button"
-                variant={
-                  selectedClip.transition.curve === curve
-                    ? "default"
-                    : "outline"
-                }
-                size="sm"
-                onClick={() =>
-                  updateZoomClip(selectedClip.id, {
-                    transition: { ...selectedClip.transition, curve },
-                  })
-                }
-              >
-                {CURVE_LABELS[curve]}
-              </Button>
-            ))}
-          </div>
-        </div>
-
+      <div className="space-y-3 border-t border-border/60 pt-4">
+        <h4 className="text-xs font-semibold select-none">Transition</h4>
         <AdjustmentRow
-          label="Ease in"
+          label="Smoothness"
           value={selectedClip.transition.easeIn * 100}
-          min={0}
-          max={75}
+          min={ZOOM_SMOOTHNESS_MIN * 100}
+          max={ZOOM_SMOOTHNESS_MAX * 100}
           step={1}
           formatValue={(value) => `${Math.round(value)}%`}
-          onValueChange={(value) =>
+          onValueChange={(value) => {
+            const fraction = value / 100
             updateZoomClip(selectedClip.id, {
               transition: {
                 ...selectedClip.transition,
-                easeIn: value / 100,
+                easeIn: fraction,
+                easeOut: fraction,
               },
             })
-          }
-          onReset={() =>
-            updateZoomClip(selectedClip.id, {
-              transition: {
-                ...selectedClip.transition,
-                easeIn: ZOOM_TRANSITION_DEFAULT.easeIn,
-              },
-            })
-          }
-          resetDisabled={
-            selectedClip.transition.easeIn === ZOOM_TRANSITION_DEFAULT.easeIn
-          }
-        />
-
-        <AdjustmentRow
-          label="Ease out"
-          value={selectedClip.transition.easeOut * 100}
-          min={0}
-          max={75}
-          step={1}
-          formatValue={(value) => `${Math.round(value)}%`}
-          onValueChange={(value) =>
-            updateZoomClip(selectedClip.id, {
-              transition: {
-                ...selectedClip.transition,
-                easeOut: value / 100,
-              },
-            })
-          }
+          }}
           onReset={() =>
             updateZoomClip(selectedClip.id, {
               transition: {
                 ...selectedClip.transition,
-                easeOut: ZOOM_TRANSITION_DEFAULT.easeOut,
+                easeIn: ZOOM_SMOOTHNESS_DEFAULT,
+                easeOut: ZOOM_SMOOTHNESS_DEFAULT,
               },
             })
           }
           resetDisabled={
-            selectedClip.transition.easeOut === ZOOM_TRANSITION_DEFAULT.easeOut
-          }
-        />
-      </div>
-
-      <div className="space-y-4 border-t border-border/60 pt-4">
-        <div className="flex items-center justify-between gap-3">
-          <h4 className="text-xs font-semibold select-none">Blur filter</h4>
-          <Button
-            type="button"
-            variant="link"
-            size="sm"
-            onClick={() =>
-              updateZoomClip(selectedClip.id, {
-                radialBlurSettings: ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT,
-              })
-            }
-            disabled={zoomRadialBlurSettingsEqual(
-              selectedClip.radialBlurSettings,
-              ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT
-            )}
-          >
-            Reset
-          </Button>
-        </div>
-
-        <AdjustmentRow
-          label="Strength"
-          value={selectedClip.radialBlurSettings.strength}
-          min={0}
-          max={2}
-          step={0.05}
-          formatValue={(value) => `${value.toFixed(2)}x`}
-          onValueChange={(value) =>
-            updateZoomClip(selectedClip.id, {
-              radialBlurSettings: {
-                ...selectedClip.radialBlurSettings,
-                strength: value,
-              },
-            })
-          }
-          onReset={() =>
-            updateZoomClip(selectedClip.id, {
-              radialBlurSettings: {
-                ...selectedClip.radialBlurSettings,
-                strength: ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.strength,
-              },
-            })
-          }
-          resetDisabled={
-            selectedClip.radialBlurSettings.strength ===
-            ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.strength
-          }
-        />
-
-        <AdjustmentRow
-          label="Falloff radius"
-          value={selectedClip.radialBlurSettings.falloff * 100}
-          min={5}
-          max={100}
-          step={1}
-          formatValue={(value) => `${Math.round(value)}%`}
-          onValueChange={(value) =>
-            updateZoomClip(selectedClip.id, {
-              radialBlurSettings: {
-                ...selectedClip.radialBlurSettings,
-                falloff: value / 100,
-              },
-            })
-          }
-          onReset={() =>
-            updateZoomClip(selectedClip.id, {
-              radialBlurSettings: {
-                ...selectedClip.radialBlurSettings,
-                falloff: ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.falloff,
-              },
-            })
-          }
-          resetDisabled={
-            selectedClip.radialBlurSettings.falloff ===
-            ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.falloff
-          }
-        />
-
-        <AdjustmentRow
-          label="Center size"
-          value={selectedClip.radialBlurSettings.centerSize * 100}
-          min={2}
-          max={50}
-          step={1}
-          formatValue={(value) => `${Math.round(value)}%`}
-          onValueChange={(value) =>
-            updateZoomClip(selectedClip.id, {
-              radialBlurSettings: {
-                ...selectedClip.radialBlurSettings,
-                centerSize: value / 100,
-              },
-            })
-          }
-          onReset={() =>
-            updateZoomClip(selectedClip.id, {
-              radialBlurSettings: {
-                ...selectedClip.radialBlurSettings,
-                centerSize: ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.centerSize,
-              },
-            })
-          }
-          resetDisabled={
-            selectedClip.radialBlurSettings.centerSize ===
-            ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.centerSize
-          }
-        />
-
-        <AdjustmentRow
-          label="Center sharpness"
-          value={selectedClip.radialBlurSettings.centerSharpness * 100}
-          min={0}
-          max={100}
-          step={1}
-          formatValue={(value) => `${Math.round(value)}%`}
-          onValueChange={(value) =>
-            updateZoomClip(selectedClip.id, {
-              radialBlurSettings: {
-                ...selectedClip.radialBlurSettings,
-                centerSharpness: value / 100,
-              },
-            })
-          }
-          onReset={() =>
-            updateZoomClip(selectedClip.id, {
-              radialBlurSettings: {
-                ...selectedClip.radialBlurSettings,
-                centerSharpness:
-                  ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.centerSharpness,
-              },
-            })
-          }
-          resetDisabled={
-            selectedClip.radialBlurSettings.centerSharpness ===
-            ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.centerSharpness
+            selectedClip.transition.easeIn === ZOOM_SMOOTHNESS_DEFAULT &&
+            selectedClip.transition.easeOut === ZOOM_SMOOTHNESS_DEFAULT
           }
         />
       </div>

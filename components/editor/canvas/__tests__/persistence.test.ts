@@ -602,13 +602,7 @@ describe("zoom clips persistence", () => {
             enabled: false,
             focus: { x: 0.25, y: 0.75 },
             scale: 2.25,
-            radialBlur: 0.5,
-            radialBlurSettings: {
-              strength: 1.5,
-              falloff: 0.4,
-              centerSize: 0.18,
-              centerSharpness: 0.6,
-            },
+            radialBlur: 0.8,
             transition: {
               easeIn: 0.16,
               easeOut: 0.18,
@@ -619,6 +613,8 @@ describe("zoom clips persistence", () => {
       )
     )
     expect(parsed).not.toBeNull()
+    // The per-clip "Blur filter" settings are baked now, so they're never
+    // written; everything else non-default still round-trips.
     expect(parsed!.zoomClips).toEqual([
       {
         id: "zoom-1",
@@ -627,13 +623,7 @@ describe("zoom clips persistence", () => {
         enabled: false,
         focus: { x: 0.25, y: 0.75 },
         scale: 2.25,
-        radialBlur: 0.5,
-        radialBlurSettings: {
-          strength: 1.5,
-          falloff: 0.4,
-          centerSize: 0.18,
-          centerSharpness: 0.6,
-        },
+        radialBlur: 0.8,
         transition: {
           easeIn: 0.16,
           easeOut: 0.18,

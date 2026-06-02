@@ -1,9 +1,9 @@
 import Konva from "konva"
 
 import {
-  ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT,
+  ZOOM_BLUR_MOTION_GAIN,
+  ZOOM_RADIAL_BLUR_SHADER,
   clampZoomFocus,
-  clampZoomRadialBlurSettings,
   clampZoomScale,
   clampZoomTransitionSettings,
   withZoomClipDefaults,
@@ -42,7 +42,7 @@ export const IDENTITY_ZOOM_CAMERA: ZoomCamera = {
   offsetX: 0,
   offsetY: 0,
   radialBlur: 0,
-  radialBlurSettings: ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT,
+  radialBlurSettings: ZOOM_RADIAL_BLUR_SHADER,
   clipId: null,
 }
 
@@ -79,13 +79,14 @@ function transitionCurveValue(curve: CanvasZoomTransitionCurve, value: number) {
   }
 }
 
-function transitionMotion(curve: CanvasZoomTransitionCurve, value: number) {
-  const t = Math.min(1, Math.max(0, value))
+// Magnitude of d(curve)/dt in normalized-t space (central difference). The eased
+// progress moves fastest mid-transition and is ~flat at both ends, so this is a
+// single smooth bump — exactly the shape a zoom's motion blur should follow.
+function curveSlope(curve: CanvasZoomTransitionCurve, value: number) {
   const dt = 1 / 240
-  const before = transitionCurveValue(curve, t - dt)
-  const after = transitionCurveValue(curve, t + dt)
-  const speed = Math.abs(after - before) / (dt * 2)
-  return Math.min(1, Math.sin(Math.PI * t) * Math.max(0.35, speed / 1.5))
+  const before = transitionCurveValue(curve, value - dt)
+  const after = transitionCurveValue(curve, value + dt)
+  return Math.abs(after - before) / (dt * 2)
 }
 
 function easeTiming(clip: CanvasZoomClip): {
@@ -105,17 +106,21 @@ function easeTiming(clip: CanvasZoomClip): {
   }
 }
 
+// Returns the eased zoom amount (`progress`, 0..1) and the real-time rate of
+// change of that progress (`velocity`, per second, always >= 0). Velocity is 0
+// outside the ease ramps (held zoom or identity), which is what gates the motion
+// blur to only the moving parts of the effect.
 function sampleZoomProgress(
   clip: CanvasZoomClip,
   compositionSeconds: number
-): { progress: number; motion: number } {
-  if (!clip.enabled) return { progress: 0, motion: 0 }
+): { progress: number; velocity: number } {
+  if (!clip.enabled) return { progress: 0, velocity: 0 }
   if (compositionSeconds < clip.start || compositionSeconds >= clip.end) {
-    return { progress: 0, motion: 0 }
+    return { progress: 0, velocity: 0 }
   }
 
   const duration = Math.max(0, clip.end - clip.start)
-  if (duration <= 0) return { progress: 0, motion: 0 }
+  if (duration <= 0) return { progress: 0, velocity: 0 }
 
   const { easeInSeconds, easeOutSeconds } = easeTiming(clip)
   const transition = clampZoomTransitionSettings(clip.transition)
@@ -126,7 +131,7 @@ function sampleZoomProgress(
     const t = (compositionSeconds - clip.start) / easeInSeconds
     return {
       progress: transitionCurveValue(transition.curve, t),
-      motion: transitionMotion(transition.curve, t),
+      velocity: curveSlope(transition.curve, t) / easeInSeconds,
     }
   }
 
@@ -134,11 +139,11 @@ function sampleZoomProgress(
     const t = (compositionSeconds - easeOutStart) / easeOutSeconds
     return {
       progress: 1 - transitionCurveValue(transition.curve, t),
-      motion: transitionMotion(transition.curve, t),
+      velocity: curveSlope(transition.curve, t) / easeOutSeconds,
     }
   }
 
-  return { progress: 1, motion: 0 }
+  return { progress: 1, velocity: 0 }
 }
 
 export function clampZoomFocusForScale(
@@ -199,10 +204,17 @@ export function sampleZoomCameraAtTime(
   }
   if (!clip) return IDENTITY_ZOOM_CAMERA
 
-  const { progress, motion } = sampleZoomProgress(clip, compositionSeconds)
+  const { progress, velocity } = sampleZoomProgress(clip, compositionSeconds)
   const targetScale = clampZoomScale(clip.scale)
   const scale = 1 + (targetScale - 1) * progress
   if (scale <= 1 + ZOOM_IDENTITY_EPSILON) return IDENTITY_ZOOM_CAMERA
+
+  // Motion blur tracks the on-screen zoom velocity: how fast the magnification
+  // is changing, relative to the current scale. This is a single smooth bump
+  // (~0 at the ease boundaries, so blur ramps on/off seamlessly) and is naturally
+  // stronger for faster — snappier or shorter — zooms.
+  const scaleVelocity = (targetScale - 1) * velocity
+  const motion = clampUnit((scaleVelocity / scale) * ZOOM_BLUR_MOTION_GAIN)
 
   const focus = clampZoomFocusForScale(clip.focus, scale, artboard)
   const focusX = focus.x * artboard.width
@@ -213,8 +225,8 @@ export function sampleZoomCameraAtTime(
     scale,
     offsetX,
     offsetY,
-    radialBlur: Math.max(0, Math.min(1, clip.radialBlur * motion)),
-    radialBlurSettings: clampZoomRadialBlurSettings(clip.radialBlurSettings),
+    radialBlur: clampUnit(clip.radialBlur * motion),
+    radialBlurSettings: ZOOM_RADIAL_BLUR_SHADER,
     clipId: clip.id,
   }
 }

@@ -807,6 +807,15 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   )
   const hydratedProjectIdRef = useRef<string | null>(null)
   const hydrationGenerationRef = useRef(0)
+  // Autoplay-on-open. Hydration arms this when the freshly opened project has
+  // playable media; the first timeline video element to finish loading consumes
+  // it and starts playback exactly once (see `registerTimelineVideoElement`).
+  // It is gated on a real element being ready rather than fired inline at
+  // hydration time so playback begins from the first decoded frame instead of a
+  // blank canvas, and so a project that opens with no media never auto-plays.
+  // Any explicit transport action (play/pause) consumes it, so a slow-loading
+  // video can never surprise the user after they've already taken control.
+  const autoplayPendingRef = useRef(false)
 
   const { project } = useProject()
   const projectRef = useRef<ProjectSummary | null>(project)
@@ -2010,6 +2019,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   )
 
   const pauseTimeline = useCallback(() => {
+    // A pause — whether from the transport button or an internal trigger
+    // (page hidden, preview blurred) — settles the transport, so any pending
+    // open-time autoplay is now moot and must not fire when a late video loads.
+    autoplayPendingRef.current = false
     if (timelinePlaybackFrameRef.current !== null) {
       cancelAnimationFrame(timelinePlaybackFrameRef.current)
       timelinePlaybackFrameRef.current = null
@@ -2031,6 +2044,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   ])
 
   const playTimeline = useCallback(() => {
+    // Playback has begun (or is already running), so the open-time autoplay is
+    // fulfilled — clear it before the early return so it can't re-fire later.
+    autoplayPendingRef.current = false
     if (isTimelinePlayingRef.current) return
 
     const duration = timelineDurationRef.current
@@ -2247,6 +2263,20 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           timelineTimeRef.current,
           isTimelinePlayingRef.current
         )
+        // Open-time autoplay: the project was hydrated with playable media and
+        // this is the first video element to become ready. Start playback once,
+        // now that there's a decodable frame and the timeline has a real
+        // duration. `playTimeline` clears the flag, so additional elements
+        // registering later just keep in sync (they read the live playing
+        // state above) instead of restarting playback.
+        if (
+          autoplayPendingRef.current &&
+          !isTimelinePlayingRef.current &&
+          timelineDurationRef.current > 0 &&
+          !(typeof document !== "undefined" && document.hidden)
+        ) {
+          playTimeline()
+        }
         return
       }
 
@@ -2254,7 +2284,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       clearCommittedEntry(id)
       videoFpsRef.current.delete(id)
     },
-    [clearCommittedEntry, seekElementToTimeline]
+    [clearCommittedEntry, playTimeline, seekElementToTimeline]
   )
 
   // Records a measured source frame rate for an element (see the canvas video
@@ -4001,6 +4031,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       commitTimelineVisibleVideoIds(new Set())
       timelineTimeRef.current = 0
       isTimelinePlayingRef.current = false
+      // Clear any autoplay armed by the previous project so it can't fire
+      // against the incoming one before the hydration paths below re-arm it.
+      autoplayPendingRef.current = false
       isPreviewModeRef.current = false
       selectedItemIdRef.current = null
       selectedZoomClipIdRef.current = null
@@ -4151,6 +4184,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       historyRef.current = seeded.next
       setCanUndo(false)
       setCanRedo(false)
+
+      // Arm open-time autoplay when the restored project actually has something
+      // on the timeline; the first restored video element to load consumes it.
+      autoplayPendingRef.current = restoredClips.length > 0
 
       hydratedProjectIdRef.current = project.id
       return
@@ -4323,6 +4360,20 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         shouldAbort,
       })
     }
+
+    // Arm open-time autoplay for the fresh recording. The screen/camera videos
+    // are added asynchronously above; the first to finish loading consumes the
+    // flag and starts playback. A valid-dims asset is exactly what gates each
+    // `addRemoteVideo` call, so reuse that test — when neither will land on the
+    // canvas, the flag stays clear and an empty first-open never auto-plays.
+    const hasValidDims = (asset: ProjectAsset | null) =>
+      asset != null &&
+      typeof asset.width === "number" &&
+      typeof asset.height === "number" &&
+      asset.width > 0 &&
+      asset.height > 0
+    autoplayPendingRef.current =
+      hasValidDims(screenAsset) || hasValidDims(cameraAsset)
 
     hydratedProjectIdRef.current = project.id
   }, [
