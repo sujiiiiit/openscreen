@@ -12,7 +12,6 @@ import type {
   EditorArtboard,
 } from "@/types/editor-canvas"
 import {
-  ZOOM_BLUR_CENTER_SIZE_DEFAULT,
   ZOOM_FOCUS_DEFAULT,
   ZOOM_RADIAL_BLUR_DEFAULT,
   ZOOM_SCALE_DEFAULT,
@@ -146,14 +145,8 @@ function serializeZoomTransition(
     return undefined
   }
   return {
-    ...(transition.easeIn !== ZOOM_TRANSITION_DEFAULT.easeIn
-      ? { easeIn: transition.easeIn }
-      : {}),
-    ...(transition.easeOut !== ZOOM_TRANSITION_DEFAULT.easeOut
-      ? { easeOut: transition.easeOut }
-      : {}),
-    ...(transition.speed !== ZOOM_TRANSITION_DEFAULT.speed
-      ? { speed: transition.speed }
+    ...(transition.durationMs !== ZOOM_TRANSITION_DEFAULT.durationMs
+      ? { durationMs: transition.durationMs }
       : {}),
     ...(transition.curve !== ZOOM_TRANSITION_DEFAULT.curve
       ? { curve: transition.curve }
@@ -161,22 +154,13 @@ function serializeZoomTransition(
   }
 }
 
-function serializeZoomRadialBlurSettings(
-  settings: CanvasZoomClip["radialBlurSettings"]
-): ProjectZoomClip["radialBlurSettings"] | undefined {
-  if (settings.centerSize === ZOOM_BLUR_CENTER_SIZE_DEFAULT) return undefined
-  return { centerSize: settings.centerSize }
-}
-
-// The old per-clip "Blur filter" panel exposed strength/falloff/centerSize/
-// centerSharpness. Only centerSize is user-editable now as the clear radius;
-// strength/falloff/centerSharpness stay baked in the shared shader look.
+// The old per-clip zoom-blur panel exposed strength/falloff/centerSize/
+// centerSharpness for the symmetric shader. The Pixi-style ZoomBlurFilter path
+// now bakes the inner radius at 2%; all radialBlurSettings fields are legacy
+// hydration fields and are no longer written by new saves.
 export function serializeZoomClip(clip: CanvasZoomClip): ProjectZoomClip {
   const normalized = withZoomClipDefaults(clip)
   const transition = serializeZoomTransition(normalized.transition)
-  const radialBlurSettings = serializeZoomRadialBlurSettings(
-    normalized.radialBlurSettings
-  )
   return {
     id: normalized.id,
     start: normalized.start,
@@ -192,7 +176,6 @@ export function serializeZoomClip(clip: CanvasZoomClip): ProjectZoomClip {
     ...(normalized.radialBlur !== ZOOM_RADIAL_BLUR_DEFAULT
       ? { radialBlur: normalized.radialBlur }
       : {}),
-    ...(radialBlurSettings ? { radialBlurSettings } : {}),
     ...(transition ? { transition } : {}),
   }
 }

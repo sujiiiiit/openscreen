@@ -201,24 +201,26 @@ export type CanvasZoomTransitionCurve =
   | "ease-out-cubic"
 
 export type CanvasZoomTransitionSettings = {
-  /** Fraction of the clip duration spent ramping from identity to target zoom. */
+  /** Legacy fraction of the clip duration spent ramping in; read for old files. */
   easeIn: number
-  /** Fraction of the clip duration spent ramping from target zoom to identity. */
+  /** Legacy fraction of the clip duration spent ramping out; read for old files. */
   easeOut: number
-  /** Multiplier applied to transition ramp velocity; 2 is twice as fast. */
+  /** Legacy ramp speed multiplier; new saves use durationMs instead. */
   speed: number
+  /** Milliseconds each zoom-in / zoom-out ramp should take when the clip is long enough. */
+  durationMs: number
   /** Curve applied inside each ramp. */
   curve: CanvasZoomTransitionCurve
 }
 
 export type CanvasZoomRadialBlurSettings = {
-  /** Multiplier applied after the user-facing radialBlur amount. */
+  /** Pixi ZoomBlurFilter-style strength multiplier after radialBlur amount. */
   strength: number
-  /** Normalized radius where the blur reaches full strength. */
+  /** Legacy symmetric-shader field; retained for hydration but ignored now. */
   falloff: number
-  /** Normalized radius of the preserved focus area. */
+  /** Legacy inner-radius field; retained for hydration but ignored now. */
   centerSize: number
-  /** How much sharp detail is mixed back into the focus area. */
+  /** Legacy symmetric-shader field; retained for hydration but ignored now. */
   centerSharpness: number
 }
 

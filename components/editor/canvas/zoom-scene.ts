@@ -87,7 +87,7 @@ function transitionCurveValue(curve: CanvasZoomTransitionCurve, value: number) {
 
 // Magnitude of d(curve)/dt in normalized-t space (central difference). The eased
 // progress moves fastest mid-transition and is ~flat at both ends, so this is a
-// single smooth bump — exactly the shape a zoom's motion blur should follow.
+// single smooth bump — exactly the shape a zoom blur should follow.
 function curveSlope(curve: CanvasZoomTransitionCurve, value: number) {
   const dt = 1 / 240
   const before = transitionCurveValue(curve, value - dt)
@@ -101,9 +101,9 @@ function easeTiming(clip: CanvasZoomClip): {
 } {
   const duration = Math.max(0, clip.end - clip.start)
   const transition = clampZoomTransitionSettings(clip.transition)
-  const speed = Math.max(transition.speed, 1e-6)
-  const easeInSeconds = (duration * transition.easeIn) / speed
-  const easeOutSeconds = (duration * transition.easeOut) / speed
+  const rampSeconds = Math.max(0, transition.durationMs) / 1000
+  const easeInSeconds = Math.min(duration, rampSeconds)
+  const easeOutSeconds = Math.min(duration, rampSeconds)
   const total = easeInSeconds + easeOutSeconds
   if (total <= duration) return { easeInSeconds, easeOutSeconds }
   const scale = duration / Math.max(total, 1e-6)
@@ -115,8 +115,8 @@ function easeTiming(clip: CanvasZoomClip): {
 
 // Returns the eased zoom amount (`progress`, 0..1) and the real-time rate of
 // change of that progress (`velocity`, per second, always >= 0). Velocity is 0
-// outside the ease ramps (held zoom or identity), which is what gates the motion
-// blur to only the moving parts of the effect.
+// outside the ease ramps (held zoom or identity), which gates zoom blur to only
+// the moving parts of the effect.
 function sampleZoomProgress(
   clip: CanvasZoomClip,
   compositionSeconds: number
@@ -226,7 +226,7 @@ export function sampleZoomCameraAtTime(
   const scale = 1 + (targetScale - 1) * progress
   if (scale <= 1 + ZOOM_IDENTITY_EPSILON) return IDENTITY_ZOOM_CAMERA
 
-  // Motion blur tracks the on-screen zoom velocity: how fast the magnification
+  // Zoom-blur strength tracks the on-screen zoom velocity: how fast the magnification
   // is changing, relative to the current scale. This is a single smooth bump
   // (~0 at the ease boundaries, so blur ramps on/off seamlessly) and is naturally
   // stronger for faster — snappier or shorter — zooms.
@@ -240,10 +240,6 @@ export function sampleZoomCameraAtTime(
   // edges.
   const offsetX = target.x * artboard.width * (1 - scale)
   const offsetY = target.y * artboard.height * (1 - scale)
-  const radialBlurSettings: CanvasZoomRadialBlurSettings = {
-    ...ZOOM_RADIAL_BLUR_SHADER,
-    centerSize: clip.radialBlurSettings.centerSize,
-  }
   return {
     scale,
     offsetX,
@@ -251,7 +247,7 @@ export function sampleZoomCameraAtTime(
     radialBlur: clampUnit(clip.radialBlur * motion),
     radialBlurCenterX: target.x,
     radialBlurCenterY: target.y,
-    radialBlurSettings,
+    radialBlurSettings: ZOOM_RADIAL_BLUR_SHADER,
     clipId: clip.id,
   }
 }

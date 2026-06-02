@@ -4,13 +4,17 @@ export interface RadialZoomBlurOptions {
   centerY: number
   /** 0..1 user-facing blur amount after motion weighting. */
   amount: number
-  /** Extra multiplier for blur reach after amount is applied. */
+  /** Extra multiplier for Pixi-style zoom-blur strength after amount is applied. */
   strength?: number
-  /** Normalized radius where blur reaches full strength. */
+  /** Legacy setting from the old symmetric shader; ignored by the Pixi-style path. */
   falloff?: number
-  /** Normalized radius that remains fully sharp around the focus point. */
+  /** Normalized Pixi-style inner radius that remains sharp around the focus point. */
+  innerRadius?: number
+  /** Legacy alias for innerRadius from older Zoom panel settings. */
   centerSize?: number
-  /** How much sharp detail is mixed back into the clear area. */
+  /** Normalized Pixi-style outer radius; negative values mean infinite radius. */
+  radius?: number
+  /** Legacy setting from the old symmetric shader; ignored by the Pixi-style path. */
   centerSharpness?: number
 }
 
@@ -42,40 +46,70 @@ uniform sampler2D uTex;
 uniform vec2 uCenter;
 uniform vec2 uTexSize;
 uniform float uStrength;
-uniform float uAmount;
-uniform float uFalloff;
-uniform float uCenterSize;
-uniform float uCenterSharpness;
+uniform float uInnerRadius;
+uniform float uRadius;
 
-const int SAMPLE_COUNT = 41;
+const int SAMPLE_COUNT = 32;
+
+// Same phase-noise idea as Pixi's ZoomBlurFilter. Jittering the sample offset
+// hides visible fixed-kernel bands in smooth gradients and text edges.
+float rand(vec2 co, float seed) {
+  const float a = 12.9898;
+  const float b = 78.233;
+  const float c = 43758.5453;
+  float dt = dot(co + seed, vec2(a, b));
+  float sn = mod(dt, 3.14159);
+  return fract(sin(sn) * c + seed);
+}
 
 void main(void) {
-  vec2 dir = vUv - uCenter;
-  float radius = length(dir * uTexSize) / max(uTexSize.x, uTexSize.y);
-  float radiusFalloff = smoothstep(0.015, uFalloff, radius);
-  float shutter = uStrength * radiusFalloff;
-  vec4 color = vec4(0.0);
-  float total = 0.0;
+  vec4 sharp = texture(uTex, vUv);
+  float minGradient = uInnerRadius * 0.3;
+  float innerRadius = (uInnerRadius + minGradient * 0.5) / uTexSize.x;
+  float gradient = uRadius * 0.3;
+  float outerRadius = (uRadius - gradient * 0.5) / uTexSize.x;
 
-  for (int i = 0; i < SAMPLE_COUNT; i++) {
-    float t = float(i) / float(SAMPLE_COUNT - 1);
-    float signedT = t * 2.0 - 1.0;
-    float gaussian = exp(-signedT * signedT * 5.25);
-    float centerWeight = 1.0 - abs(signedT);
-    float weight = gaussian * (0.35 + centerWeight * 0.65);
-    float shutterT = sign(signedT) * pow(abs(signedT), 1.25);
-    vec2 uv = uCenter + dir * (1.0 + shutterT * shutter);
-    uv = clamp(uv, vec2(0.001), vec2(0.999));
-    color += texture(uTex, uv) * weight;
-    total += weight;
+  float countLimit = float(SAMPLE_COUNT);
+  vec2 dir = uCenter - vUv;
+  float dist = length(vec2(dir.x, dir.y * uTexSize.y / uTexSize.x));
+  float strength = uStrength;
+
+  float delta = 0.0;
+  float gap = 0.0;
+  if (dist < innerRadius) {
+    delta = innerRadius - dist;
+    gap = minGradient;
+  } else if (uRadius >= 0.0 && dist > outerRadius) {
+    delta = dist - outerRadius;
+    gap = gradient;
   }
 
-  vec4 blurred = color / max(total, 0.0001);
-  vec4 sharp = texture(uTex, vUv);
-  float centerFeather = max(0.002, uCenterSize * 0.35);
-  float centerPreserve = (1.0 - smoothstep(uCenterSize, uCenterSize + centerFeather, radius)) * uCenterSharpness;
-  float subtlePreserve = (1.0 - uAmount) * 0.04;
-  outColor = mix(blurred, sharp, clamp(centerPreserve + subtlePreserve, 0.0, 1.0));
+  if (delta > 0.0 && gap > 0.0) {
+    float normalCount = gap / uTexSize.x;
+    delta = (normalCount - delta) / normalCount;
+    countLimit *= delta;
+    strength *= delta;
+    if (countLimit < 1.0) {
+      outColor = sharp;
+      return;
+    }
+  }
+
+  float offset = rand(vUv, 0.0);
+  float total = 0.0;
+  vec4 color = vec4(0.0);
+  dir *= strength;
+  for (int i = 0; i < SAMPLE_COUNT; i++) {
+    float t = float(i);
+    float percent = (t + offset) / float(SAMPLE_COUNT);
+    float weight = 4.0 * (percent - percent * percent);
+    vec2 uv = vUv + dir * percent;
+    color += texture(uTex, uv) * weight;
+    total += weight;
+    if (t > countLimit) break;
+  }
+
+  outColor = total > 0.0 ? color / total : sharp;
 }
 `
 
@@ -159,10 +193,8 @@ export function createRadialZoomBlurRenderer(): RadialZoomBlurRenderer | null {
   const uCenter = gl.getUniformLocation(program, "uCenter")
   const uTexSize = gl.getUniformLocation(program, "uTexSize")
   const uStrength = gl.getUniformLocation(program, "uStrength")
-  const uAmount = gl.getUniformLocation(program, "uAmount")
-  const uFalloff = gl.getUniformLocation(program, "uFalloff")
-  const uCenterSize = gl.getUniformLocation(program, "uCenterSize")
-  const uCenterSharpness = gl.getUniformLocation(program, "uCenterSharpness")
+  const uInnerRadius = gl.getUniformLocation(program, "uInnerRadius")
+  const uRadius = gl.getUniformLocation(program, "uRadius")
   let destroyed = false
 
   function render(
@@ -193,19 +225,26 @@ export function createRadialZoomBlurRenderer(): RadialZoomBlurRenderer | null {
     )
     const amount = Math.min(1, Math.max(0, options.amount))
     const strength = Math.min(2, Math.max(0, options.strength ?? 1))
-    const falloff = Math.min(1, Math.max(0.05, options.falloff ?? 0.42))
-    const centerSize = Math.min(0.5, Math.max(0.02, options.centerSize ?? 0.12))
-    const centerSharpness = Math.min(1, Math.max(0, options.centerSharpness ?? 1))
+    const innerRadius = Math.min(
+      0.5,
+      Math.max(0, options.innerRadius ?? options.centerSize ?? 0.02)
+    )
+    const normalizedRadius =
+      typeof options.radius === "number" && Number.isFinite(options.radius)
+        ? options.radius
+        : -1
     g.uniform2f(uTexSize, canvas.width, canvas.height)
-    // Shutter = how far samples are stretched along the radial zoom direction.
-    // Scaled by the motion amount so blur grows with zoom speed; capped low so a
-    // fast zoom streaks visibly but never smears the frame into an unreadable
-    // mess (the cap maps to roughly an 8% streak at the artboard edge).
-    g.uniform1f(uStrength, Math.min(0.16, amount * strength * 0.45))
-    g.uniform1f(uAmount, amount)
-    g.uniform1f(uFalloff, falloff)
-    g.uniform1f(uCenterSize, centerSize)
-    g.uniform1f(uCenterSharpness, centerSharpness)
+    // Pixi's ZoomBlurFilter treats strength as the fraction of the vector from
+    // the current pixel to the center. Feed our velocity-weighted amount into
+    // that same unit, with a conservative cap for text-heavy screen recordings.
+    g.uniform1f(uStrength, Math.min(0.22, amount * strength))
+    // Match Pixi's radius contract: uniforms are pixels and the shader
+    // normalizes them by input width. Our setting stores a normalized fraction.
+    g.uniform1f(uInnerRadius, innerRadius * canvas.width)
+    g.uniform1f(
+      uRadius,
+      normalizedRadius < 0 ? -1 : Math.max(0, normalizedRadius) * canvas.width
+    )
     g.drawArrays(g.TRIANGLES, 0, 6)
     return canvas
   }

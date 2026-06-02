@@ -15,7 +15,7 @@ import type {
 export const MIN_ZOOM_CLIP_SECONDS = 1 / 60
 const ZOOM_CLIP_EPSILON_SECONDS = 1e-6
 export const ZOOM_SCALE_MIN = 1
-export const ZOOM_SCALE_MAX = 2.5
+export const ZOOM_SCALE_MAX = 4
 export const ZOOM_SCALE_DEFAULT = 2
 export const ZOOM_RADIAL_BLUR_MIN = 0
 export const ZOOM_RADIAL_BLUR_MAX = 1
@@ -28,7 +28,7 @@ export const ZOOM_BLUR_FALLOFF_MAX = 1
 export const ZOOM_BLUR_FALLOFF_DEFAULT = 0.65
 export const ZOOM_BLUR_CENTER_SIZE_MIN = 0.02
 export const ZOOM_BLUR_CENTER_SIZE_MAX = 0.5
-export const ZOOM_BLUR_CENTER_SIZE_DEFAULT = 0.12
+export const ZOOM_BLUR_CENTER_SIZE_DEFAULT = 0.02
 export const ZOOM_BLUR_CENTER_SHARPNESS_MIN = 0
 export const ZOOM_BLUR_CENTER_SHARPNESS_MAX = 1
 export const ZOOM_BLUR_CENTER_SHARPNESS_DEFAULT = 1
@@ -38,17 +38,18 @@ export const ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT: CanvasZoomRadialBlurSettings = {
   centerSize: ZOOM_BLUR_CENTER_SIZE_DEFAULT,
   centerSharpness: ZOOM_BLUR_CENTER_SHARPNESS_DEFAULT,
 }
-// Baked radial-blur shader tuning. The per-clip "Blur filter" controls were
-// removed in favour of one good look, so every zoom clip renders with these
-// constants except the user-adjustable clear center radius. Shared by the
-// editor overlay and the exporter so the two stay pixel-identical.
+// Baked Pixi ZoomBlurFilter-style tuning. The old per-clip zoom-blur controls
+// were reduced to one good look, so every zoom clip renders with this strength
+// multiplier, a 2% inner radius, and an infinite outer radius. `centerSize`,
+// `falloff`, and `centerSharpness` remain in the runtime shape for legacy
+// project hydration but are ignored by the shader.
 export const ZOOM_RADIAL_BLUR_SHADER: CanvasZoomRadialBlurSettings = {
   strength: 1,
   falloff: 0.42,
   centerSize: ZOOM_BLUR_CENTER_SIZE_DEFAULT,
   centerSharpness: ZOOM_BLUR_CENTER_SHARPNESS_DEFAULT,
 }
-// Converts on-screen zoom velocity into a 0..1 motion-blur amount: higher means
+// Converts on-screen zoom velocity into a 0..1 zoom-blur amount: higher means
 // more blur for the same zoom speed. Kept conservative so short/snappy clips —
 // which have high zoom velocity — streak tastefully instead of smearing the
 // whole frame. See sampleZoomCameraAtTime in zoom-scene.
@@ -68,17 +69,23 @@ export const ZOOM_TRANSITION_CURVES: CanvasZoomTransitionCurve[] = [
 ]
 // Baked ease curve. The 4-way curve picker was removed; smootherstep gives the
 // smoothest ease-in-out glide (zero velocity at both ends), which both reads as
-// premium and makes the velocity-based motion blur ramp on/off seamlessly.
+// premium and makes the velocity-based zoom blur ramp on/off seamlessly.
 export const ZOOM_TRANSITION_CURVE_DEFAULT: CanvasZoomTransitionCurve =
   "smootherstep"
 export const ZOOM_TRANSITION_FRACTION_MIN = 0
 export const ZOOM_TRANSITION_FRACTION_MAX = 0.75
+export const ZOOM_TRANSITION_DURATION_MS_MIN = 150
+export const ZOOM_TRANSITION_DURATION_MS_MAX = 2000
+export const ZOOM_TRANSITION_DURATION_MS_DEFAULT = 600
 export const ZOOM_TRANSITION_DEFAULT: CanvasZoomTransitionSettings = {
   easeIn: 0.3,
   easeOut: 0.3,
   speed: 1,
+  durationMs: ZOOM_TRANSITION_DURATION_MS_DEFAULT,
   curve: ZOOM_TRANSITION_CURVE_DEFAULT,
 }
+// Legacy speed constants are kept for loading old project files. New UI writes
+// transition.durationMs instead.
 export const ZOOM_TRANSITION_SPEED_MIN = 0.25
 export const ZOOM_TRANSITION_SPEED_MAX = 4
 export const ZOOM_TRANSITION_SPEED_DEFAULT = ZOOM_TRANSITION_DEFAULT.speed
@@ -91,12 +98,14 @@ export const ZOOM_EASE_PRESET_TRANSITIONS: Record<
     easeIn: 0.16,
     easeOut: 0.18,
     speed: ZOOM_TRANSITION_SPEED_DEFAULT,
+    durationMs: 450,
     curve: "smoothstep",
   },
   slow: {
     easeIn: 0.34,
     easeOut: 0.36,
     speed: ZOOM_TRANSITION_SPEED_DEFAULT,
+    durationMs: 850,
     curve: "smoothstep",
   },
 }
@@ -198,30 +207,60 @@ export function transitionForZoomEasePreset(
 }
 
 export function clampZoomTransitionSettings(
-  transition: Partial<CanvasZoomTransitionSettings> | undefined
+  transition: Partial<CanvasZoomTransitionSettings> | undefined,
+  clipDurationSeconds?: number
 ): CanvasZoomTransitionSettings {
+  const easeIn = clamp(
+    Number.isFinite(transition?.easeIn)
+      ? (transition?.easeIn as number)
+      : ZOOM_TRANSITION_DEFAULT.easeIn,
+    ZOOM_TRANSITION_FRACTION_MIN,
+    ZOOM_TRANSITION_FRACTION_MAX
+  )
+  const easeOut = clamp(
+    Number.isFinite(transition?.easeOut)
+      ? (transition?.easeOut as number)
+      : ZOOM_TRANSITION_DEFAULT.easeOut,
+    ZOOM_TRANSITION_FRACTION_MIN,
+    ZOOM_TRANSITION_FRACTION_MAX
+  )
+  const durationMs = (() => {
+    if (Number.isFinite(transition?.durationMs)) {
+      return clamp(
+        transition?.durationMs as number,
+        ZOOM_TRANSITION_DURATION_MS_MIN,
+        ZOOM_TRANSITION_DURATION_MS_MAX
+      )
+    }
+    if (
+      (Number.isFinite(transition?.speed) ||
+        Number.isFinite(transition?.easeIn) ||
+        Number.isFinite(transition?.easeOut)) &&
+      Number.isFinite(clipDurationSeconds) &&
+      (clipDurationSeconds as number) > 0
+    ) {
+      const legacySpeed = clamp(
+        Number.isFinite(transition?.speed)
+          ? (transition?.speed as number)
+          : ZOOM_TRANSITION_SPEED_DEFAULT,
+        ZOOM_TRANSITION_SPEED_MIN,
+        ZOOM_TRANSITION_SPEED_MAX
+      )
+      return clamp(
+        (((clipDurationSeconds as number) * Math.max(easeIn, easeOut)) /
+          legacySpeed) *
+          1000,
+        ZOOM_TRANSITION_DURATION_MS_MIN,
+        ZOOM_TRANSITION_DURATION_MS_MAX
+      )
+    }
+    return ZOOM_TRANSITION_DURATION_MS_DEFAULT
+  })()
   return {
-    easeIn: clamp(
-      Number.isFinite(transition?.easeIn)
-        ? (transition?.easeIn as number)
-        : ZOOM_TRANSITION_DEFAULT.easeIn,
-      ZOOM_TRANSITION_FRACTION_MIN,
-      ZOOM_TRANSITION_FRACTION_MAX
-    ),
-    easeOut: clamp(
-      Number.isFinite(transition?.easeOut)
-        ? (transition?.easeOut as number)
-        : ZOOM_TRANSITION_DEFAULT.easeOut,
-      ZOOM_TRANSITION_FRACTION_MIN,
-      ZOOM_TRANSITION_FRACTION_MAX
-    ),
-    speed: clamp(
-      Number.isFinite(transition?.speed)
-        ? (transition?.speed as number)
-        : ZOOM_TRANSITION_DEFAULT.speed,
-      ZOOM_TRANSITION_SPEED_MIN,
-      ZOOM_TRANSITION_SPEED_MAX
-    ),
+    easeIn,
+    easeOut,
+    speed: ZOOM_TRANSITION_SPEED_DEFAULT,
+    durationMs,
     curve: clampZoomTransitionCurve(transition?.curve),
   }
 }
@@ -244,13 +283,7 @@ export function clampZoomRadialBlurSettings(
       ZOOM_BLUR_FALLOFF_MIN,
       ZOOM_BLUR_FALLOFF_MAX
     ),
-    centerSize: clamp(
-      Number.isFinite(settings?.centerSize)
-        ? (settings?.centerSize as number)
-        : ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.centerSize,
-      ZOOM_BLUR_CENTER_SIZE_MIN,
-      ZOOM_BLUR_CENTER_SIZE_MAX
-    ),
+    centerSize: ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.centerSize,
     centerSharpness: clamp(
       Number.isFinite(settings?.centerSharpness)
         ? (settings?.centerSharpness as number)
@@ -269,6 +302,7 @@ export function zoomTransitionSettingsEqual(
     a.easeIn === b.easeIn &&
     a.easeOut === b.easeOut &&
     a.speed === b.speed &&
+    a.durationMs === b.durationMs &&
     a.curve === b.curve
   )
 }
@@ -290,7 +324,10 @@ export function withZoomClipDefaults(
 ): CanvasZoomClip {
   const legacyPreset = clampZoomEasePreset(clip.easePreset)
   const transition = clip.transition
-    ? clampZoomTransitionSettings(clip.transition)
+    ? clampZoomTransitionSettings(
+        clip.transition,
+        Math.max(0, clip.end - clip.start)
+      )
     : transitionForZoomEasePreset(legacyPreset)
   return {
     id: clip.id,

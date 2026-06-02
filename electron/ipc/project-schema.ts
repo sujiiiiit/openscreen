@@ -158,6 +158,8 @@ export interface ProjectZoomClip {
   focus?: { x: number; y: number }
   scale?: number
   radialBlur?: number
+  // Legacy zoom-blur knobs. New saves no longer write this object; these fields
+  // remain tolerated for old project.json files.
   radialBlurSettings?: {
     strength?: number
     falloff?: number
@@ -167,6 +169,10 @@ export interface ProjectZoomClip {
   transition?: {
     easeIn?: number
     easeOut?: number
+    // New saves write durationMs: how long each zoom-in / zoom-out ramp takes.
+    durationMs?: number
+    // Legacy speed multiplier from the old UI; tolerated and converted by the
+    // renderer-side zoom helpers.
     speed?: number
     curve?: "linear" | "smoothstep" | "smootherstep" | "ease-out-cubic"
   }
@@ -568,7 +574,7 @@ function parseZoomClip(value: unknown): ProjectZoomClip | null {
     }
   })()
   const scale = isFiniteNumber(value["scale"])
-    ? Math.min(2.5, Math.max(1, value["scale"] as number))
+    ? Math.min(4, Math.max(1, value["scale"] as number))
     : undefined
   const radialBlur = isFiniteNumber(value["radialBlur"])
     ? clampUnit(value["radialBlur"] as number)
@@ -600,6 +606,9 @@ function parseZoomClip(value: unknown): ProjectZoomClip | null {
     }
     if (isFiniteNumber(raw["easeOut"])) {
       settings.easeOut = clampRange(raw["easeOut"] as number, 0, 0.75)
+    }
+    if (isFiniteNumber(raw["durationMs"])) {
+      settings.durationMs = clampRange(raw["durationMs"] as number, 150, 2000)
     }
     if (isFiniteNumber(raw["speed"])) {
       settings.speed = clampRange(raw["speed"] as number, 0.25, 4)

@@ -300,6 +300,7 @@ export interface ProjectZoomClip {
   focus?: { x: number; y: number }
   scale?: number
   radialBlur?: number
+  /** Legacy optional zoom-blur settings; new saves no longer write this object. */
   radialBlurSettings?: {
     strength?: number
     falloff?: number
@@ -309,7 +310,9 @@ export interface ProjectZoomClip {
   transition?: {
     easeIn?: number
     easeOut?: number
-    /** Transition ramp speed multiplier; 2 is twice as fast as 1. */
+    /** Milliseconds each zoom-in / zoom-out ramp takes. */
+    durationMs?: number
+    /** Legacy transition ramp speed multiplier; old project files only. */
     speed?: number
     curve?: "linear" | "smoothstep" | "smootherstep" | "ease-out-cubic"
   }

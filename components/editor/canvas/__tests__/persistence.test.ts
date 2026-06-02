@@ -609,7 +609,7 @@ describe("zoom clips persistence", () => {
             transition: {
               easeIn: 0.16,
               easeOut: 0.18,
-              speed: 2,
+              durationMs: 450,
               curve: "ease-out-cubic",
             },
           }),
@@ -617,8 +617,8 @@ describe("zoom clips persistence", () => {
       )
     )
     expect(parsed).not.toBeNull()
-    // Strength/falloff/sharpness stay baked in the shader; the user-facing
-    // clear radius is the only radialBlurSettings field written now.
+    // The old radialBlurSettings object is tolerated on load but no longer
+    // written by new saves; the shader uses the baked 2% inner radius.
     expect(parsed!.zoomClips).toEqual([
       {
         id: "zoom-1",
@@ -628,13 +628,8 @@ describe("zoom clips persistence", () => {
         focus: { x: 1, y: 0 },
         scale: 2.25,
         radialBlur: 0.8,
-        radialBlurSettings: {
-          centerSize: 0.24,
-        },
         transition: {
-          easeIn: 0.16,
-          easeOut: 0.18,
-          speed: 2,
+          durationMs: 450,
           curve: "ease-out-cubic",
         },
       },
@@ -707,6 +702,7 @@ describe("zoom clips persistence", () => {
       easeIn: 0.34,
       easeOut: 0.36,
       speed: 1,
+      durationMs: 850,
       curve: "smoothstep",
     })
   })

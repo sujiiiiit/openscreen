@@ -51,6 +51,7 @@ describe("withZoomClipDefaults", () => {
         transition: {
           easeIn: 99,
           easeOut: -1,
+          durationMs: 99999,
           speed: 99,
           curve: "unknown" as never,
         },
@@ -59,18 +60,19 @@ describe("withZoomClipDefaults", () => {
     ).toEqual({
       enabled: false,
       focus: { x: 0, y: 1 },
-      scale: 2.5,
+      scale: 4,
       radialBlur: ZOOM_RADIAL_BLUR_DEFAULT,
       radialBlurSettings: {
         strength: 2,
         falloff: 0.05,
-        centerSize: 0.5,
+        centerSize: ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.centerSize,
         centerSharpness: ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT.centerSharpness,
       },
       transition: {
         easeIn: 0.75,
         easeOut: 0,
-        speed: 4,
+        speed: 1,
+        durationMs: 2000,
         curve: ZOOM_TRANSITION_DEFAULT.curve,
       },
       easePreset: ZOOM_EASE_PRESET_DEFAULT,
@@ -89,7 +91,29 @@ describe("withZoomClipDefaults", () => {
       easeIn: 0.16,
       easeOut: 0.18,
       speed: ZOOM_TRANSITION_DEFAULT.speed,
+      durationMs: 450,
       curve: "smoothstep",
+    })
+  })
+
+  it("converts legacy speed-based transition timing into a duration", () => {
+    expect(
+      withZoomClipDefaults({
+        id: "z",
+        start: 0,
+        end: 4,
+        transition: {
+          easeIn: 0.3,
+          easeOut: 0.4,
+          speed: 2,
+        },
+      }).transition
+    ).toEqual({
+      easeIn: 0.3,
+      easeOut: 0.4,
+      speed: ZOOM_TRANSITION_DEFAULT.speed,
+      durationMs: 800,
+      curve: ZOOM_TRANSITION_DEFAULT.curve,
     })
   })
 })
