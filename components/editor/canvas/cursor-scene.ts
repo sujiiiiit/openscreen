@@ -634,10 +634,10 @@ export function placeCursor(
  *
  * The velocity is the cursor's displacement over a fixed finite-difference
  * window, converted to a smear length via a fixed shutter scaled by `intensity`,
- * and rotated into the cursor's LOCAL frame (the Konva filter runs on the cached
- * bitmap before the node's rotation transform). `offset: 0` keeps the smear
- * centred on the pointer. The returned shape feeds `konvaMotionBlurFilter`
- * directly; the caller sizes the cache margin with `motionBlurPadding`.
+ * and rotated into the cursor's LOCAL frame (the filter runs on the sprite's
+ * texture before the node's rotation transform). `offset: 0` keeps the smear
+ * centred on the pointer. The returned `{velocityX, velocityY, kernelSize,
+ * offset}` maps 1:1 onto a Pixi `MotionBlurFilter` (see `pixi/cursor-sprite.ts`).
  */
 export function computeCursorBlur(
   track: SmoothedCursorTrack,
