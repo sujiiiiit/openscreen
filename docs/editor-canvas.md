@@ -1319,3 +1319,71 @@ Browser smoke tests have been run with local Chrome against `http://localhost:35
 Known unrelated project issue:
 
 - Full `pnpm lint` has failed on pre-existing unrelated files outside this canvas work. Use targeted lint for changed files unless the broader lint cleanup is part of the task.
+
+## PixiJS Migration (Phase 1, in progress)
+
+The editor canvas is being migrated from Konva/react-konva to **PixiJS v8**. The Pixi canvas lives in `components/editor/canvas/pixi/` and mounts **in place of** the Konva `<Stage>` only when the runtime flag is on:
+
+```js
+localStorage.setItem("openscreen:pixiCanvas", "1") // then reload
+localStorage.removeItem("openscreen:pixiCanvas")   // back to Konva
+```
+
+Konva remains the **default**, and the **export pipeline is still Konva** (`build-stage.ts` / `run-export.ts` unchanged). The two paths coexist; nothing in the shipping app changed until the flag is flipped.
+
+### Architecture (imperative controllers, no @pixi/react)
+
+React owns state + UI; PixiJS lives in imperative controllers that talk to the existing `EditorCanvasProvider` through a thin bridge in `pixi-canvas.tsx`. PixiJS's own event system is **off** (`eventFeatures` all false) — all input is DOM listeners on the host. Rendering is **on-demand**: `app.init({ autoStart:false })`, every scene mutation calls `requestRender()` (one rAF), and a continuous loop runs only during playback (`beginPlayback`/`endPlayback`). Renderer preference is **WebGPU → WebGL2 fallback**. Colors go through `resolveCanvasPalette` (PixiJS can't parse `oklch`). The artboard's white "paper" drop shadow stays a DOM `<div>`. The WebGPU upload race is guarded: a video sprite is `renderable` only when `videoEl.readyState >= 2` **and** its clip is timeline-visible, and `app.render()` is wrapped in try/catch.
+
+Scene graph (`pixi/scene.ts`):
+
+```
+app.stage
+└─ world (render group)                 ← viewport pan/zoom
+   └─ artboard (logical px)
+      ├─ backgroundCamera → surface { color | wallpaper(cover,+blur) , grain(overlay) }  [clipped]
+      ├─ grid                            [unzoomed]
+      ├─ contentCamera → nodesLayer → per node: wrapper{ shadow, content(sprite, squircle mask), border }  [clipped]
+      └─ border                          [unzoomed, 1/scale]
+   (backgroundCamera + contentCamera carry the composition zoom-clip camera)
+├─ hover / selection / marquee overlays  ← STAGE children, screen space (constant size at any zoom)
+```
+
+### Files (`components/editor/canvas/pixi/`)
+
+- `config.ts` — the `openscreen:pixiCanvas` flag (removed at cutover).
+- `pixi-canvas.tsx` — `Application` lifecycle + provider bridge; owns the host, the white backdrop div, the rotation readout, and the canvas-side multi-select state.
+- `scene.ts` — the scene graph, on-demand render/playback loop, background/grain/grid, per-node video sprites (cover-crop via a dynamic `Texture.frame`), appearance, zoom camera, and the screen-space selection/hover/marquee overlays + handles.
+- `viewport-controller.ts` — wheel/pinch/drag zoom + pan, provider-synced view transform (`setExternalViewTransform` syncs without a feedback loop).
+- `transform-controller.ts` — selection + group move/resize/rotate + marquee + keyboard (nudge/delete/duplicate/lock), ported from the reference; hit-tests via the pure `lib/node-transform.ts`.
+- `video-controller.ts` — reconciles the video list, owns the `<video>` elements, runs the rVFC playback loop + FPS measurement, and bridges to the provider transport via a **duck-typed node handle** (the provider only calls `visible()`/`listening()`/`getLayer().batchDraw()` on registered nodes, so the entire transport runs unchanged).
+- `video-appearance.ts` — native squircle clip + border + blurred-caster shadow, sharing `computeSquircle/Border/ShadowParams` (`video-scene-draw.ts`) and `lib/squircle.ts` with the exporter. `SHADOW_BLUR_SCALE` calibrates the Pixi blur vs Canvas2D `shadowBlur`.
+- `background.ts` — framework-agnostic wallpaper cover-crop/blur + noise texture (reused by the export later).
+- `pixel-grid.ts` — high-zoom pixel grid.
+- `node-model.ts` — read-side `CanvasVideoItem → CanvasNode` mapping (never persisted).
+- New pure libs at repo root: `lib/node-transform.ts` (+test), `lib/theme-colors.ts`.
+
+### Migrated (preview), green at typecheck + lint + 147 unit tests
+
+Viewport (pan/zoom/fit) · background fill / cover-cropped wallpaper (+blur) / grain overlay · pixel grid · multi-video playback + inactive-clip windowing (provider transport unchanged) · video appearance (squircle/border/shadow) · composition zoom-clip camera · group selection + marquee + group move/resize/rotate + keyboard.
+
+### Deferred to Phase 2 (code kept, NOT wired into the Pixi path)
+
+- **Cursor overlay** (`canvas-cursor-overlay.tsx`, `cursor-scene.ts`) and **radial zoom blur** (`lib/motion-blur/*`, `editor-workspace.tsx` overlay). The zoom-clip *camera* (scale/offset) IS migrated; only its radial-blur postprocess is deferred. The Konva preview still renders both. All cursor/blur settings, types, persistence, and UI are intact.
+
+### Not yet done
+
+- **Export rewrite (M10):** offscreen Pixi `Application` → `app.render()` → `CanvasSource(app.canvas)` → Mediabunny, reusing `video-appearance.ts` + `background.ts` + `planExportFrames`; Mediabunny opts (single-canvas source, early `source.close()`, `keyFrameInterval`/`latencyMode` tunables); WebGPU→WebGL fallback-on-failure. Until then export stays on Konva.
+- **Cutover (M11):** delete the Konva canvas + `lib/editor-canvas-snap.ts` + `snap-guide-overlay.tsx` + `app/motion-blur-lab/page.tsx`, uninstall `konva` + `react-konva`, make Pixi the default.
+- **Floating selection toolbar** in the Pixi path (group ops currently work via keyboard; the sidebar drives the primary node).
+
+### Behavior decisions
+
+- **Snapping removed** from the Pixi path: no canvas alignment/edge/peer/distance/smart-guide snapping and no Cmd/Ctrl override. **Shift→45° rotation is kept** (a transform modifier). Timeline snapping (`@openscreen/timeline`) is untouched. `lib/editor-canvas-snap.ts` still exists for the Konva path until cutover.
+- **Resize** keeps the source aspect and the video covers the frame (object-fit cover); the reference's side-handle crop/reveal (`contentTransform`) is not exposed.
+- **Persistence** is unchanged: `CanvasNode` is a read-side derivation of `CanvasVideoItem`; transforms commit through the existing `updateVideoTransform`; the canvas multi-select state is **session-only** (never persisted).
+- **Renderer:** preview WebGPU-first → WebGL2 fallback; export will be WebGPU-first → WebGL2 fallback-on-failure.
+
+### Verification
+
+`pnpm typecheck`, targeted `pnpm exec eslint components/editor/canvas/pixi`, and `pnpm exec vitest run` (147 tests) are green. Visual/interaction verification in the running Electron app (flag on) is pending.
