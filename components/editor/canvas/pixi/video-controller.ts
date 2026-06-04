@@ -17,8 +17,9 @@ type VideoWithFrameCallback = HTMLVideoElement & {
 /**
  * A duck-typed stand-in for the `Konva.Image` the provider transport registers
  * per video. The provider only calls `.visible()`, `.listening()`, and
- * `.getLayer().batchDraw()` on it (verified), so routing those to the Pixi scene
- * lets the entire transport (visibility windowing, seek redraws) run unchanged.
+ * `.getLayer().batchDraw()` on it (verified), so routing those to a per-node
+ * Pixi frame upload keeps the transport (visibility windowing, seek redraws)
+ * running with the same redraw contract as Konva.
  */
 export type PixiNodeHandle = {
   visible(value?: boolean): boolean | void
@@ -212,7 +213,10 @@ export class VideoController {
     const measureFps = (metadata: VideoFrameCallbackMetadata | undefined) => {
       if (fpsReported || !metadata) return
       const { mediaTime, presentedFrames } = metadata
-      if (typeof mediaTime !== "number" || typeof presentedFrames !== "number") {
+      if (
+        typeof mediaTime !== "number" ||
+        typeof presentedFrames !== "number"
+      ) {
         return
       }
       if (prevMediaTime !== null && prevPresentedFrames !== null) {
@@ -235,7 +239,8 @@ export class VideoController {
     }
 
     const scheduleFps = () => {
-      if (frameCallbackId !== null || el.paused || el.ended || fpsReported) return
+      if (frameCallbackId !== null || el.paused || el.ended || fpsReported)
+        return
       frameCallbackId =
         el.requestVideoFrameCallback?.((_now, metadata) => {
           frameCallbackId = null
@@ -334,7 +339,7 @@ export class VideoController {
     let visible = true
     let listening = true
     const scene = this.scene
-    const layerLike = { batchDraw: () => scene.requestRender() }
+    const layerLike = { batchDraw: () => scene.renderNodeNow(id) }
     return {
       visible(value?: boolean) {
         if (value === undefined) return visible

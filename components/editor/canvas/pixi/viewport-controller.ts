@@ -129,11 +129,6 @@ export class ViewportController {
     }
   }
 
-  /** Re-apply the current transform against the current viewport (clamps to it). */
-  handleResize() {
-    this.setViewTransform(this.viewTransform)
-  }
-
   fit() {
     this.setViewTransform(
       getFitViewTransform(this.getViewportSize(), this.scene.getArtboardSize())

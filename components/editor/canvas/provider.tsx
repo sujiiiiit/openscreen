@@ -238,7 +238,7 @@ type EditorCanvasContextValue = {
   setCursorMotionRotation: (amount: number) => void
   setCursorMotionRotationMode: (mode: CursorMotionRotationMode) => void
   setCursorMotionBlur: (intensity: number) => void
-  setViewportSize: (size: CanvasSize) => void
+  setViewportSize: (size: CanvasSize) => ViewTransform
   setViewTransform: (transform: ViewTransform) => void
   fitArtboardToViewport: () => void
   enterPreview: () => void
@@ -670,8 +670,44 @@ function buildVideoById(videos: CanvasVideoItem[]) {
   return new Map(videos.map((video) => [video.id, video]))
 }
 
-function buildTimelineClipByVideoId(clips: CanvasTimelineClip[]) {
-  return new Map(clips.map((clip) => [clip.videoId, clip]))
+function buildTimelineClipsByVideoId(clips: CanvasTimelineClip[]) {
+  const byVideoId = new Map<string, CanvasTimelineClip[]>()
+  for (const clip of clips) {
+    const list = byVideoId.get(clip.videoId)
+    if (list) list.push(clip)
+    else byVideoId.set(clip.videoId, [clip])
+  }
+  byVideoId.forEach((list) => {
+    list.sort((a, b) => a.start - b.start || a.end - b.end)
+  })
+  return byVideoId
+}
+
+function isTimelineClipActiveAt(
+  clip: CanvasTimelineClip,
+  time: number,
+  timelineEnd: number
+) {
+  const isPlayingThroughClip = time >= clip.start && time < clip.end
+  const isHoldingLastFrame =
+    !isPlayingThroughClip &&
+    time >= clip.start &&
+    time >= clip.end - TIMELINE_END_HOLD_EPSILON_SECONDS &&
+    clip.end >= timelineEnd - TIMELINE_END_HOLD_EPSILON_SECONDS
+
+  return isPlayingThroughClip || isHoldingLastFrame
+}
+
+function findTimelineClipAt(
+  clips: readonly CanvasTimelineClip[] | undefined,
+  time: number,
+  timelineEnd: number
+) {
+  if (!clips) return null
+  return (
+    clips.find((clip) => isTimelineClipActiveAt(clip, time, timelineEnd)) ??
+    null
+  )
 }
 
 function getTimelineDurationForClips(clips: readonly CanvasTimelineClip[]) {
@@ -750,8 +786,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const detachedVideosRef = useRef(detachedVideos)
   const videoByIdRef = useRef(buildVideoById(videos))
   const timelineClipsRef = useRef(timelineClips)
-  const timelineClipByVideoIdRef = useRef(
-    buildTimelineClipByVideoId(timelineClips)
+  const timelineClipsByVideoIdRef = useRef(
+    buildTimelineClipsByVideoId(timelineClips)
   )
   const zoomClipsRef = useRef(zoomClips)
   const selectedZoomClipIdRef = useRef(selectedZoomClipId)
@@ -1090,7 +1126,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const commitTimelineClipsRef = useCallback(
     (nextClips: CanvasTimelineClip[]) => {
       timelineClipsRef.current = nextClips
-      timelineClipByVideoIdRef.current = buildTimelineClipByVideoId(nextClips)
+      timelineClipsByVideoIdRef.current = buildTimelineClipsByVideoId(nextClips)
       timelineVisibilityWindowRef.current = null
     },
     []
@@ -1213,7 +1249,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const resolveTimelineFrame = useCallback((videoId: string, time: number) => {
-    const clip = timelineClipByVideoIdRef.current.get(videoId)
+    const timelineEnd = timelineDurationRef.current
+    const clip = findTimelineClipAt(
+      timelineClipsByVideoIdRef.current.get(videoId),
+      time,
+      timelineEnd
+    )
     const video = videoByIdRef.current.get(videoId)
     if (!clip || !video) return null
 
@@ -1223,7 +1264,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       sourceIn,
       Math.min(clip.sourceOut, sourceDuration)
     )
-    const timelineEnd = timelineDurationRef.current
     const isPlayingThroughClip = time >= clip.start && time < clip.end
     // When the playhead lands on the very end of the timeline, keep any clip
     // that ends there visible and sample its trimmed-out frame instead of
@@ -1673,13 +1713,21 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
 
     const primaryId = primaryAudioVideoIdRef.current
     if (primaryId && visibleIds.has(primaryId)) {
-      const clip = timelineClipByVideoIdRef.current.get(primaryId)
-      if (clip && time >= clip.start && time < clip.end) return primaryId
+      const clip = findTimelineClipAt(
+        timelineClipsByVideoIdRef.current.get(primaryId),
+        time,
+        timelineDurationRef.current
+      )
+      if (clip) return primaryId
     }
 
     for (const videoId of visibleIds) {
-      const clip = timelineClipByVideoIdRef.current.get(videoId)
-      if (clip && time >= clip.start && time < clip.end) return videoId
+      const clip = findTimelineClipAt(
+        timelineClipsByVideoIdRef.current.get(videoId),
+        time,
+        timelineDurationRef.current
+      )
+      if (clip) return videoId
     }
     return null
   }, [])
@@ -1702,7 +1750,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
 
     for (const videoId of candidateIds) {
       const element = timelineVideoElementsRef.current.get(videoId)
-      const clip = timelineClipByVideoIdRef.current.get(videoId)
+      const clip = findTimelineClipAt(
+        timelineClipsByVideoIdRef.current.get(videoId),
+        fallbackTime,
+        timelineDurationRef.current
+      )
       if (!element || !clip || !Number.isFinite(element.currentTime)) continue
 
       const projectedTime = clip.start + (element.currentTime - clip.sourceIn)
@@ -1852,48 +1904,67 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  // Single seek-completion gate. The canvas-video-node hands every `seeked`
-  // event through here and we decide whether it counts as a valid hover paint
-  // or a committed paint. Either way the redrawLayer callback is what
-  // actually triggers the Konva batchDraw, so the canvas component stays
-  // unaware of hover vs committed.
+  const reissueHoverSeekToLiveTarget = useCallback(
+    (
+      videoId: string,
+      element: HTMLVideoElement,
+      landedHoverTimelineTime: number
+    ) => {
+      if (!hoverPreviewActiveRef.current) return
+      const liveHoverTime = hoverPreviewTimeRef.current
+      if (
+        liveHoverTime === null ||
+        Math.abs(liveHoverTime - landedHoverTimelineTime) <=
+          TIMELINE_FORCE_SEEK_EPSILON_SECONDS
+      ) {
+        return
+      }
+
+      const frame = resolveTimelineFrame(videoId, liveHoverTime)
+      if (!frame || !frame.active) return
+      const liveTarget = getSeekableTimelineSourceTime(
+        element,
+        frame.sourceTime,
+        frame.sourceDuration
+      )
+      if (
+        Math.abs(element.currentTime - liveTarget) <=
+        TIMELINE_FORCE_SEEK_EPSILON_SECONDS
+      ) {
+        return
+      }
+      if (hoverSeekStateRef.current.has(videoId)) return
+      issueHoverSeek(videoId, element, liveTarget, liveHoverTime)
+    },
+    [getSeekableTimelineSourceTime, issueHoverSeek, resolveTimelineFrame]
+  )
+
+  // Single seek-completion gate. The canvas video controller hands every
+  // `seeked` event through here and we decide whether it counts as a valid
+  // hover paint or a committed paint. Either way the redrawLayer callback
+  // keeps the canvas component unaware of hover vs committed.
   const onTimelineVideoSeeked = useCallback(
-    (videoId: string, element: HTMLVideoElement, redrawLayer: () => void) => {
+    (
+      videoId: string,
+      element: HTMLVideoElement,
+      redrawLayer: (afterDraw?: () => void) => void
+    ) => {
       const entry = hoverSeekStateRef.current.get(videoId)
       if (entry) {
         window.clearTimeout(entry.timeoutId)
         hoverSeekStateRef.current.delete(videoId)
-        const matched =
-          Math.abs(element.currentTime - entry.targetSourceTime) <=
-          TIMELINE_FORCE_SEEK_EPSILON_SECONDS
-        if (!matched) return // Stale hover seek — drop the paint.
-        redrawLayer()
 
-        // If the hover ref has moved past this entry's target, reissue
-        // immediately so the canvas keeps catching up without waiting for
-        // the next rAF.
-        if (!hoverPreviewActiveRef.current) return
-        const liveHoverTime = hoverPreviewTimeRef.current
-        if (
-          liveHoverTime === null ||
-          liveHoverTime === entry.hoverTimelineTime
-        ) {
-          return
-        }
-        const frame = resolveTimelineFrame(videoId, liveHoverTime)
-        if (!frame || !frame.active) return
-        const liveTarget = getSeekableTimelineSourceTime(
-          element,
-          frame.sourceTime,
-          frame.sourceDuration
-        )
-        if (
-          Math.abs(element.currentTime - liveTarget) <=
-          TIMELINE_FORCE_SEEK_EPSILON_SECONDS
-        ) {
-          return
-        }
-        issueHoverSeek(videoId, element, liveTarget, liveHoverTime)
+        // Paint the landed hover frame, then reissue toward the latest hover
+        // target if the pointer has moved. A seek can settle up to a decoded
+        // frame away from the requested time, so exact target matching would
+        // drop useful preview frames during fast ruler hover.
+        redrawLayer(() => {
+          reissueHoverSeekToLiveTarget(
+            videoId,
+            element,
+            entry.hoverTimelineTime
+          )
+        })
         return
       }
 
@@ -1936,7 +2007,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     [
       getSeekableTimelineSourceTime,
       issueCommittedSeek,
-      issueHoverSeek,
+      reissueHoverSeekToLiveTarget,
       resolveTimelineFrame,
       shouldDrawTimelineVideoFrame,
     ]
@@ -2075,7 +2146,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       let nextTime = timelineTimeRef.current + elapsedSeconds
       if (masterId) {
         const masterElement = timelineVideoElementsRef.current.get(masterId)
-        const masterClip = timelineClipByVideoIdRef.current.get(masterId)
+        const masterClip = findTimelineClipAt(
+          timelineClipsByVideoIdRef.current.get(masterId),
+          timelineTimeRef.current,
+          timelineDurationRef.current
+        )
         if (
           masterElement &&
           masterClip &&
@@ -2192,14 +2267,19 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     const measured = videoFpsRef.current
     const primaryId = primaryAudioVideoIdRef.current
     if (primaryId) {
-      const clip = timelineClipByVideoIdRef.current.get(primaryId)
-      if (clip && time >= clip.start && time < clip.end) {
+      const clip = findTimelineClipAt(
+        timelineClipsByVideoIdRef.current.get(primaryId),
+        time,
+        timelineDurationRef.current
+      )
+      if (clip) {
         const fps = measured.get(primaryId)
         if (fps) return fps
       }
     }
+    const timelineEnd = timelineDurationRef.current
     for (const clip of timelineClipsRef.current) {
-      if (time >= clip.start && time < clip.end) {
+      if (isTimelineClipActiveAt(clip, time, timelineEnd)) {
         const fps = measured.get(clip.videoId)
         if (fps) return fps
       }
@@ -2362,7 +2442,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     setCanRedo(false)
   }, [videos, timelineClips])
 
-  const setViewportSize = useCallback((size: CanvasSize) => {
+  const setViewportSize = useCallback((size: CanvasSize): ViewTransform => {
     const nextSize = {
       width: Math.max(0, Math.floor(size.width)),
       height: Math.max(0, Math.floor(size.height)),
@@ -2372,7 +2452,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       viewportSizeRef.current.width === nextSize.width &&
       viewportSizeRef.current.height === nextSize.height
     ) {
-      return
+      return viewTransformRef.current
     }
 
     setViewportSizeState((current) =>
@@ -2386,13 +2466,13 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     // In fullscreen preview the workspace owns the view transform imperatively
     // (a zero-padding fill-fit). Leave the persisted user transform untouched so
     // it can be restored on exit, and don't fight the imperative preview fit.
-    if (isPreviewModeRef.current) return
+    if (isPreviewModeRef.current) return viewTransformRef.current
 
     if (!hasCustomViewRef.current) {
       const fitTransform = getFitViewTransform(nextSize, artboardRef.current)
       viewTransformRef.current = fitTransform
       setViewTransformState(fitTransform)
-      return
+      return fitTransform
     }
 
     const clampedTransform = clampWorkspaceView(
@@ -2402,6 +2482,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     )
     viewTransformRef.current = clampedTransform
     setViewTransformState(clampedTransform)
+    return clampedTransform
   }, [])
 
   const setViewTransform = useCallback((transform: ViewTransform) => {

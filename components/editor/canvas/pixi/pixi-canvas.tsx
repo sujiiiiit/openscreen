@@ -10,6 +10,7 @@ import type {
   CanvasNode,
   CanvasSize,
   NodeTransformUpdate,
+  ViewTransform,
 } from "@/types/editor-canvas"
 
 import {
@@ -21,6 +22,7 @@ import {
   useEditorCanvasView,
 } from "../provider"
 import { buildCursorTrack, projectFolderFromObjectUrl } from "../cursor-scene"
+import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
 import { sampleZoomCameraAtTime } from "../zoom-scene"
 import { CursorController, type CursorState } from "./cursor-controller"
 import { canvasNodeFromVideo } from "./node-model"
@@ -89,12 +91,13 @@ export function PixiCanvas() {
     () => videos.find((video) => video.role === "screen") ?? null,
     [videos]
   )
-  const screenClip = useMemo(
+  const screenClips = useMemo(
     () =>
       screenVideo
-        ? (timelineClips.find((clip) => clip.videoId === screenVideo.id) ??
-          null)
-        : null,
+        ? timelineClips
+            .filter((clip) => clip.videoId === screenVideo.id)
+            .sort((a, b) => a.start - b.start || a.end - b.end)
+        : [],
     [screenVideo, timelineClips]
   )
   const cursorState = useMemo<CursorState>(
@@ -110,9 +113,12 @@ export function PixiCanvas() {
             intrinsicHeight: screenVideo.intrinsicHeight,
           }
         : null,
-      screenClip: screenClip
-        ? { start: screenClip.start, sourceIn: screenClip.sourceIn }
-        : null,
+      screenClips: screenClips.map((clip) => ({
+        start: clip.start,
+        end: clip.end,
+        sourceIn: clip.sourceIn,
+        sourceOut: clip.sourceOut,
+      })),
       referenceSize: { width: artboard.width, height: artboard.height },
       customRenderingEnabled: artboard.cursorCustomRenderingEnabled,
       cursorSetId: artboard.cursorSetId,
@@ -124,7 +130,7 @@ export function PixiCanvas() {
       motionRotationMode: artboard.cursorMotionRotationMode,
       motionBlur: artboard.cursorMotionBlur,
     }),
-    [screenVideo, screenClip, artboard]
+    [screenVideo, screenClips, artboard]
   )
 
   const appRef = useRef<Application | null>(null)
@@ -134,8 +140,10 @@ export function PixiCanvas() {
   const transformControllerRef = useRef<TransformController | null>(null)
   const cursorControllerRef = useRef<CursorController | null>(null)
   const cursorStateRef = useRef<CursorState>(cursorState)
+  const cursorTrackRef = useRef<SmoothedCursorTrack | null>(null)
   const rotationReadoutRef = useRef<HTMLDivElement>(null)
   const viewportSizeRef = useRef<CanvasSize>({ width: 0, height: 0 })
+  const isPreviewModeRef = useRef(isPreviewMode)
 
   const nodesRef = useRef<CanvasNode[]>(nodes)
   const selectedIdsRef = useRef<string[]>(selectedNodeIds)
@@ -165,6 +173,9 @@ export function PixiCanvas() {
   useEffect(() => {
     viewTransformRef.current = viewTransform
   }, [viewTransform])
+  useEffect(() => {
+    isPreviewModeRef.current = isPreviewMode
+  }, [isPreviewMode])
   useEffect(() => {
     setViewTransformRef.current = setViewTransform
   }, [setViewTransform])
@@ -258,28 +269,63 @@ export function PixiCanvas() {
     let disposed = false
     const app = new Application()
 
+    const getRendererResolution = () =>
+      Math.min(window.devicePixelRatio || 1, 2)
+
     const measure = (): CanvasSize => {
       const rect = host.getBoundingClientRect()
       return {
-        width: Math.max(1, Math.floor(rect.width)),
-        height: Math.max(1, Math.floor(rect.height)),
+        width: Math.max(1, Math.ceil(rect.width)),
+        height: Math.max(1, Math.ceil(rect.height)),
       }
     }
+
+    const sizeCanvas = (
+      targetApp: Application,
+      size: CanvasSize,
+      resolution: number
+    ) => {
+      targetApp.renderer.resize(size.width, size.height, resolution)
+      const canvas = targetApp.canvas
+      canvas.style.display = "block"
+      canvas.style.position = "absolute"
+      canvas.style.top = "0"
+      canvas.style.left = "0"
+      canvas.style.width = `${size.width}px`
+      canvas.style.height = `${size.height}px`
+      canvas.style.maxWidth = "none"
+      canvas.style.maxHeight = "none"
+    }
+
+    const getImmediateResizeView = (
+      size: CanvasSize,
+      providerViewTransform: ViewTransform
+    ) =>
+      isPreviewModeRef.current
+        ? getPreviewFillTransform(size, artboardSizeRef.current)
+        : providerViewTransform
 
     let themeObserver: MutationObserver | null = null
     let resizeObserver: ResizeObserver | null = null
     let resizeRafId: number | null = null
+    let rendererResolution = getRendererResolution()
+    let scheduleResize: (() => void) | null = null
 
     const init = async () => {
+      const initialSize = measure()
       await app.init({
-        preference: "webgpu", // WebGL2 fallback is automatic when WebGPU is absent.
+        width: initialSize.width,
+        height: initialSize.height,
+        // Keep the interactive preview on WebGPU. During layout-driven resizes
+        // we paint immediately after resize so old swapchain pixels are not
+        // presented in the newly sized canvas.
+        preference: "webgpu",
         antialias: true,
-        resolution: Math.min(window.devicePixelRatio || 1, 2),
-        // autoDensity stays OFF: we size the bitmap ourselves and let CSS stretch
-        // the canvas to fill the host (below). An animated container resize (the
-        // sidebar width spring) then tracks smoothly via CSS instead of gapping or
-        // distorting while the per-frame bitmap resize catches up.
-        autoDensity: false,
+        resolution: rendererResolution,
+        // Keep the backing store and CSS box in the same coordinate system.
+        // CSS-stretching a stale Pixi buffer during sidebar animation makes the
+        // artboard look elastic, especially on high-DPI displays.
+        autoDensity: true,
         backgroundAlpha: 0,
         autoStart: false,
         powerPreference: "high-performance",
@@ -295,20 +341,15 @@ export function PixiCanvas() {
 
       // The effect cleanup may have run while init() awaited.
       if (disposed) {
-        app.destroy(true)
+        app.destroy({ removeView: true }, { children: true })
         return
       }
 
       const size = measure()
-      app.renderer.resize(size.width, size.height)
+      rendererResolution = getRendererResolution()
+      sizeCanvas(app, size, rendererResolution)
       viewportSizeRef.current = size
 
-      // Fill the host via CSS so the canvas always covers the workspace while an
-      // animated layout change (sidebar spring) is mid-flight; the bitmap is
-      // resized crisply on the next frame by the ResizeObserver below.
-      app.canvas.style.display = "block"
-      app.canvas.style.width = "100%"
-      app.canvas.style.height = "100%"
       host.appendChild(app.canvas)
 
       const scene = new CanvasScene(
@@ -333,8 +374,10 @@ export function PixiCanvas() {
 
       // Push our measured size to the provider (it may re-fit), then apply the
       // provider's current view so the artboard lands correctly on first paint.
-      setViewportSizeRef.current(size)
-      controller.setExternalViewTransform(viewTransformRef.current)
+      const initialViewTransform = setViewportSizeRef.current(size)
+      controller.setExternalViewTransform(
+        getImmediateResizeView(size, initialViewTransform)
+      )
       scene.setBackground(
         artboardBgRef.current.background,
         artboardBgRef.current.grain
@@ -353,8 +396,7 @@ export function PixiCanvas() {
           ),
         onSeeked: (id, el, redraw) =>
           transportRef.current.onSeeked(id, el, redraw),
-        onFpsMeasured: (id, fps) =>
-          transportRef.current.onFpsMeasured(id, fps),
+        onFpsMeasured: (id, fps) => transportRef.current.onFpsMeasured(id, fps),
       })
       videoControllerRef.current = videoController
       videoController.setPrimaryAudio(primaryAudioRef.current)
@@ -408,6 +450,8 @@ export function PixiCanvas() {
 
       const cursorController = new CursorController(scene)
       cursorController.setState(cursorStateRef.current)
+      cursorController.setTrack(cursorTrackRef.current)
+      cursorController.place(committedTimeRef.current)
       cursorControllerRef.current = cursorController
 
       themeObserver = new MutationObserver(() => {
@@ -427,22 +471,30 @@ export function PixiCanvas() {
         const controller = controllerRef.current
         if (!currentApp || !controller) return
         const next = measure()
+        const nextResolution = getRendererResolution()
         if (
           next.width === viewportSizeRef.current.width &&
-          next.height === viewportSizeRef.current.height
+          next.height === viewportSizeRef.current.height &&
+          nextResolution === rendererResolution
         ) {
           return
         }
+        rendererResolution = nextResolution
         viewportSizeRef.current = next
-        currentApp.renderer.resize(next.width, next.height)
-        setViewportSizeRef.current(next)
-        controller.handleResize()
+        sizeCanvas(currentApp, next, nextResolution)
+        const nextViewTransform = setViewportSizeRef.current(next)
+        controller.setExternalViewTransform(
+          getImmediateResizeView(next, nextViewTransform)
+        )
+        sceneRef.current?.renderNow()
       }
-      resizeObserver = new ResizeObserver(() => {
+      scheduleResize = () => {
         if (resizeRafId !== null) return
         resizeRafId = requestAnimationFrame(applyResize)
-      })
+      }
+      resizeObserver = new ResizeObserver(scheduleResize)
       resizeObserver.observe(host)
+      window.addEventListener("resize", scheduleResize)
     }
 
     void init()
@@ -451,6 +503,7 @@ export function PixiCanvas() {
       disposed = true
       themeObserver?.disconnect()
       resizeObserver?.disconnect()
+      if (scheduleResize) window.removeEventListener("resize", scheduleResize)
       if (resizeRafId !== null) cancelAnimationFrame(resizeRafId)
       controllerRef.current?.detach()
       transformControllerRef.current?.detach()
@@ -590,17 +643,23 @@ export function PixiCanvas() {
       screenVideo.source.kind !== "recording" ||
       !artboard.cursorCustomRenderingEnabled
     ) {
+      cursorTrackRef.current = null
       controller?.setTrack(null)
       return
     }
     const folder = projectFolderFromObjectUrl(screenVideo.objectUrl)
-    if (!folder) return
+    if (!folder) {
+      cursorTrackRef.current = null
+      controller?.setTrack(null)
+      return
+    }
     let cancelled = false
     void window.api?.projects.getCursorData(folder).then((data) => {
       if (cancelled) return
       const track = buildCursorTrack(data ?? null, {
         smoothingMode: artboard.cursorSmoothingMode,
       })
+      cursorTrackRef.current = track
       cursorControllerRef.current?.setTrack(track)
       cursorControllerRef.current?.place(committedTimeRef.current)
     })

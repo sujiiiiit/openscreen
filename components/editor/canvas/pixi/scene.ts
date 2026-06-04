@@ -74,7 +74,14 @@ type VideoNodeView = {
   width: number
   height: number
   crop: VideoCoverCrop | null
-  /** Timeline-window visibility (from the provider); combined with readyState. */
+  cropTexture: Texture | null
+  /**
+   * True once Pixi has accepted at least one decoded frame for this video source.
+   * During rapid seeks `readyState` may briefly drop, but the last uploaded
+   * texture is still valid and should remain visible.
+   */
+  hasUploadedFrame: boolean
+  /** Timeline-window visibility from the provider's inactive-clip culling. */
   timelineVisible: boolean
 }
 
@@ -609,6 +616,8 @@ export class CanvasScene {
       width: transform.width,
       height: transform.height,
       crop: null,
+      cropTexture: null,
+      hasUploadedFrame: false,
       timelineVisible: true,
     }
     this.nodeViews.set(id, view)
@@ -631,11 +640,10 @@ export class CanvasScene {
     this.requestRender()
   }
 
-  /** Upload the node's current video frame + paint immediately (seek lockstep). */
+  /** Paint immediately so a freshly seeked video frame reaches the canvas. */
   renderNodeNow(id: string) {
     const view = this.nodeViews.get(id)
     if (!view || this.destroyed) return
-    view.source.update()
     this.paint()
   }
 
@@ -650,27 +658,6 @@ export class CanvasScene {
   }
 
   private applyNodeTransform(view: VideoNodeView, t: NodeTransform) {
-    // Cover-crop the video into the frame (object-fit: cover), like openscreen.
-    const crop = getVideoCoverCrop(view.intrinsic, {
-      width: t.width,
-      height: t.height,
-    })
-    if (
-      !view.crop ||
-      view.crop.cropX !== crop.cropX ||
-      view.crop.cropY !== crop.cropY ||
-      view.crop.cropWidth !== crop.cropWidth ||
-      view.crop.cropHeight !== crop.cropHeight
-    ) {
-      view.crop = crop
-      const frame = view.texture.frame
-      frame.x = crop.cropX
-      frame.y = crop.cropY
-      frame.width = crop.cropWidth
-      frame.height = crop.cropHeight
-      view.texture.updateUvs()
-    }
-
     view.sprite.width = t.width
     view.sprite.height = t.height
     view.sprite.position.set(0, 0)
@@ -682,7 +669,37 @@ export class CanvasScene {
 
     view.width = t.width
     view.height = t.height
+    this.applySpriteCrop(view)
     this.redrawAppearance(view)
+  }
+
+  private applySpriteCrop(view: VideoNodeView) {
+    // Cover-crop the live video texture into the frame (object-fit: cover),
+    // like the old Konva.Image crop path.
+    const texture = view.sprite.texture
+    const crop = getVideoCoverCrop(view.intrinsic, {
+      width: view.width,
+      height: view.height,
+    })
+    if (
+      view.cropTexture === texture &&
+      view.crop &&
+      view.crop.cropX === crop.cropX &&
+      view.crop.cropY === crop.cropY &&
+      view.crop.cropWidth === crop.cropWidth &&
+      view.crop.cropHeight === crop.cropHeight
+    ) {
+      return
+    }
+
+    view.crop = crop
+    view.cropTexture = texture
+    const frame = texture.frame
+    frame.x = crop.cropX
+    frame.y = crop.cropY
+    frame.width = crop.cropWidth
+    frame.height = crop.cropHeight
+    texture.update()
   }
 
   /** Update a node's size-independent appearance (corner/border/shadow) + redraw. */
@@ -716,18 +733,32 @@ export class CanvasScene {
   }
 
   /**
+   * Paint immediately after the drawing buffer changes size. Deferring this to
+   * the next rAF can let the browser present old pixels in the new canvas box
+   * for a frame, which reads as artboard/content stretch during layout animation.
+   */
+  renderNow() {
+    if (this.destroyed) return
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId)
+      this.rafId = null
+    }
+    this.paint()
+  }
+
+  /**
    * Render one frame. Wrapped in try/catch as a final guard: uploading a video
    * frame that isn't decoded yet can throw on the WebGPU backend, and a transient
-   * GPU upload race must never kill the render loop. (The per-sprite readyState
-   * gate lands with video in a later milestone.)
+   * GPU upload race must never kill the render loop.
    */
   private paint() {
     if (this.destroyed) return
-    // A video sprite is renderable only when its frame is decoded AND its clip is
-    // active in the timeline window. Uploading an undecoded frame throws on WebGPU.
+    // Keep the last successfully uploaded video texture visible during seeks.
+    // Konva behaved this way naturally when drawing an HTMLVideoElement; gating
+    // renderability on transient readyState dips causes visible blank flicker.
     for (const view of this.nodeViews.values()) {
-      view.sprite.renderable =
-        view.timelineVisible && view.videoEl.readyState >= 2
+      if (view.timelineVisible) this.uploadVideoFrame(view)
+      view.sprite.renderable = view.timelineVisible && view.hasUploadedFrame
     }
     try {
       this.app.render()
@@ -778,6 +809,22 @@ export class CanvasScene {
 
   // ── internal ───────────────────────────────────────────────────────────────
 
+  /**
+   * Upload the current HTMLVideoElement frame when the browser has one ready.
+   * A failed upload leaves the previous texture intact so fast hover seeking
+   * never blanks the node while the decoder is catching up.
+   */
+  private uploadVideoFrame(view: VideoNodeView): boolean {
+    if (view.videoEl.readyState < 2) return false
+    try {
+      view.source.update()
+      view.hasUploadedFrame = true
+      return true
+    } catch {
+      return false
+    }
+  }
+
   private updateBackdrop() {
     const el = this.backdropEl
     if (!el) return
@@ -798,14 +845,11 @@ export class CanvasScene {
   private redrawBorder() {
     const { width, height } = this.artboardSize
     const lineWidth = this.lastView.scale > 0 ? 1 / this.lastView.scale : 1
-    this.borderGfx
-      .clear()
-      .rect(0, 0, width, height)
-      .stroke({
-        width: lineWidth,
-        color: ARTBOARD_BORDER_COLOR,
-        alpha: ARTBOARD_BORDER_ALPHA,
-      })
+    this.borderGfx.clear().rect(0, 0, width, height).stroke({
+      width: lineWidth,
+      color: ARTBOARD_BORDER_COLOR,
+      alpha: ARTBOARD_BORDER_ALPHA,
+    })
   }
 
   private rebuildArtboardGeometry() {

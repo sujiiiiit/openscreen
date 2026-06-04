@@ -8,6 +8,8 @@ import type {
 import { CursorSprite } from "./cursor-sprite"
 import type { CanvasScene } from "./scene"
 
+const CURSOR_CLIP_END_EPSILON_SECONDS = 1e-3
+
 /** The live inputs the cursor placement reads, pushed from the provider bridge. */
 export type CursorState = {
   screenVideo: {
@@ -20,7 +22,12 @@ export type CursorState = {
     intrinsicHeight: number
   } | null
   /** Maps timeline time → screen source time (`t - start + sourceIn`). */
-  screenClip: { start: number; sourceIn: number } | null
+  screenClips: Array<{
+    start: number
+    end: number
+    sourceIn: number
+    sourceOut: number
+  }>
   referenceSize: { width: number; height: number }
   customRenderingEnabled: boolean
   cursorSetId: CursorSetId
@@ -54,10 +61,12 @@ export class CursorController {
 
   setTrack(track: SmoothedCursorTrack | null) {
     this.track = track
+    this.place(this.lastTimelineSeconds)
   }
 
   setState(state: CursorState) {
     this.state = state
+    this.place(this.lastTimelineSeconds)
   }
 
   place(timelineSeconds: number) {
@@ -74,9 +83,12 @@ export class CursorController {
       return
     }
 
-    const sourceSeconds = state.screenClip
-      ? timelineSeconds - state.screenClip.start + state.screenClip.sourceIn
-      : timelineSeconds
+    const sourceSeconds = this.getSourceSeconds(timelineSeconds, state)
+    if (sourceSeconds === null) {
+      this.cursorSprite.hide()
+      this.scene.requestRender()
+      return
+    }
 
     this.cursorSprite.render(
       track,
@@ -96,6 +108,33 @@ export class CursorController {
       () => this.place(this.lastTimelineSeconds)
     )
     this.scene.requestRender()
+  }
+
+  private getSourceSeconds(
+    timelineSeconds: number,
+    state: CursorState
+  ): number | null {
+    if (state.screenClips.length === 0) return timelineSeconds
+
+    const activeClip =
+      state.screenClips.find(
+        (clip) => timelineSeconds >= clip.start && timelineSeconds < clip.end
+      ) ??
+      state.screenClips.find(
+        (clip) =>
+          timelineSeconds >= clip.start &&
+          Math.abs(timelineSeconds - clip.end) <=
+            CURSOR_CLIP_END_EPSILON_SECONDS
+      )
+
+    if (!activeClip) return null
+    if (timelineSeconds >= activeClip.end) {
+      return Math.max(
+        activeClip.sourceIn,
+        activeClip.sourceOut - CURSOR_CLIP_END_EPSILON_SECONDS
+      )
+    }
+    return activeClip.sourceIn + (timelineSeconds - activeClip.start)
   }
 
   destroy() {
