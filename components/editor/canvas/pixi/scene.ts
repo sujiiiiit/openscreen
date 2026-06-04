@@ -155,6 +155,8 @@ export class CanvasScene {
   private readonly grainHolder = new Container({ label: "grain" })
   /** Editable nodes — one wrapper container per video (populated later). */
   private readonly nodesLayer = new Container({ label: "nodes" })
+  /** Cursor overlay parent — above the video nodes, inside the artboard clip. */
+  private readonly cursorLayer = new Container({ label: "cursor" })
 
   private readonly gridGfx = new Graphics({ label: "grid" })
   private readonly gridMask = new Graphics({ label: "grid-mask" })
@@ -226,7 +228,8 @@ export class CanvasScene {
 
     this.contentCamera.mask = this.contentMask
     this.contentMask.eventMode = "none"
-    this.contentCamera.addChild(this.nodesLayer)
+    this.cursorLayer.eventMode = "none"
+    this.contentCamera.addChild(this.nodesLayer, this.cursorLayer)
 
     this.borderGfx.eventMode = "none"
 
@@ -251,6 +254,11 @@ export class CanvasScene {
 
   getArtboardSize(): CanvasSize {
     return this.artboardSize
+  }
+
+  /** The cursor overlay parent (content-clipped, above video nodes). */
+  getCursorLayer(): Container {
+    return this.cursorLayer
   }
 
   /** Apply the viewport transform (pan/zoom) to the world container. */

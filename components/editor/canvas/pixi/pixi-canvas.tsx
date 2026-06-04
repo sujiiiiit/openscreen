@@ -19,7 +19,9 @@ import {
   useEditorCanvasTimelineActions,
   useEditorCanvasView,
 } from "../provider"
+import { buildCursorTrack, projectFolderFromObjectUrl } from "../cursor-scene"
 import { sampleZoomCameraAtTime } from "../zoom-scene"
+import { CursorController, type CursorState } from "./cursor-controller"
 import { canvasNodeFromVideo } from "./node-model"
 import { CanvasScene } from "./scene"
 import { TransformController } from "./transform-controller"
@@ -61,7 +63,7 @@ export function PixiCanvas() {
     setVideoLocked,
   } = useEditorCanvasActions()
   const { videos, selectedItemId } = useEditorCanvasMedia()
-  const { primaryAudioVideoId, zoomClips, timelineTime } =
+  const { primaryAudioVideoId, zoomClips, timelineTime, timelineClips } =
     useEditorCanvasTimeline()
   const {
     registerTimelineVideoElement,
@@ -82,11 +84,56 @@ export function PixiCanvas() {
     [nodes, selectedNodeIds]
   )
 
+  const screenVideo = useMemo(
+    () => videos.find((video) => video.role === "screen") ?? null,
+    [videos]
+  )
+  const screenClip = useMemo(
+    () =>
+      screenVideo
+        ? (timelineClips.find((clip) => clip.videoId === screenVideo.id) ??
+          null)
+        : null,
+    [screenVideo, timelineClips]
+  )
+  const cursorState = useMemo<CursorState>(
+    () => ({
+      screenVideo: screenVideo
+        ? {
+            x: screenVideo.x,
+            y: screenVideo.y,
+            width: screenVideo.width,
+            height: screenVideo.height,
+            rotation: screenVideo.rotation,
+            intrinsicWidth: screenVideo.intrinsicWidth,
+            intrinsicHeight: screenVideo.intrinsicHeight,
+          }
+        : null,
+      screenClip: screenClip
+        ? { start: screenClip.start, sourceIn: screenClip.sourceIn }
+        : null,
+      referenceSize: { width: artboard.width, height: artboard.height },
+      customRenderingEnabled: artboard.cursorCustomRenderingEnabled,
+      cursorSetId: artboard.cursorSetId,
+      sizeMultiplier: artboard.cursorSizeMultiplier,
+      smoothingMode: artboard.cursorSmoothingMode,
+      clickPressScale: artboard.cursorClickPressScale,
+      alwaysUsePointer: artboard.cursorAlwaysUsePointer,
+      motionRotation: artboard.cursorMotionRotation,
+      motionRotationMode: artboard.cursorMotionRotationMode,
+      motionBlur: artboard.cursorMotionBlur,
+      motionBlurBackend: artboard.cursorMotionBlurBackend,
+    }),
+    [screenVideo, screenClip, artboard]
+  )
+
   const appRef = useRef<Application | null>(null)
   const sceneRef = useRef<CanvasScene | null>(null)
   const controllerRef = useRef<ViewportController | null>(null)
   const videoControllerRef = useRef<VideoController | null>(null)
   const transformControllerRef = useRef<TransformController | null>(null)
+  const cursorControllerRef = useRef<CursorController | null>(null)
+  const cursorStateRef = useRef<CursorState>(cursorState)
   const rotationReadoutRef = useRef<HTMLDivElement>(null)
   const viewportSizeRef = useRef<CanvasSize>({ width: 0, height: 0 })
 
@@ -348,6 +395,10 @@ export function PixiCanvas() {
       transformController.attach(host)
       transformControllerRef.current = transformController
 
+      const cursorController = new CursorController(scene)
+      cursorController.setState(cursorStateRef.current)
+      cursorControllerRef.current = cursorController
+
       themeObserver = new MutationObserver(() => {
         sceneRef.current?.setColors(resolveCanvasPalette(getIsDark()))
       })
@@ -375,6 +426,7 @@ export function PixiCanvas() {
       resizeObserver?.disconnect()
       controllerRef.current?.detach()
       transformControllerRef.current?.detach()
+      cursorControllerRef.current?.destroy()
       videoControllerRef.current?.destroy()
       sceneRef.current?.destroy()
       appRef.current?.destroy({ removeView: true }, { children: true })
@@ -383,6 +435,7 @@ export function PixiCanvas() {
       controllerRef.current = null
       videoControllerRef.current = null
       transformControllerRef.current = null
+      cursorControllerRef.current = null
     }
     // Mount once. Live values are read through refs above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -426,6 +479,7 @@ export function PixiCanvas() {
         time
       )
       sceneRef.current?.applyZoomCamera(camera)
+      cursorControllerRef.current?.place(time)
     }
     const unsubscribeTick = subscribeTimelineTicks((time) => applyAt(time))
     const unsubscribeHover = subscribeHoverTime((time) =>
@@ -445,6 +499,7 @@ export function PixiCanvas() {
         timelineTime
       )
     )
+    cursorControllerRef.current?.place(timelineTime)
   }, [zoomClips, timelineTime, artboard.width, artboard.height])
 
   // Bridge the provider's single-selection (sidebar Video-tab "Select" /
@@ -473,6 +528,44 @@ export function PixiCanvas() {
   useEffect(() => {
     sceneRef.current?.drawSelectionOverlay(selectedNodes)
   }, [selectedNodes])
+
+  // Push cursor state + re-place when paused (settings / geometry changes).
+  useEffect(() => {
+    cursorStateRef.current = cursorState
+    cursorControllerRef.current?.setState(cursorState)
+    cursorControllerRef.current?.place(committedTimeRef.current)
+  }, [cursorState])
+
+  // Load the recorded cursor track when the screen recording / smoothing changes.
+  useEffect(() => {
+    const controller = cursorControllerRef.current
+    if (
+      !screenVideo ||
+      screenVideo.source.kind !== "recording" ||
+      !artboard.cursorCustomRenderingEnabled
+    ) {
+      controller?.setTrack(null)
+      return
+    }
+    const folder = projectFolderFromObjectUrl(screenVideo.objectUrl)
+    if (!folder) return
+    let cancelled = false
+    void window.api?.projects.getCursorData(folder).then((data) => {
+      if (cancelled) return
+      const track = buildCursorTrack(data ?? null, {
+        smoothingMode: artboard.cursorSmoothingMode,
+      })
+      cursorControllerRef.current?.setTrack(track)
+      cursorControllerRef.current?.place(committedTimeRef.current)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [
+    screenVideo,
+    artboard.cursorCustomRenderingEnabled,
+    artboard.cursorSmoothingMode,
+  ])
 
   return (
     <>
