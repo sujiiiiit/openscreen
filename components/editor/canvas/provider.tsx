@@ -10,7 +10,7 @@ import {
   useState,
   type ReactNode,
 } from "react"
-import type Konva from "konva"
+import type { PixiNodeHandle } from "./pixi/video-controller"
 
 import {
   type ArtboardPresetId,
@@ -33,7 +33,6 @@ import type {
   CanvasVideoRole,
   CanvasVideoSource,
   CanvasVideoTransformPatch,
-  CursorMotionBlurBackend,
   CursorMotionRotationMode,
   CursorSetId,
   CursorSmoothingMode,
@@ -75,7 +74,6 @@ import {
 } from "@/components/editor/canvas/history"
 import {
   CURSOR_CLICK_PRESS_SCALE_DEFAULT,
-  CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   CURSOR_MOTION_BLUR_DEFAULT,
   CURSOR_MOTION_ROTATION_DEFAULT,
   CURSOR_MOTION_ROTATION_MODE_DEFAULT,
@@ -86,7 +84,6 @@ import {
   CURSOR_SIZE_MIN,
   clampCursorClickPressScale,
   clampCursorMotionBlur,
-  clampCursorMotionBlurBackend,
   clampCursorMotionRotation,
   clampCursorMotionRotationMode,
   clampCursorSetId,
@@ -108,7 +105,6 @@ const DEFAULT_ARTBOARD: EditorArtboard = {
   cursorMotionBlur: CURSOR_MOTION_BLUR_DEFAULT,
   cursorMotionRotation: CURSOR_MOTION_ROTATION_DEFAULT,
   cursorMotionRotationMode: CURSOR_MOTION_ROTATION_MODE_DEFAULT,
-  cursorMotionBlurBackend: CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   cursorSmoothingMode: CURSOR_SMOOTHING_MODE_DEFAULT,
   cursorClickPressScale: CURSOR_CLICK_PRESS_SCALE_DEFAULT,
   cursorAlwaysUsePointer: false,
@@ -242,7 +238,6 @@ type EditorCanvasContextValue = {
   setCursorMotionRotation: (amount: number) => void
   setCursorMotionRotationMode: (mode: CursorMotionRotationMode) => void
   setCursorMotionBlur: (intensity: number) => void
-  setCursorMotionBlurBackend: (backend: CursorMotionBlurBackend) => void
   setViewportSize: (size: CanvasSize) => void
   setViewTransform: (transform: ViewTransform) => void
   fitArtboardToViewport: () => void
@@ -252,7 +247,7 @@ type EditorCanvasContextValue = {
     id: string,
     element: HTMLVideoElement | null
   ) => void
-  registerTimelineCanvasNode: (id: string, node: Konva.Image | null) => void
+  registerTimelineCanvasNode: (id: string, node: PixiNodeHandle | null) => void
   onTimelineVideoSeeked: (
     id: string,
     element: HTMLVideoElement,
@@ -350,7 +345,6 @@ type EditorCanvasActionsContextValue = Pick<
   | "setCursorMotionRotation"
   | "setCursorMotionRotationMode"
   | "setCursorMotionBlur"
-  | "setCursorMotionBlurBackend"
   | "setViewportSize"
   | "setViewTransform"
   | "fitArtboardToViewport"
@@ -766,7 +760,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const isTimelinePlayingRef = useRef(isTimelinePlaying)
   const isPreviewModeRef = useRef(isPreviewMode)
   const timelineVideoElementsRef = useRef(new Map<string, HTMLVideoElement>())
-  const timelineCanvasNodesRef = useRef(new Map<string, Konva.Image>())
+  const timelineCanvasNodesRef = useRef(new Map<string, PixiNodeHandle>())
   // Per-element source frame rate, measured lazily during playback. Session-
   // only: never persisted, cleared on project switch. Drives frame-stepping.
   const videoFpsRef = useRef(new Map<string, number>())
@@ -2296,7 +2290,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const registerTimelineCanvasNode = useCallback(
-    (id: string, node: Konva.Image | null) => {
+    (id: string, node: PixiNodeHandle | null) => {
       timelineVisibilityWindowRef.current = null
 
       if (node) {
@@ -2468,8 +2462,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const prevCursorMotionRotation = artboardRef.current.cursorMotionRotation
       const prevCursorMotionRotationMode =
         artboardRef.current.cursorMotionRotationMode
-      const prevCursorMotionBlurBackend =
-        artboardRef.current.cursorMotionBlurBackend
       const prevCursorSmoothingMode = artboardRef.current.cursorSmoothingMode
       const prevCursorClickPressScale =
         artboardRef.current.cursorClickPressScale
@@ -2491,7 +2483,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           cursorMotionBlur: prevCursorMotionBlur,
           cursorMotionRotation: prevCursorMotionRotation,
           cursorMotionRotationMode: prevCursorMotionRotationMode,
-          cursorMotionBlurBackend: prevCursorMotionBlurBackend,
           cursorSmoothingMode: prevCursorSmoothingMode,
           cursorClickPressScale: prevCursorClickPressScale,
           cursorAlwaysUsePointer: prevCursorAlwaysUsePointer,
@@ -2511,7 +2502,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           cursorMotionBlur: prevCursorMotionBlur,
           cursorMotionRotation: prevCursorMotionRotation,
           cursorMotionRotationMode: prevCursorMotionRotationMode,
-          cursorMotionBlurBackend: prevCursorMotionBlurBackend,
           cursorSmoothingMode: prevCursorSmoothingMode,
           cursorClickPressScale: prevCursorClickPressScale,
           cursorAlwaysUsePointer: prevCursorAlwaysUsePointer,
@@ -3235,25 +3225,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     setArtboard(nextArtboard)
   }, [])
 
-  // Renderer backend for cursor blur. The hot path reads this through the
-  // overlay's persistent renderer ref, so changing it swaps one renderer
-  // instance without adding React work to each timeline tick.
-  const setCursorMotionBlurBackend = useCallback(
-    (backend: CursorMotionBlurBackend) => {
-      const current = artboardRef.current
-      const clamped = clampCursorMotionBlurBackend(backend)
-      if (current.cursorMotionBlurBackend === clamped) return
-      historyCommitTagRef.current = "cursor-motion-blur-backend"
-      const nextArtboard: EditorArtboard = {
-        ...current,
-        cursorMotionBlurBackend: clamped,
-      }
-      artboardRef.current = nextArtboard
-      setArtboard(nextArtboard)
-    },
-    []
-  )
-
   const setArtboardPadding = useCallback(
     (padding: number) => {
       const current = artboardRef.current
@@ -3628,9 +3599,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         cursorMotionRotationMode: clampCursorMotionRotationMode(
           savedState.artboard.cursorMotionRotationMode
         ),
-        cursorMotionBlurBackend: clampCursorMotionBlurBackend(
-          savedState.artboard.cursorMotionBlurBackend
-        ),
         cursorSmoothingMode: clampCursorSmoothingMode(
           savedState.artboard.cursorSmoothingMode
         ),
@@ -3870,7 +3838,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setCursorMotionRotation,
       setCursorMotionRotationMode,
       setCursorMotionBlur,
-      setCursorMotionBlurBackend,
       setViewportSize,
       setViewTransform,
       fitArtboardToViewport,
@@ -3900,7 +3867,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setCursorMotionRotation,
       setCursorMotionRotationMode,
       setCursorMotionBlur,
-      setCursorMotionBlurBackend,
       setViewportSize,
       setViewTransform,
       fitArtboardToViewport,
@@ -4080,9 +4046,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         cursorMotionRotationMode: clampCursorMotionRotationMode(
           savedState.artboard.cursorMotionRotationMode
         ),
-        cursorMotionBlurBackend: clampCursorMotionBlurBackend(
-          savedState.artboard.cursorMotionBlurBackend
-        ),
         cursorSmoothingMode: clampCursorSmoothingMode(
           savedState.artboard.cursorSmoothingMode
         ),
@@ -4233,8 +4196,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         artboardRef.current.cursorMotionRotation
       const previousCursorMotionRotationMode =
         artboardRef.current.cursorMotionRotationMode
-      const previousCursorMotionBlurBackend =
-        artboardRef.current.cursorMotionBlurBackend
       const previousCursorSmoothingMode =
         artboardRef.current.cursorSmoothingMode
       const previousCursorClickPressScale =
@@ -4258,7 +4219,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               cursorMotionBlur: previousCursorMotionBlur,
               cursorMotionRotation: previousCursorMotionRotation,
               cursorMotionRotationMode: previousCursorMotionRotationMode,
-              cursorMotionBlurBackend: previousCursorMotionBlurBackend,
               cursorSmoothingMode: previousCursorSmoothingMode,
               cursorClickPressScale: previousCursorClickPressScale,
               cursorAlwaysUsePointer: previousCursorAlwaysUsePointer,
@@ -4280,7 +4240,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               cursorMotionBlur: previousCursorMotionBlur,
               cursorMotionRotation: previousCursorMotionRotation,
               cursorMotionRotationMode: previousCursorMotionRotationMode,
-              cursorMotionBlurBackend: previousCursorMotionBlurBackend,
               cursorSmoothingMode: previousCursorSmoothingMode,
               cursorClickPressScale: previousCursorClickPressScale,
               cursorAlwaysUsePointer: previousCursorAlwaysUsePointer,

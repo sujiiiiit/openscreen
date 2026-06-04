@@ -79,9 +79,6 @@ export interface ProjectArtboard {
   // Cursor motion-rotation behavior. Optional + defaulted to 'side-lean' for
   // old project.json files.
   cursorMotionRotationMode?: "side-lean" | "rotation"
-  // Cursor motion-blur renderer backend. Optional + defaulted to 'gpu' for
-  // old project.json files.
-  cursorMotionBlurBackend?: "gpu" | "cpu"
   // Cursor path smoothing preset. Optional + defaulted to 'default' for old
   // project.json files.
   cursorSmoothingMode?: "rapid" | "quick" | "default" | "slow"
@@ -334,10 +331,6 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
   const cursorMotionRotationMode =
     value["cursorMotionRotationMode"] === "rotation" ? "rotation" : "side-lean"
 
-  // Renderer backend is optional + defaulted. Unknown values fall back to GPU
-  // so old and hand-edited projects keep loading.
-  const cursorMotionBlurBackend =
-    value["cursorMotionBlurBackend"] === "cpu" ? "cpu" : "gpu"
   const cursorCustomRenderingEnabled =
     value["cursorCustomRenderingEnabled"] === false ? false : true
   const cursorSetId = CURSOR_SET_IDS.includes(
@@ -372,7 +365,6 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     cursorMotionBlur,
     cursorMotionRotation,
     cursorMotionRotationMode,
-    cursorMotionBlurBackend,
     cursorSmoothingMode,
     cursorClickPressScale,
     cursorAlwaysUsePointer,

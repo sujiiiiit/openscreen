@@ -66,7 +66,6 @@ export function serializeArtboard(artboard: EditorArtboard): ProjectArtboard {
     cursorMotionBlur: artboard.cursorMotionBlur,
     cursorMotionRotation: artboard.cursorMotionRotation,
     cursorMotionRotationMode: artboard.cursorMotionRotationMode,
-    cursorMotionBlurBackend: artboard.cursorMotionBlurBackend,
     cursorSmoothingMode: artboard.cursorSmoothingMode,
     cursorClickPressScale: artboard.cursorClickPressScale,
     cursorAlwaysUsePointer: artboard.cursorAlwaysUsePointer,

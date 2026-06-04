@@ -228,9 +228,6 @@ export interface ProjectArtboard {
   // Cursor motion-rotation behavior. Optional on disk; validator defaults to
   // 'side-lean'. See electron/ipc/project-schema.ts.
   cursorMotionRotationMode?: "side-lean" | "rotation"
-  // Cursor motion-blur renderer backend. Optional on disk; validator defaults
-  // to 'gpu'. See electron/ipc/project-schema.ts.
-  cursorMotionBlurBackend?: "gpu" | "cpu"
   // Cursor path smoothing preset. Optional on disk; validator defaults to
   // 'default'. See electron/ipc/project-schema.ts.
   cursorSmoothingMode?: "rapid" | "quick" | "default" | "slow"

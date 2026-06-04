@@ -15,7 +15,6 @@ import {
   CURSOR_CLICK_PRESS_SCALE_DEFAULT,
   CURSOR_CLICK_PRESS_SCALE_MAX,
   CURSOR_CLICK_PRESS_SCALE_MIN,
-  CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   CURSOR_MOTION_BLUR_DEFAULT,
   CURSOR_MOTION_ROTATION_DEFAULT,
   CURSOR_MOTION_ROTATION_MODE_DEFAULT,
@@ -38,7 +37,6 @@ import {
   useEditorCanvasMedia,
 } from "@/components/editor/canvas/provider"
 import type {
-  CursorMotionBlurBackend,
   CursorMotionRotationMode,
   CursorSmoothingMode,
 } from "@/types/editor-canvas"
@@ -99,10 +97,6 @@ const motionSliderCheckpointPosition = (value: number) => {
     ? `calc(${pct}% - ${Math.abs(offset)}px)`
     : `calc(${pct}% + ${offset}px)`
 }
-const BACKENDS: Array<{ value: CursorMotionBlurBackend; label: string }> = [
-  { value: "gpu", label: "GPU" },
-  { value: "cpu", label: "CPU" },
-]
 const SMOOTHING_LABELS: Record<CursorSmoothingMode, string> = {
   rapid: "Rapid",
   quick: "Quick",
@@ -474,7 +468,6 @@ export function CursorPanel() {
     setCursorMotionRotation,
     setCursorMotionRotationMode,
     setCursorMotionBlur,
-    setCursorMotionBlurBackend,
   } = useEditorCanvasActions()
   const customRenderingSwitchId = useId()
   const alwaysUsePointerSwitchId = useId()
@@ -542,8 +535,6 @@ export function CursorPanel() {
   const applyClickDownscalePct = (pct: number) => {
     setCursorClickPressScale(1 - pct / 100)
   }
-  const backend = artboard.cursorMotionBlurBackend
-  const isBackendDefault = backend === CURSOR_MOTION_BLUR_BACKEND_DEFAULT
   const customRenderingEnabled = artboard.cursorCustomRenderingEnabled
   const cursorControlsDisabled = !hasScreenVideo || !customRenderingEnabled
   const alwaysUsePointer = artboard.cursorAlwaysUsePointer
@@ -836,40 +827,6 @@ export function CursorPanel() {
             size="sm"
             onClick={() => applyBlurPct(BLUR_DEFAULT_PCT)}
             disabled={cursorControlsDisabled || isBlurDefault}
-          >
-            Reset
-          </Button>
-        </div>
-      </div>
-
-      <div className="w-full space-y-2">
-        <div className="flex items-center">
-          <h4
-            className={cn(
-              "text-xs font-semibold transition-opacity select-none",
-              cursorControlsDisabled && "opacity-50"
-            )}
-          >
-            Blur renderer
-          </h4>
-        </div>
-        <div className="flex w-full items-center gap-2">
-          <CursorSelectionPills
-            ariaLabel="Cursor motion blur renderer"
-            disabled={cursorControlsDisabled}
-            options={BACKENDS}
-            size="xs"
-            value={backend}
-            onValueChange={setCursorMotionBlurBackend}
-          />
-          <Button
-            type="button"
-            variant="link"
-            size="sm"
-            onClick={() =>
-              setCursorMotionBlurBackend(CURSOR_MOTION_BLUR_BACKEND_DEFAULT)
-            }
-            disabled={cursorControlsDisabled || isBackendDefault}
           >
             Reset
           </Button>

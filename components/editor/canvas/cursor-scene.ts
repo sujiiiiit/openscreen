@@ -1,6 +1,5 @@
 import type { CursorTrackData } from "@/types/api"
 import type {
-  CursorMotionBlurBackend,
   CursorMotionRotationMode,
   CursorSmoothingMode,
 } from "@/types/editor-canvas"
@@ -149,10 +148,6 @@ const CURSOR_DIRECTION_ROTATION_FULL_TIP_DISTANCE = 0.22
 // 0.6 — a tasteful, clearly-visible amount.
 export const CURSOR_MOTION_BLUR_DEFAULT = 0.6
 
-// GPU keeps the interactive Konva preview responsive; CPU is available as an
-// explicit fallback/comparison mode and uses the same Pixi-derived math.
-export const CURSOR_MOTION_BLUR_BACKEND_DEFAULT: CursorMotionBlurBackend = "gpu"
-
 // Tuning knobs (not user-facing):
 // - finite-difference window for estimating cursor speed; small + fixed so the
 //   estimate is identical in the editor preview and any export fps.
@@ -205,13 +200,6 @@ export function clampCursorClickPressScale(value: number): number {
     CURSOR_CLICK_PRESS_SCALE_MAX,
     Math.max(CURSOR_CLICK_PRESS_SCALE_MIN, value)
   )
-}
-
-/** Clamp unknown persisted/UI backend input, defaulting to GPU. */
-export function clampCursorMotionBlurBackend(
-  value: unknown
-): CursorMotionBlurBackend {
-  return value === "cpu" ? "cpu" : CURSOR_MOTION_BLUR_BACKEND_DEFAULT
 }
 
 function oddKernel(value: number): number {
