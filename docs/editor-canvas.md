@@ -1367,9 +1367,10 @@ app.stage
 
 Viewport (pan/zoom/fit) · background fill / cover-cropped wallpaper (+blur) / grain overlay · pixel grid · multi-video playback + inactive-clip windowing (provider transport unchanged) · video appearance (squircle/border/shadow) · composition zoom-clip camera · group selection + marquee + group move/resize/rotate + keyboard.
 
-### Deferred to Phase 2 (code kept, NOT wired into the Pixi path)
+### Phase 2 (in progress)
 
-- **Cursor overlay** (`canvas-cursor-overlay.tsx`, `cursor-scene.ts`) and **radial zoom blur** (`lib/motion-blur/*`, `editor-workspace.tsx` overlay). The zoom-clip *camera* (scale/offset) IS migrated; only its radial-blur postprocess is deferred. The Konva preview still renders both. All cursor/blur settings, types, persistence, and UI are intact.
+- **Cursor overlay — preview migrated** (`pixi/cursor-controller.ts`): a cursor Sprite in a content-clipped layer above the video nodes, placed per tick/hover via the shared `cursor-scene` placeCursor + computeCursorBlur, reusing the sprite-motion-blur renderer (sharp per-URL textures; size-varying blurred canvas via a rebuilt CanvasSource texture). **Export-side cursor is not re-added yet** — phase-1 exports still omit it.
+- **Radial zoom blur — deferred.** The zoom-clip *camera* (scale/offset) is migrated in preview + export; only the radial-blur postprocess is deferred (to be a native Pixi filter on the artboard content). The Konva preview still renders it; Pixi preview + export don't yet. All blur settings, types, persistence, and UI are intact.
 
 ### Export (migrated)
 
