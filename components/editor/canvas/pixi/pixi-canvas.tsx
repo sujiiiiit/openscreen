@@ -1,10 +1,15 @@
 "use client"
 
-import { useEffect, useRef } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Application } from "pixi.js"
 
+import { normalizeAngle } from "@/lib/node-transform"
 import { resolveCanvasPalette } from "@/lib/theme-colors"
-import type { CanvasSize } from "@/types/editor-canvas"
+import type {
+  CanvasNode,
+  CanvasSize,
+  NodeTransformUpdate,
+} from "@/types/editor-canvas"
 
 import {
   useEditorCanvasActions,
@@ -15,7 +20,9 @@ import {
   useEditorCanvasView,
 } from "../provider"
 import { sampleZoomCameraAtTime } from "../zoom-scene"
+import { canvasNodeFromVideo } from "./node-model"
 import { CanvasScene } from "./scene"
+import { TransformController } from "./transform-controller"
 import { VideoController } from "./video-controller"
 import { ViewportController } from "./viewport-controller"
 
@@ -44,8 +51,16 @@ export function PixiCanvas() {
 
   const { artboard } = useEditorCanvasArtboard()
   const { viewTransform, isPreviewMode } = useEditorCanvasView()
-  const { setViewTransform, setViewportSize } = useEditorCanvasActions()
-  const { videos } = useEditorCanvasMedia()
+  const {
+    setViewTransform,
+    setViewportSize,
+    selectItem,
+    updateVideoTransform,
+    deleteVideo,
+    duplicateVideo,
+    setVideoLocked,
+  } = useEditorCanvasActions()
+  const { videos, selectedItemId } = useEditorCanvasMedia()
   const { primaryAudioVideoId, zoomClips, timelineTime } =
     useEditorCanvasTimeline()
   const {
@@ -57,11 +72,33 @@ export function PixiCanvas() {
     subscribeHoverTime,
   } = useEditorCanvasTimelineActions()
 
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([])
+  const nodes = useMemo<CanvasNode[]>(
+    () => videos.map(canvasNodeFromVideo),
+    [videos]
+  )
+  const selectedNodes = useMemo(
+    () => nodes.filter((node) => selectedNodeIds.includes(node.id)),
+    [nodes, selectedNodeIds]
+  )
+
   const appRef = useRef<Application | null>(null)
   const sceneRef = useRef<CanvasScene | null>(null)
   const controllerRef = useRef<ViewportController | null>(null)
   const videoControllerRef = useRef<VideoController | null>(null)
+  const transformControllerRef = useRef<TransformController | null>(null)
+  const rotationReadoutRef = useRef<HTMLDivElement>(null)
   const viewportSizeRef = useRef<CanvasSize>({ width: 0, height: 0 })
+
+  const nodesRef = useRef<CanvasNode[]>(nodes)
+  const selectedIdsRef = useRef<string[]>(selectedNodeIds)
+  const nodeActionsRef = useRef({
+    selectItem,
+    updateVideoTransform,
+    deleteVideo,
+    duplicateVideo,
+    setVideoLocked,
+  })
 
   // Latest values read by the imperative layer without re-running the mount effect.
   const artboardSizeRef = useRef<CanvasSize>({
@@ -116,6 +153,42 @@ export function PixiCanvas() {
   useEffect(() => {
     committedTimeRef.current = timelineTime
   }, [timelineTime])
+  useEffect(() => {
+    nodesRef.current = nodes
+  }, [nodes])
+  useEffect(() => {
+    selectedIdsRef.current = selectedNodeIds
+  }, [selectedNodeIds])
+  useEffect(() => {
+    nodeActionsRef.current = {
+      selectItem,
+      updateVideoTransform,
+      deleteVideo,
+      duplicateVideo,
+      setVideoLocked,
+    }
+  }, [
+    selectItem,
+    updateVideoTransform,
+    deleteVideo,
+    duplicateVideo,
+    setVideoLocked,
+  ])
+
+  const updateRotationReadout = useCallback((rotation: number | null) => {
+    const readout = rotationReadoutRef.current
+    if (!readout) return
+    if (rotation === null) {
+      readout.style.visibility = "hidden"
+      readout.textContent = ""
+      return
+    }
+    const normalized = normalizeAngle(rotation)
+    const positive = normalized < 0 ? normalized + Math.PI * 2 : normalized
+    readout.textContent = `${Math.round((positive * 180) / Math.PI)}°`
+    readout.style.visibility = "visible"
+  }, [])
+
   useEffect(() => {
     transportRef.current = {
       registerElement: registerTimelineVideoElement,
@@ -237,6 +310,44 @@ export function PixiCanvas() {
         )
       )
 
+      const transformController = new TransformController({
+        scene,
+        getViewTransform: () => controller.getViewTransform(),
+        getNodes: () => nodesRef.current,
+        getSelectedIds: () => selectedIdsRef.current,
+        getIsSpacePressed: () => controller.isSpaceActive(),
+        onSelectionChange: (ids) => {
+          setSelectedNodeIds(ids)
+          nodeActionsRef.current.selectItem(ids.at(-1) ?? null)
+        },
+        onNodeTransformsCommit: (updates: NodeTransformUpdate[]) => {
+          for (const update of updates) {
+            nodeActionsRef.current.updateVideoTransform(update.id, {
+              x: update.transform.x,
+              y: update.transform.y,
+              width: update.transform.width,
+              height: update.transform.height,
+              rotation: update.transform.rotation,
+            })
+          }
+        },
+        onRemoveNode: (id) => nodeActionsRef.current.deleteVideo(id),
+        onDuplicateSelectedNodes: () => {
+          for (const id of selectedIdsRef.current) {
+            nodeActionsRef.current.duplicateVideo(id)
+          }
+        },
+        onSetSelectedNodesLocked: (locked) => {
+          for (const id of selectedIdsRef.current) {
+            nodeActionsRef.current.setVideoLocked(id, locked)
+          }
+        },
+        onTransformingChange: () => {},
+        onRotationPreview: updateRotationReadout,
+      })
+      transformController.attach(host)
+      transformControllerRef.current = transformController
+
       themeObserver = new MutationObserver(() => {
         sceneRef.current?.setColors(resolveCanvasPalette(getIsDark()))
       })
@@ -263,6 +374,7 @@ export function PixiCanvas() {
       themeObserver?.disconnect()
       resizeObserver?.disconnect()
       controllerRef.current?.detach()
+      transformControllerRef.current?.detach()
       videoControllerRef.current?.destroy()
       sceneRef.current?.destroy()
       appRef.current?.destroy({ removeView: true }, { children: true })
@@ -270,6 +382,7 @@ export function PixiCanvas() {
       sceneRef.current = null
       controllerRef.current = null
       videoControllerRef.current = null
+      transformControllerRef.current = null
     }
     // Mount once. Live values are read through refs above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -334,6 +447,33 @@ export function PixiCanvas() {
     )
   }, [zoomClips, timelineTime, artboard.width, artboard.height])
 
+  // Bridge the provider's single-selection (sidebar Video-tab "Select" /
+  // deselect / artboard) into the canvas's multi-selection. The provider only
+  // holds one id, so we override our local selection ONLY when its id diverges
+  // from our current set — never when it merely echoes the primary we just
+  // pushed via selectItem() (that would collapse a marquee/Shift group to one).
+  // Deliberate cross-store sync with an equality guard (no cascading renders).
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSelectedNodeIds((prev) => {
+      if (selectedItemId && prev.includes(selectedItemId)) return prev
+      const nextIds =
+        selectedItemId && videos.some((video) => video.id === selectedItemId)
+          ? [selectedItemId]
+          : []
+      return prev.length === nextIds.length &&
+        prev.every((id, i) => id === nextIds[i])
+        ? prev
+        : nextIds
+    })
+  }, [selectedItemId, videos])
+
+  // Redraw the selection overlay when the selection or node transforms change
+  // (covers programmatic selection + panel edits; live gestures draw directly).
+  useEffect(() => {
+    sceneRef.current?.drawSelectionOverlay(selectedNodes)
+  }, [selectedNodes])
+
   return (
     <>
       {/* Artboard "paper" drop shadow — a white div glued to the artboard's
@@ -345,6 +485,11 @@ export function PixiCanvas() {
           isPreviewMode ? "hidden" : ""
         }`}
         style={{ transformOrigin: "0 0", willChange: "transform", opacity: 0 }}
+      />
+      <div
+        ref={rotationReadoutRef}
+        aria-hidden="true"
+        className="pointer-events-none invisible absolute bottom-4 left-1/2 z-[4] min-w-16 -translate-x-1/2 rounded-full border border-border/70 bg-popover px-3 py-1.5 text-center text-xs font-semibold text-foreground tabular-nums shadow-xl ring-1 ring-border/40"
       />
       <div ref={hostRef} className="absolute inset-0 z-[1] touch-none" />
     </>

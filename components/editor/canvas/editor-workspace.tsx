@@ -1839,18 +1839,22 @@ export default function EditorWorkspace() {
           />
         </>
       ) : null}
-      <SelectionToolbar
-        ref={selectionToolbarRef}
-        selectedVideo={selectedTimelineVideo}
-        onToggleLock={setVideoLocked}
-        onDuplicate={duplicateVideo}
-        onDelete={deleteVideo}
-      />
-      <div
-        ref={rotationReadoutRef}
-        aria-hidden="true"
-        className="pointer-events-none invisible absolute bottom-4 left-1/2 z-50 min-w-16 -translate-x-1/2 rounded-full border border-border/70 bg-popover px-3 py-1.5 text-center text-sm leading-none font-medium text-foreground shadow-lg ring-1 ring-border/40"
-      />
+      {!pixiEnabled && (
+        <>
+          <SelectionToolbar
+            ref={selectionToolbarRef}
+            selectedVideo={selectedTimelineVideo}
+            onToggleLock={setVideoLocked}
+            onDuplicate={duplicateVideo}
+            onDelete={deleteVideo}
+          />
+          <div
+            ref={rotationReadoutRef}
+            aria-hidden="true"
+            className="pointer-events-none invisible absolute bottom-4 left-1/2 z-50 min-w-16 -translate-x-1/2 rounded-full border border-border/70 bg-popover px-3 py-1.5 text-center text-sm leading-none font-medium text-foreground shadow-lg ring-1 ring-border/40"
+          />
+        </>
+      )}
       {isPreviewMode && <PreviewControls />}
     </div>
   )

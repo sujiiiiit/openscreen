@@ -4,6 +4,7 @@ import {
   BlurFilter,
   Container,
   Graphics,
+  GraphicsPath,
   Rectangle,
   Sprite,
   Texture,
@@ -12,8 +13,24 @@ import {
 } from "pixi.js"
 
 import type { CanvasPalette } from "@/lib/theme-colors"
+import {
+  CORNER_HANDLE_SIZE,
+  getNodeWorldCorners,
+  getSelectionHandleScreenPositions,
+  HANDLE_STROKE_WIDTH,
+  type HandleId,
+  ROTATION_HANDLE_SIZE,
+  type Rect,
+  type ResizeHandle,
+  screenFromWorld,
+  SELECTION_BORDER_STROKE_WIDTH,
+  SIDE_HANDLE_LENGTH,
+  SIDE_HANDLE_THICKNESS,
+  type Vec2,
+} from "@/lib/node-transform"
 import type {
   ArtboardBackground,
+  CanvasNode,
   CanvasSize,
   NodeTransform,
   ViewTransform,
@@ -59,6 +76,32 @@ type VideoNodeView = {
   /** Timeline-window visibility (from the provider); combined with readyState. */
   timelineVisible: boolean
 }
+
+/** The transform control currently being grabbed (a resize handle or rotation). */
+export type SelectionOverlayControl = HandleId | "rotation"
+
+type SelectionOverlayListener = (
+  nodes: CanvasNode[],
+  viewTransform: ViewTransform,
+  viewportSize: CanvasSize
+) => void
+
+const HOVER_OUTLINE_STROKE_WIDTH = 1.5
+const ROTATE_ICON_VIEWBOX_SIZE = 24
+const ROTATE_ICON_SIZE = 18
+const ROTATE_ICON_SCALE = ROTATE_ICON_SIZE / ROTATE_ICON_VIEWBOX_SIZE
+const ROTATE_ICON_STROKE_WIDTH = 2
+const ROTATE_ICON_PATHS = [
+  new GraphicsPath(
+    "M3.05493 13C3.01863 12.6717 3 12.338 3 12C3 7.02944 7.02944 3 12 3C14.8273 3 17.35 4.30367 19 6.34267M20.9451 11C20.9814 11.3283 21 11.662 21 12C21 16.9706 16.9706 21 12 21C9.17273 21 6.64996 19.6963 5 17.6573"
+  ),
+  new GraphicsPath(
+    "M16 7H17C18.4142 7 19.1213 7 19.5607 6.56066C20 6.12132 20 5.41421 20 4V3"
+  ),
+  new GraphicsPath(
+    "M8 17H7C5.58579 17 4.87868 17 4.43934 17.4393C4 17.8787 4 18.5858 4 20V21"
+  ),
+] as const
 
 /** Artboard edge stroke, matching openscreen's Konva `rgba(0,0,0,0.10)` 1px border. */
 const ARTBOARD_BORDER_COLOR = 0x000000
@@ -141,6 +184,14 @@ export class CanvasScene {
   /** Last applied composition zoom-clip camera (skips redundant re-applies). */
   private lastZoomCamera: ZoomCamera = IDENTITY_ZOOM_CAMERA
 
+  // Selection / hover / marquee overlay state (drawn in screen space on the stage).
+  private hoveredNode: CanvasNode | null = null
+  private selectedNodes: CanvasNode[] = []
+  private activeSelectionControl: SelectionOverlayControl | null = null
+  /** Ids under a live gesture (controller-owned); reserved for future sync guards. */
+  private activeDragIds = new Set<string>()
+  private selectionOverlayListener: SelectionOverlayListener | null = null
+
   private rafId: number | null = null
   private destroyed = false
   private playing = false
@@ -213,6 +264,8 @@ export class CanvasScene {
     this.updateBackdrop()
     this.redrawGrid()
     this.redrawBorder()
+    // Pan/zoom moves the projected handle positions; re-project the overlays.
+    this.redrawOverlays()
     this.requestRender()
   }
 
@@ -231,6 +284,128 @@ export class CanvasScene {
     this.requestRender()
   }
 
+  // ── selection / hover / marquee overlays (screen space) ─────────────────────
+
+  /** Notified whenever the selection overlay changes, for the DOM toolbar. */
+  setSelectionOverlayListener(listener: SelectionOverlayListener | null) {
+    this.selectionOverlayListener = listener
+    this.selectionOverlayListener?.(
+      [...this.selectedNodes],
+      this.lastView,
+      this.lastViewport
+    )
+  }
+
+  /** While a gesture is live, show only the grabbed handle (less visual noise). */
+  setActiveSelectionControl(control: SelectionOverlayControl | null) {
+    if (this.activeSelectionControl === control) return
+    this.activeSelectionControl = control
+    if (this.selectedNodes.length > 0) {
+      this.drawSelectionOverlay(this.selectedNodes)
+    }
+  }
+
+  setActiveDragIds(ids: string[]) {
+    this.activeDragIds = new Set(ids)
+  }
+
+  private redrawOverlays() {
+    if (this.hoveredNode) this.drawHoverOverlay(this.hoveredNode)
+    if (this.selectedNodes.length > 0) {
+      this.drawSelectionOverlay(this.selectedNodes)
+    }
+  }
+
+  drawHoverOverlay(node: CanvasNode | null) {
+    this.hoveredNode = node
+    const g = this.hoverGfx
+    g.clear()
+    if (!node) {
+      this.requestRender()
+      return
+    }
+    const corners = getNodeWorldCorners(node).map((corner) =>
+      screenFromWorld(corner, this.lastView)
+    )
+    g.poly(flattenPoints(corners), true).stroke({
+      width: HOVER_OUTLINE_STROKE_WIDTH,
+      color: this.palette.hover,
+    })
+    this.requestRender()
+  }
+
+  drawSelectionOverlay(nodes: CanvasNode[] | CanvasNode | null) {
+    const selected = Array.isArray(nodes) ? nodes : nodes ? [nodes] : []
+    this.selectedNodes = selected
+    const g = this.overlayGfx
+    g.clear()
+    if (selected.length === 0) {
+      this.selectionOverlayListener?.([], this.lastView, this.lastViewport)
+      this.requestRender()
+      return
+    }
+
+    const { selection } = this.palette
+    const geometry = getSelectionHandleScreenPositions(selected, this.lastView)
+    if (!geometry) {
+      this.selectionOverlayListener?.([], this.lastView, this.lastViewport)
+      return
+    }
+    const { corners, handles, rotation } = geometry
+    const locked = selected.some((node) => node.locked)
+
+    // Faint per-node outlines inside a multi-selection bounds box.
+    if (selected.length > 1) {
+      for (const node of selected) {
+        const nodeCorners = getNodeWorldCorners(node).map((corner) =>
+          screenFromWorld(corner, this.lastView)
+        )
+        g.poly(flattenPoints(nodeCorners), true).stroke({
+          width: 1,
+          color: selection,
+          alpha: 0.42,
+        })
+      }
+    }
+
+    g.poly(flattenPoints(corners), true).stroke({
+      width: SELECTION_BORDER_STROKE_WIDTH,
+      color: selection,
+    })
+
+    if (!locked) {
+      const activeControl = this.activeSelectionControl
+      if (!activeControl || activeControl === "rotation") {
+        drawRotationHandle(g, rotation.knob, this.palette)
+      }
+      for (const handle of handles) {
+        if (activeControl && activeControl !== handle.id) continue
+        drawResizeHandle(g, handle, this.palette)
+      }
+    }
+
+    this.selectionOverlayListener?.(
+      [...selected],
+      this.lastView,
+      this.lastViewport
+    )
+    this.requestRender()
+  }
+
+  drawMarqueeOverlay(rect: Rect | null) {
+    const g = this.marqueeGfx
+    g.clear()
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
+      this.requestRender()
+      return
+    }
+    const { selection } = this.palette
+    g.rect(rect.x, rect.y, rect.width, rect.height)
+      .fill({ color: selection, alpha: 0.08 })
+      .stroke({ width: 1, color: selection, alpha: 0.85 })
+    this.requestRender()
+  }
+
   setArtboardSize(size: CanvasSize) {
     this.artboardSize = size
     this.rebuildArtboardGeometry()
@@ -243,6 +418,7 @@ export class CanvasScene {
   setColors(palette: CanvasPalette) {
     this.palette = palette
     this.redrawGrid()
+    this.redrawOverlays()
     this.requestRender()
   }
 
@@ -610,4 +786,55 @@ export class CanvasScene {
       el.style.height = `${height}px`
     }
   }
+}
+
+/** Flatten points into the [x0, y0, x1, y1, …] array Graphics.poly expects. */
+function flattenPoints(points: Vec2[]): number[] {
+  return points.flatMap((point) => [point.x, point.y])
+}
+
+function drawResizeHandle(
+  g: Graphics,
+  handle: ResizeHandle & { screen: Vec2 },
+  palette: CanvasPalette
+) {
+  const { x, y } = handle.screen
+  if (handle.hx !== 0 && handle.hy !== 0) {
+    const radius = CORNER_HANDLE_SIZE / 2
+    g.circle(x, y, radius)
+      .fill({ color: palette.handleFill })
+      .stroke({ width: HANDLE_STROKE_WIDTH, color: palette.handleStroke })
+    return
+  }
+
+  const isHorizontal = handle.hy !== 0
+  const width = isHorizontal ? SIDE_HANDLE_LENGTH : SIDE_HANDLE_THICKNESS
+  const height = isHorizontal ? SIDE_HANDLE_THICKNESS : SIDE_HANDLE_LENGTH
+  g.roundRect(x - width / 2, y - height / 2, width, height, height / 2)
+    .fill({ color: palette.handleFill })
+    .stroke({ width: HANDLE_STROKE_WIDTH, color: palette.handleStroke })
+}
+
+function drawRotationHandle(g: Graphics, point: Vec2, palette: CanvasPalette) {
+  const radius = ROTATION_HANDLE_SIZE / 2
+  g.circle(point.x, point.y, radius)
+    .fill({ color: palette.handleFill })
+    .stroke({ width: HANDLE_STROKE_WIDTH, color: palette.handleStroke })
+  drawRotateIcon(g, point, palette)
+}
+
+function drawRotateIcon(g: Graphics, point: Vec2, palette: CanvasPalette) {
+  const tx = point.x - (ROTATE_ICON_VIEWBOX_SIZE * ROTATE_ICON_SCALE) / 2
+  const ty = point.y - (ROTATE_ICON_VIEWBOX_SIZE * ROTATE_ICON_SCALE) / 2
+
+  g.save().setTransform(ROTATE_ICON_SCALE, 0, 0, ROTATE_ICON_SCALE, tx, ty)
+  for (const path of ROTATE_ICON_PATHS) {
+    g.beginPath().path(path).stroke({
+      width: ROTATE_ICON_STROKE_WIDTH,
+      color: palette.handleIcon,
+      cap: "round",
+      join: "round",
+    })
+  }
+  g.restore()
 }
