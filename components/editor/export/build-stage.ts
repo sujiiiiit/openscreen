@@ -50,6 +50,10 @@ import {
 } from "@/components/editor/canvas/cursor-scene"
 import { getVideoCoverCrop } from "@/components/editor/canvas/video-cover-crop"
 import type { ZoomCamera } from "@/components/editor/canvas/zoom-scene"
+import {
+  applyZoomBlur,
+  createZoomBlurFilter,
+} from "@/components/editor/canvas/pixi/zoom-blur"
 import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
 import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
 
@@ -146,12 +150,18 @@ export async function buildExportStage(
   backgroundCamera.addChild(surface)
   const nodesLayer = new Container()
   contentCamera.addChild(nodesLayer)
-  artboardContainer.addChild(
+  // Wrap bg + content so the radial zoom blur filter acts on the whole
+  // composition (incl. the cursor) at once — same structure as the editor scene.
+  const composite = new Container()
+  composite.addChild(
     backgroundCamera,
     backgroundMask,
     contentCamera,
     contentMask
   )
+  artboardContainer.addChild(composite)
+  const zoomBlur = createZoomBlurFilter()
+  let zoomBlurOn = false
 
   await buildExportSurface(surface, artboard)
 
@@ -173,11 +183,18 @@ export async function buildExportStage(
     backgroundCamera.position.set(camera.offsetX, camera.offsetY)
     contentCamera.scale.set(camera.scale)
     contentCamera.position.set(camera.offsetX, camera.offsetY)
+    // The export filter input is the output canvas, so center maps to output px.
+    const on = applyZoomBlur(zoomBlur, camera, outputSize.width, outputSize.height)
+    if (on !== zoomBlurOn) {
+      composite.filters = on ? [zoomBlur] : []
+      zoomBlurOn = on
+    }
   }
 
   const dispose = () => {
     nodesByVideoId.clear()
     cursor?.cursorSprite.destroy()
+    zoomBlur.destroy()
     try {
       app.destroy({ removeView: true }, { children: true })
     } catch {

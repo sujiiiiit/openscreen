@@ -52,6 +52,7 @@ import {
 } from "./background"
 import { drawPixelGrid } from "./pixel-grid"
 import { applyVideoAppearance, type NodeAppearance } from "./video-appearance"
+import { applyZoomBlur, createZoomBlurFilter } from "./zoom-blur"
 
 /**
  * A mounted video node. Sub-tree (bottom → top):
@@ -157,6 +158,8 @@ export class CanvasScene {
   private readonly nodesLayer = new Container({ label: "nodes" })
   /** Cursor overlay parent — above the video nodes, inside the artboard clip. */
   private readonly cursorLayer = new Container({ label: "cursor" })
+  /** Wraps the zoomed composition (bg + grid + content) for the radial zoom blur. */
+  private readonly composite = new Container({ label: "composite" })
 
   private readonly gridGfx = new Graphics({ label: "grid" })
   private readonly gridMask = new Graphics({ label: "grid-mask" })
@@ -185,6 +188,8 @@ export class CanvasScene {
   private readonly nodeViews = new Map<string, VideoNodeView>()
   /** Last applied composition zoom-clip camera (skips redundant re-applies). */
   private lastZoomCamera: ZoomCamera = IDENTITY_ZOOM_CAMERA
+  private readonly zoomBlur = createZoomBlurFilter()
+  private zoomBlurOn = false
 
   // Selection / hover / marquee overlay state (drawn in screen space on the stage).
   private hoveredNode: CanvasNode | null = null
@@ -234,15 +239,18 @@ export class CanvasScene {
     this.borderGfx.eventMode = "none"
 
     // Paint order (first child = bottom): bg fill → grid → content → border.
-    this.artboard.addChild(
+    // The composite holds everything the composition zoom + radial blur act on
+    // (bg fill/grain, grid, video nodes, cursor). The artboard border stays
+    // outside it so the 1px edge never blurs.
+    this.composite.addChild(
       this.backgroundCamera,
       this.backgroundMask,
       this.gridGfx,
       this.gridMask,
       this.contentCamera,
-      this.contentMask,
-      this.borderGfx
+      this.contentMask
     )
+    this.artboard.addChild(this.composite, this.borderGfx)
     this.world.addChild(this.artboard)
     app.stage.addChild(this.world)
     app.stage.addChild(this.hoverGfx)
@@ -274,6 +282,9 @@ export class CanvasScene {
     this.redrawBorder()
     // Pan/zoom moves the projected handle positions; re-project the overlays.
     this.redrawOverlays()
+    // The zoom-blur center is in filter-input px (artboard × viewport scale), so
+    // a viewport change during an active blur must re-derive it.
+    this.applyZoomBlurFilter(this.lastZoomCamera)
     this.requestRender()
   }
 
@@ -289,7 +300,23 @@ export class CanvasScene {
     this.backgroundCamera.position.set(camera.offsetX, camera.offsetY)
     this.contentCamera.scale.set(camera.scale)
     this.contentCamera.position.set(camera.offsetX, camera.offsetY)
+    this.applyZoomBlurFilter(camera)
     this.requestRender()
+  }
+
+  /** Attach/update the radial zoom-blur filter on the composite (during ease). */
+  private applyZoomBlurFilter(camera: ZoomCamera) {
+    const scale = this.lastView.scale || 1
+    const on = applyZoomBlur(
+      this.zoomBlur,
+      camera,
+      this.artboardSize.width * scale,
+      this.artboardSize.height * scale
+    )
+    if (on !== this.zoomBlurOn) {
+      this.composite.filters = on ? [this.zoomBlur] : []
+      this.zoomBlurOn = on
+    }
   }
 
   // ── selection / hover / marquee overlays (screen space) ─────────────────────
@@ -746,6 +773,7 @@ export class CanvasScene {
     this.hoverGfx.destroy()
     this.overlayGfx.destroy()
     this.marqueeGfx.destroy()
+    this.zoomBlur.destroy()
   }
 
   // ── internal ───────────────────────────────────────────────────────────────
