@@ -7,15 +7,18 @@ import {
   Sprite,
   Texture,
   TilingSprite,
+  VideoSource,
 } from "pixi.js"
 
 import type { CanvasPalette } from "@/lib/theme-colors"
 import type {
   ArtboardBackground,
   CanvasSize,
+  NodeTransform,
   ViewTransform,
 } from "@/types/editor-canvas"
 
+import { getVideoCoverCrop, type VideoCoverCrop } from "../video-cover-crop"
 import {
   blurredWallpaperPadding,
   computeCoverCrop,
@@ -25,6 +28,19 @@ import {
   resolveWallpaper,
 } from "./background"
 import { drawPixelGrid } from "./pixel-grid"
+
+/** A mounted video node: wrapper container + cover-cropped sprite + its source. */
+type VideoNodeView = {
+  wrapper: Container
+  sprite: Sprite
+  source: VideoSource
+  texture: Texture
+  videoEl: HTMLVideoElement
+  intrinsic: CanvasSize
+  crop: VideoCoverCrop | null
+  /** Timeline-window visibility (from the provider); combined with readyState. */
+  timelineVisible: boolean
+}
 
 /** Artboard edge stroke, matching openscreen's Konva `rgba(0,0,0,0.10)` 1px border. */
 const ARTBOARD_BORDER_COLOR = 0x000000
@@ -101,6 +117,9 @@ export class CanvasScene {
   private lastGrain = 0
   /** Bumped per setBackground so a stale async wallpaper load is ignored. */
   private surfaceGen = 0
+
+  /** One view per mounted video node, keyed by video id. */
+  private readonly nodeViews = new Map<string, VideoNodeView>()
 
   private rafId: number | null = null
   private destroyed = false
@@ -271,6 +290,130 @@ export class CanvasScene {
     }
   }
 
+  // ── video nodes ─────────────────────────────────────────────────────────────
+
+  hasNode(id: string): boolean {
+    return this.nodeViews.has(id)
+  }
+
+  /** Mount a metadata-loaded video element as a cover-cropped sprite node. */
+  mountVideoNode(
+    id: string,
+    videoEl: HTMLVideoElement,
+    intrinsic: CanvasSize,
+    transform: NodeTransform
+  ) {
+    this.unmountVideoNode(id)
+
+    const source = new VideoSource({
+      resource: videoEl,
+      autoPlay: false,
+      autoLoad: true,
+      updateFPS: 0, // upload as fast as the video delivers frames
+      loop: false,
+      muted: videoEl.muted,
+      playsinline: true,
+    })
+    // `dynamic` + an explicit frame so the cover-crop can be mutated at runtime
+    // (the frame Rectangle is read-only to reassign, but its fields are mutable).
+    const texture = new Texture({
+      source,
+      dynamic: true,
+      frame: new Rectangle(
+        0,
+        0,
+        Math.max(1, intrinsic.width),
+        Math.max(1, intrinsic.height)
+      ),
+    })
+    const sprite = new Sprite(texture)
+    sprite.eventMode = "none" // hit-testing is handled by the transform controller
+    sprite.renderable = false // until the first frame decodes (WebGPU upload guard)
+
+    const wrapper = new Container({ label: `node:${id}` })
+    wrapper.addChild(sprite)
+    this.nodesLayer.addChild(wrapper)
+
+    const view: VideoNodeView = {
+      wrapper,
+      sprite,
+      source,
+      texture,
+      videoEl,
+      intrinsic,
+      crop: null,
+      timelineVisible: true,
+    }
+    this.nodeViews.set(id, view)
+    this.applyNodeTransform(view, transform)
+    this.requestRender()
+  }
+
+  setNodeTransform(id: string, transform: NodeTransform) {
+    const view = this.nodeViews.get(id)
+    if (!view) return
+    this.applyNodeTransform(view, transform)
+    this.requestRender()
+  }
+
+  /** Timeline-window visibility (the provider's inactive-clip culling). */
+  setNodeRenderable(id: string, visible: boolean) {
+    const view = this.nodeViews.get(id)
+    if (!view) return
+    view.timelineVisible = visible
+    this.requestRender()
+  }
+
+  /** Upload the node's current video frame + paint immediately (seek lockstep). */
+  renderNodeNow(id: string) {
+    const view = this.nodeViews.get(id)
+    if (!view || this.destroyed) return
+    view.source.update()
+    this.paint()
+  }
+
+  unmountVideoNode(id: string) {
+    const view = this.nodeViews.get(id)
+    if (!view) return
+    this.nodeViews.delete(id)
+    this.nodesLayer.removeChild(view.wrapper)
+    view.wrapper.destroy({ children: true })
+    view.texture.destroy(true)
+    this.requestRender()
+  }
+
+  private applyNodeTransform(view: VideoNodeView, t: NodeTransform) {
+    // Cover-crop the video into the frame (object-fit: cover), like openscreen.
+    const crop = getVideoCoverCrop(view.intrinsic, {
+      width: t.width,
+      height: t.height,
+    })
+    if (
+      !view.crop ||
+      view.crop.cropX !== crop.cropX ||
+      view.crop.cropY !== crop.cropY ||
+      view.crop.cropWidth !== crop.cropWidth ||
+      view.crop.cropHeight !== crop.cropHeight
+    ) {
+      view.crop = crop
+      const frame = view.texture.frame
+      frame.x = crop.cropX
+      frame.y = crop.cropY
+      frame.width = crop.cropWidth
+      frame.height = crop.cropHeight
+      view.texture.updateUvs()
+    }
+
+    view.sprite.width = t.width
+    view.sprite.height = t.height
+    view.sprite.position.set(0, 0)
+
+    // Wrapper carries placement + rotation around the frame center.
+    view.wrapper.pivot.set(t.width / 2, t.height / 2)
+    view.wrapper.rotation = t.rotation
+    view.wrapper.position.set(t.x + t.width / 2, t.y + t.height / 2)
+  }
+
   /** Schedule a single render on the next frame (no-op while continuously rendering). */
   requestRender() {
     if (this.rafId !== null || this.destroyed || this.playing) return
@@ -288,6 +431,12 @@ export class CanvasScene {
    */
   private paint() {
     if (this.destroyed) return
+    // A video sprite is renderable only when its frame is decoded AND its clip is
+    // active in the timeline window. Uploading an undecoded frame throws on WebGPU.
+    for (const view of this.nodeViews.values()) {
+      view.sprite.renderable =
+        view.timelineVisible && view.videoEl.readyState >= 2
+    }
     try {
       this.app.render()
     } catch {
@@ -323,6 +472,10 @@ export class CanvasScene {
       cancelAnimationFrame(this.rafId)
       this.rafId = null
     }
+    for (const view of this.nodeViews.values()) {
+      view.texture.destroy(true) // frees the VideoSource (detaches the <video>)
+    }
+    this.nodeViews.clear()
     this.world.destroy({ children: true })
     // Overlays are stage children, so world.destroy won't reach them.
     this.hoverGfx.destroy()

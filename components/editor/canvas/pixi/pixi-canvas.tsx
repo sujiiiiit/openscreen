@@ -9,9 +9,13 @@ import type { CanvasSize } from "@/types/editor-canvas"
 import {
   useEditorCanvasActions,
   useEditorCanvasArtboard,
+  useEditorCanvasMedia,
+  useEditorCanvasTimeline,
+  useEditorCanvasTimelineActions,
   useEditorCanvasView,
 } from "../provider"
 import { CanvasScene } from "./scene"
+import { VideoController } from "./video-controller"
 import { ViewportController } from "./viewport-controller"
 
 function getIsDark() {
@@ -40,10 +44,19 @@ export function PixiCanvas() {
   const { artboard } = useEditorCanvasArtboard()
   const { viewTransform, isPreviewMode } = useEditorCanvasView()
   const { setViewTransform, setViewportSize } = useEditorCanvasActions()
+  const { videos } = useEditorCanvasMedia()
+  const { primaryAudioVideoId } = useEditorCanvasTimeline()
+  const {
+    registerTimelineVideoElement,
+    registerTimelineCanvasNode,
+    onTimelineVideoSeeked,
+    registerTimelineVideoFps,
+  } = useEditorCanvasTimelineActions()
 
   const appRef = useRef<Application | null>(null)
   const sceneRef = useRef<CanvasScene | null>(null)
   const controllerRef = useRef<ViewportController | null>(null)
+  const videoControllerRef = useRef<VideoController | null>(null)
   const viewportSizeRef = useRef<CanvasSize>({ width: 0, height: 0 })
 
   // Latest values read by the imperative layer without re-running the mount effect.
@@ -76,6 +89,34 @@ export function PixiCanvas() {
       grain: artboard.grain,
     }
   }, [artboard.background, artboard.grain])
+
+  const videosRef = useRef(videos)
+  const primaryAudioRef = useRef(primaryAudioVideoId)
+  const transportRef = useRef({
+    registerElement: registerTimelineVideoElement,
+    registerNode: registerTimelineCanvasNode,
+    onSeeked: onTimelineVideoSeeked,
+    onFpsMeasured: registerTimelineVideoFps,
+  })
+  useEffect(() => {
+    videosRef.current = videos
+  }, [videos])
+  useEffect(() => {
+    primaryAudioRef.current = primaryAudioVideoId
+  }, [primaryAudioVideoId])
+  useEffect(() => {
+    transportRef.current = {
+      registerElement: registerTimelineVideoElement,
+      registerNode: registerTimelineCanvasNode,
+      onSeeked: onTimelineVideoSeeked,
+      onFpsMeasured: registerTimelineVideoFps,
+    }
+  }, [
+    registerTimelineVideoElement,
+    registerTimelineCanvasNode,
+    onTimelineVideoSeeked,
+    registerTimelineVideoFps,
+  ])
 
   // ── PixiJS lifecycle (mount once) ──────────────────────────────────────────
   useEffect(() => {
@@ -156,6 +197,26 @@ export function PixiCanvas() {
         artboardBgRef.current.grain
       )
 
+      const videoController = new VideoController({
+        scene,
+        registerElement: (id, el) =>
+          transportRef.current.registerElement(id, el),
+        registerNode: (id, node) =>
+          transportRef.current.registerNode(
+            id,
+            node as unknown as Parameters<
+              (typeof transportRef.current)["registerNode"]
+            >[1]
+          ),
+        onSeeked: (id, el, redraw) =>
+          transportRef.current.onSeeked(id, el, redraw),
+        onFpsMeasured: (id, fps) =>
+          transportRef.current.onFpsMeasured(id, fps),
+      })
+      videoControllerRef.current = videoController
+      videoController.setPrimaryAudio(primaryAudioRef.current)
+      videoController.syncVideos(videosRef.current)
+
       themeObserver = new MutationObserver(() => {
         sceneRef.current?.setColors(resolveCanvasPalette(getIsDark()))
       })
@@ -182,11 +243,13 @@ export function PixiCanvas() {
       themeObserver?.disconnect()
       resizeObserver?.disconnect()
       controllerRef.current?.detach()
+      videoControllerRef.current?.destroy()
       sceneRef.current?.destroy()
       appRef.current?.destroy({ removeView: true }, { children: true })
       appRef.current = null
       sceneRef.current = null
       controllerRef.current = null
+      videoControllerRef.current = null
     }
     // Mount once. Live values are read through refs above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -211,6 +274,14 @@ export function PixiCanvas() {
   useEffect(() => {
     controllerRef.current?.setPreviewMode(isPreviewMode)
   }, [isPreviewMode])
+
+  useEffect(() => {
+    videoControllerRef.current?.syncVideos(videos)
+  }, [videos])
+
+  useEffect(() => {
+    videoControllerRef.current?.setPrimaryAudio(primaryAudioVideoId)
+  }, [primaryAudioVideoId])
 
   return (
     <>
