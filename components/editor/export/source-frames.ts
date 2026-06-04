@@ -64,10 +64,10 @@ export class SourceFrameProvider {
         throw new Error(`No video track in source: ${opts.url}`)
       }
       const sink = new CanvasSink(track, {
-        // Decode at native intrinsic dimensions; Konva then handles the
-        // cover-crop + artboard scale via its sceneFunc, so the export's
-        // pixels match the editor preview exactly. Could be moved to render
-        // size with `fit: 'cover'` later if memory pressure shows up.
+        // Decode at native intrinsic dimensions; PixiJS then handles the
+        // cover-crop (texture frame) + artboard scale, so the export's pixels
+        // match the editor preview exactly. Could be moved to render size with
+        // `fit: 'cover'` later if memory pressure shows up.
         width: opts.intrinsicWidth,
         height: opts.intrinsicHeight,
         // `fit` is required by Mediabunny when both width and height are

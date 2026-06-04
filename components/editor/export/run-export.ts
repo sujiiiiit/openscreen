@@ -18,17 +18,7 @@ import type {
   ProjectTimelineClip,
 } from "@/types/api"
 import { exportResolutionPixels } from "@/lib/editor-project/export-settings"
-import {
-  computeCursorBlur,
-  placeCursor,
-} from "@/components/editor/canvas/cursor-scene"
-import {
-  IDENTITY_ZOOM_CAMERA,
-  applyZoomCamera,
-  sampleZoomCameraAtTime,
-  zoomCamerasEqual,
-} from "@/components/editor/canvas/zoom-scene"
-import { createRadialZoomBlurRenderer } from "@/lib/motion-blur/radial-zoom-blur"
+import { sampleZoomCameraAtTime } from "@/components/editor/canvas/zoom-scene"
 import { formatToVideoCodec } from "./codec-probe"
 import { buildExportStage } from "./build-stage"
 import { streamTimelineAudio } from "./decode-audio"
@@ -82,8 +72,8 @@ const AUDIO_OUTPUT_BITRATE = 128_000
 const AUDIO_PROBE_SAMPLE_RATE = 48_000
 
 /**
- * End-to-end export driver. Renders every frame of the timeline through a
- * vanilla-Konva offscreen stage, then hands each frame to Mediabunny's
+ * End-to-end export driver. Renders every frame of the timeline through an
+ * offscreen PixiJS stage (`app.canvas`), then hands each frame to Mediabunny's
  * WebCodecs-backed encoder. Audio is streamed in a separate windowed
  * mixer (`streamTimelineAudio`) so peak RAM stays bounded regardless of
  * source-file size or timeline duration.
@@ -151,13 +141,9 @@ export async function runExport(
     outputSize,
     container,
   })
-  const zoomBlurRenderer =
-    state.zoomClips && state.zoomClips.length > 0
-      ? createRadialZoomBlurRenderer()
-      : null
 
-  // From here on, `handles` owns a Konva stage + per-clip <video> elements;
-  // every exit path (success, abort, error) must call handles.dispose().
+  // From here on, `handles` owns an offscreen Pixi application; every exit path
+  // (success, abort, error) must call handles.dispose().
   try {
     throwIfAborted(signal)
 
@@ -167,20 +153,10 @@ export async function runExport(
       target: new BufferTarget(),
     })
 
-    const composite = makeCompositeCanvas(outputSize)
-    const compositeCtx = composite.getContext("2d", { alpha: false })
-    if (!compositeCtx) {
-      throw new Error("Failed to acquire 2D context for export composite.")
-    }
-    // The layer→composite blit is 1:1 (both are outputSize pixels because
-    // we pinned layer pixelRatio to 1), so smoothing should never actually
-    // run — but set it to "high" defensively so a future change that
-    // introduces any scaling doesn't silently downgrade to bilinear.
-    compositeCtx.imageSmoothingEnabled = true
-    compositeCtx.imageSmoothingQuality = "high"
-
+    // PixiJS composites the whole scene into one canvas (`app.canvas`), so we
+    // hand that straight to Mediabunny — no per-layer composite blit needed.
     const videoCodec = formatToVideoCodec(settings.format)
-    const videoSource = new CanvasSource(composite, {
+    const videoSource = new CanvasSource(handles.app.canvas, {
       codec: videoCodec,
       // Custom screen-recording-tuned bitrate ladder. Mediabunny's QUALITY_*
       // constants resolve to bitrates calibrated for *general* video
@@ -301,12 +277,6 @@ export async function runExport(
       await output.start()
       onStage?.("encoding")
 
-      // Draw the background layer once: it doesn't change across frames, so
-      // re-running `stage.draw()` every iteration wastes ~⅓ of per-frame
-      // GPU/CPU work. Konva layer canvases are sticky between draws.
-      handles.backgroundLayer.draw()
-      let lastZoomCamera = IDENTITY_ZOOM_CAMERA
-
       let lastProgressAt = 0
       const startWall = performance.now()
       const frameDuration = 1 / settings.fps
@@ -326,24 +296,15 @@ export async function runExport(
 
         const t = frame * frameDuration
         const active = plan.framePlan[frame]
-        const zoomCamera = sampleZoomCameraAtTime(
-          state.zoomClips ?? [],
-          state.artboard,
-          t
+        handles.applyZoomCamera(
+          sampleZoomCameraAtTime(state.zoomClips ?? [], state.artboard, t)
         )
-        const zoomCameraChanged = !zoomCamerasEqual(lastZoomCamera, zoomCamera)
-        applyZoomCamera(handles.backgroundLayer, zoomCamera)
-        applyZoomCamera(handles.contentLayer, zoomCamera)
-        if (zoomCameraChanged) {
-          handles.backgroundLayer.draw()
-          lastZoomCamera = zoomCamera
-        }
 
         // Hide every node first so a clip that ended on the previous frame
-        // doesn't ghost a stale image into this one. The visible(true)
-        // below re-activates the ones that should render now.
+        // doesn't ghost a stale image into this one. setFrame() re-activates
+        // the ones that should render now.
         for (const node of handles.nodesByVideoId.values()) {
-          node.visible(false)
+          node.hide()
         }
 
         // Pull the next decoded canvas from each active source's iterator
@@ -357,118 +318,14 @@ export async function runExport(
             if (!canvas) return
             const node = handles.nodesByVideoId.get(entry.videoId)
             if (!node) return
-            node.image(canvas)
-            node.visible(true)
+            node.setFrame(canvas)
             decodedSourceIds.add(entry.videoId)
           })
         )
 
-        // Place the recorded cursor for this frame, using the screen clip's
-        // source time straight from the plan (so it tracks trims/splits and
-        // only shows while the screen clip is active). Same placement math as
-        // the live editor's CanvasCursorOverlay.
-        if (handles.cursor) {
-          const {
-            node,
-            track,
-            video,
-            referenceSize,
-            screenVideoId,
-            sizeMultiplier,
-            clickPressScale,
-            alwaysUsePointer,
-            cursorSetId,
-            motionBlur,
-            motionRotation,
-            motionRotationMode,
-            smoothingMode,
-            renderer,
-            images,
-          } = handles.cursor
-          const screenEntry = active.find(
-            (entry) => entry.videoId === screenVideoId
-          )
-          const placement = screenEntry
-            ? placeCursor(track, video, screenEntry.sourceTimeSec, {
-                sizeMultiplier,
-                clickPressScale,
-                cursorSet: cursorSetId,
-                alwaysUsePointer,
-                motionRotation,
-                motionRotationMode,
-                smoothingMode,
-                referenceSize,
-              })
-            : null
-          const image = placement ? images.get(placement.url) : undefined
-          if (placement && placement.onScreen && image && screenEntry) {
-            // Motion blur — same derivation + GPU/CPU renderer as the editor
-            // preview, injected via node.image(), so the exported smear matches
-            // frame-for-frame.
-            const blur = computeCursorBlur(
-              track,
-              video,
-              screenEntry.sourceTimeSec,
-              {
-                intensity: motionBlur,
-                sizeMultiplier,
-                clickPressScale,
-                cursorSet: cursorSetId,
-                alwaysUsePointer,
-                motionRotation,
-                motionRotationMode,
-                smoothingMode,
-                referenceSize,
-              }
-            )
-            if (blur) {
-              const { canvas, padding } = renderer.render(
-                image,
-                placement.width,
-                placement.height,
-                blur
-              )
-              node.image(canvas)
-              node.size({
-                width: placement.width + 2 * padding,
-                height: placement.height + 2 * padding,
-              })
-              node.offset({
-                x: placement.offsetX + padding,
-                y: placement.offsetY + padding,
-              })
-            } else {
-              node.image(image)
-              node.size({ width: placement.width, height: placement.height })
-              node.offset({ x: placement.offsetX, y: placement.offsetY })
-            }
-            node.position({ x: placement.x, y: placement.y })
-            node.rotation(placement.rotation)
-            node.visible(true)
-          } else {
-            node.visible(false)
-          }
-        }
-
-        // Only the content layer changes per frame; background redraws only
-        // when the manual zoom camera moves.
-        handles.contentLayer.draw()
-        redrawComposite(handles, compositeCtx)
-        if (zoomCamera.radialBlur > 0 && zoomBlurRenderer) {
-          const blurred = zoomBlurRenderer.render(
-            compositeCtx.canvas,
-            outputSize.width,
-            outputSize.height,
-            {
-              centerX: zoomCamera.radialBlurCenterX * outputSize.width,
-              centerY: zoomCamera.radialBlurCenterY * outputSize.height,
-              amount: zoomCamera.radialBlur,
-              ...zoomCamera.radialBlurSettings,
-            }
-          )
-          compositeCtx.clearRect(0, 0, outputSize.width, outputSize.height)
-          compositeCtx.drawImage(blurred, 0, 0)
-        }
+        // Phase 1 omits the cursor overlay + radial zoom blur (deferred). Render
+        // the whole scene into app.canvas (the export composite Mediabunny reads).
+        handles.app.render()
 
         await videoSource.add(t, frameDuration)
 
@@ -505,6 +362,11 @@ export async function runExport(
         )
       }
 
+      // No more video frames — close the source so the muxer can plan ahead
+      // (Mediabunny's recommended optimization when tracks finish at different
+      // times; the audio track is still being written below).
+      videoSource.close()
+
       if (audioSource) {
         onStage?.("muxing-audio")
         // OfflineAudioContext is just a host for `createBuffer` calls; we
@@ -539,6 +401,7 @@ export async function runExport(
           const silent = audioCtx.createBuffer(2, 1, AUDIO_PROBE_SAMPLE_RATE)
           await audioSource.add(silent)
         }
+        audioSource.close()
       }
 
       onStage?.("finalizing")
@@ -559,7 +422,6 @@ export async function runExport(
       }
     }
   } finally {
-    zoomBlurRenderer?.destroy()
     try {
       handles.dispose()
     } catch {
@@ -640,41 +502,6 @@ function computeTimelineDuration(clips: ProjectTimelineClip[]): number {
     if (clip.end > max) max = clip.end
   }
   return max
-}
-
-function makeCompositeCanvas(size: {
-  width: number
-  height: number
-}): HTMLCanvasElement {
-  // A stable HTMLCanvasElement we hand to Mediabunny's CanvasSource. The
-  // CanvasSource snapshots pixels every time we `await videoSource.add()`,
-  // so we redraw the composite from the Konva layer canvases right before
-  // each add call.
-  const canvas = document.createElement("canvas")
-  canvas.width = size.width
-  canvas.height = size.height
-  return canvas
-}
-
-function redrawComposite(
-  handles: Awaited<ReturnType<typeof buildExportStage>>,
-  ctx: CanvasRenderingContext2D
-): void {
-  ctx.clearRect(0, 0, handles.outputSize.width, handles.outputSize.height)
-  // Each Konva.Layer owns its own backing <canvas>. We blit them in z-order
-  // so the composite matches what Stage.draw() would have rendered.
-  const layers = handles.stage.getLayers()
-  for (const layer of layers) {
-    const layerCanvas = layer.getCanvas()._canvas
-    if (!layerCanvas) continue
-    ctx.drawImage(
-      layerCanvas,
-      0,
-      0,
-      handles.outputSize.width,
-      handles.outputSize.height
-    )
-  }
 }
 
 /**

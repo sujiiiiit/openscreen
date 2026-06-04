@@ -1329,7 +1329,7 @@ localStorage.setItem("openscreen:pixiCanvas", "1") // then reload
 localStorage.removeItem("openscreen:pixiCanvas")   // back to Konva
 ```
 
-Konva remains the **default**, and the **export pipeline is still Konva** (`build-stage.ts` / `run-export.ts` unchanged). The two paths coexist; nothing in the shipping app changed until the flag is flipped.
+Konva remains the **preview default** (the Pixi preview is opt-in behind the flag). The **export pipeline is now PixiJS** (`build-stage.ts` / `run-export.ts` rewritten) and runs unconditionally — so exports drop the deferred cursor + radial blur (an accepted phase-1 regression). The preview paths coexist behind the flag.
 
 ### Architecture (imperative controllers, no @pixi/react)
 
@@ -1371,10 +1371,13 @@ Viewport (pan/zoom/fit) · background fill / cover-cropped wallpaper (+blur) / g
 
 - **Cursor overlay** (`canvas-cursor-overlay.tsx`, `cursor-scene.ts`) and **radial zoom blur** (`lib/motion-blur/*`, `editor-workspace.tsx` overlay). The zoom-clip *camera* (scale/offset) IS migrated; only its radial-blur postprocess is deferred. The Konva preview still renders both. All cursor/blur settings, types, persistence, and UI are intact.
 
+### Export (migrated)
+
+`build-stage.ts` + `run-export.ts` render through an **offscreen Pixi `Application`** (WebGPU→WebGL2 with a 1px readback probe), reusing the shared `video-appearance.ts` + `background.ts` + `planExportFrames`. `app.canvas` feeds Mediabunny's `CanvasSource` directly — the per-layer composite blit is gone. Sources are `close()`d early so the muxer can plan ahead. The export now applies wallpaper **blur** too (the old Konva export skipped it) — a parity fix. **Phase-1 exports omit the cursor + radial blur** (deferred), matching the locked decision. The bitrate ladder, frame plan, audio, and abort handling are unchanged.
+
 ### Not yet done
 
-- **Export rewrite (M10):** offscreen Pixi `Application` → `app.render()` → `CanvasSource(app.canvas)` → Mediabunny, reusing `video-appearance.ts` + `background.ts` + `planExportFrames`; Mediabunny opts (single-canvas source, early `source.close()`, `keyFrameInterval`/`latencyMode` tunables); WebGPU→WebGL fallback-on-failure. Until then export stays on Konva.
-- **Cutover (M11):** delete the Konva canvas + `lib/editor-canvas-snap.ts` + `snap-guide-overlay.tsx` + `app/motion-blur-lab/page.tsx`, uninstall `konva` + `react-konva`, make Pixi the default.
+- **Cutover — blocked by the phase-2 deferral.** Fully removing Konva (delete the Konva canvas + `lib/editor-canvas-snap.ts` + `snap-guide-overlay.tsx`, uninstall `konva`/`react-konva`, flip the preview to Pixi) can't happen yet: the kept-for-phase-2 cursor overlay (`canvas-cursor-overlay.tsx`, react-konva) and radial blur still depend on Konva, and the preview stays Konva-default until it's visually verified. Cutover lands after phase 2 migrates cursor + blur to Pixi.
 - **Floating selection toolbar** in the Pixi path (group ops currently work via keyboard; the sidebar drives the primary node).
 
 ### Behavior decisions
