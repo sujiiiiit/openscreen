@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Application } from "pixi.js"
 
+import { getPreviewFillTransform } from "@/lib/editor-canvas"
 import { normalizeAngle } from "@/lib/node-transform"
 import { resolveCanvasPalette } from "@/lib/theme-colors"
 import type {
@@ -52,7 +53,7 @@ export function PixiCanvas() {
   const backdropRef = useRef<HTMLDivElement>(null)
 
   const { artboard } = useEditorCanvasArtboard()
-  const { viewTransform, isPreviewMode } = useEditorCanvasView()
+  const { viewTransform, viewportSize, isPreviewMode } = useEditorCanvasView()
   const {
     setViewTransform,
     setViewportSize,
@@ -311,6 +312,7 @@ export function PixiCanvas() {
         scene,
         getViewportSize: () => viewportSizeRef.current,
         onChange: (next) => setViewTransformRef.current(next),
+        keyboardEnabled: true,
       })
       controller.attach(host)
       controller.setPreviewMode(isPreviewMode)
@@ -457,8 +459,26 @@ export function PixiCanvas() {
   }, [artboard.background, artboard.grain])
 
   useEffect(() => {
-    controllerRef.current?.setPreviewMode(isPreviewMode)
+    const controller = controllerRef.current
+    if (!controller) return
+    controller.setPreviewMode(isPreviewMode)
+    // Restore the saved view on exit; the fill-fit is applied by the effect below.
+    if (!isPreviewMode) {
+      controller.setExternalViewTransform(viewTransformRef.current)
+    }
   }, [isPreviewMode])
+
+  // Fullscreen preview fills the viewport with a zero-padding contain-fit,
+  // recomputed on the fullscreen resize + any artboard change.
+  useEffect(() => {
+    if (!isPreviewMode) return
+    controllerRef.current?.setExternalViewTransform(
+      getPreviewFillTransform(viewportSize, {
+        width: artboard.width,
+        height: artboard.height,
+      })
+    )
+  }, [isPreviewMode, viewportSize, artboard.width, artboard.height])
 
   useEffect(() => {
     videoControllerRef.current?.syncVideos(videos)

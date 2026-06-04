@@ -384,7 +384,9 @@ static Napi::Value GetCapabilities(const Napi::CallbackInfo &info) {
   result.Set("microphoneFallback", false);
   result.Set("camera", true);
   result.Set("separateFiles", false);
-  result.Set("scRecordingOutput", true);
+  result.Set("scRecordingOutput",
+             IsMacOSAtLeast(15) ? Napi::Boolean::New(env, true)
+                                 : Napi::Boolean::New(env, false));
   return result;
 }
 

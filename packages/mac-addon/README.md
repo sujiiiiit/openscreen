@@ -2,7 +2,7 @@
 
 Native macOS Node.js addon for the openscreen Electron app. Wraps ScreenCaptureKit, AVFoundation, and the system permission/device APIs into a single N-API surface.
 
-The addon's recording pipeline is tuned to match the quality and color fidelity of the macOS native screen recorder and OBS Studio: native backing-pixel resolution, 10-bit RGB capture in Display P3, HEVC Main10 encoding with explicit P3-D65 / Rec.709 color tags.
+The current recording pipeline targets universally playable SDR output: native backing-pixel resolution by default, 8-bit BGRA ScreenCaptureKit buffers, sRGB capture conversion, BT.709 color tags, and VideoToolbox HEVC/H.264 encoding. The canonical, current docs are [`../../docs/screen-recording-addon.md`](../../docs/screen-recording-addon.md), [`../../docs/recorder-feature-map.md`](../../docs/recorder-feature-map.md), and [`../../docs/recorder-case-map.md`](../../docs/recorder-case-map.md).
 
 ---
 
@@ -35,7 +35,7 @@ The addon's recording pipeline is tuned to match the quality and color fidelity 
 
 | | Required |
 |---|---|
-| macOS | **15.0+** (Sequoia) — drops pre-15 fallbacks; relies on `SCStream.captureMicrophone` and 10-bit HEVC Main10 paths shipped in 15. |
+| macOS | **13.0+** deployment target. Screen, system audio, built-in/default camera, and input sidecars are intended to run on macOS 13; SCK microphone capture remains macOS 15+. |
 | Node.js | 24.x (built against the version that produced `index.js`). |
 | Xcode CLI tools | Latest stable. |
 | Frameworks linked | `ScreenCaptureKit`, `AVFoundation`, `VideoToolbox`, `CoreMedia`, `CoreVideo`, `CoreGraphics`, `IOSurface`, `AudioToolbox`, `AppKit`, `Foundation`, `Accelerate`. |
@@ -54,7 +54,7 @@ npx node-gyp build        # incremental
 Build settings live in [`binding.gyp`](binding.gyp):
 
 ```python
-"MACOSX_DEPLOYMENT_TARGET": "15.0",
+"MACOSX_DEPLOYMENT_TARGET": "13.0",
 "OTHER_CPLUSPLUSFLAGS": ["-std=c++17", "-stdlib=libc++", "-fobjc-arc"],
 ```
 
@@ -194,8 +194,8 @@ A preview can run alongside a recording — both will hold an `AVCaptureSession`
 │  5. SystemAudio.configureSCStreamConfig (capturesAudio etc.)  │  │
 │  6. Microphone.configureSCStreamConfig (captureMicrophone)    │  │
 │  7. ScreenTrack.prepareWriter                                 │  │
-│       → AVAssetWriter(.mov) + video input (HEVC Main10 +      │  │
-│         AVVideoColorPropertiesKey: P3-D65 / Rec.709 / Rec.709)│  │
+│       → AVAssetWriter(.mov/.mp4) + video input (HEVC/H.264 +  │  │
+│         AVVideoColorPropertiesKey: BT.709 / BT.709 / BT.709)  │  │
 │  8. ScreenTrack.addSystemAudioInput (AAC 48k stereo)          │  │
 │  9. ScreenTrack.addMicrophoneInput (AAC 48k stereo)           │  │
 │ 10. Camera.setupAVCaptureSession (separate file)              │  │
@@ -258,19 +258,17 @@ The configured values are surfaced under `outputs[source=screen]` in the manifes
 
 ### Color
 
-The single biggest quality lever. We mirror what OBS does in [mac-sck-video-capture.m](https://github.com/obsproject/obs-studio/blob/master/plugins/mac-capture/mac-sck-video-capture.m).
+The current pipeline is intentionally single-path SDR/BT.709 for broad playback compatibility.
 
 | Knob | Setting | Why |
 |---|---|---|
-| `SCStreamConfiguration.pixelFormat` | **`kCVPixelFormatType_ARGB2101010LEPacked`** (FourCC `l10r`) | 10 bits per RGB channel, 2 bits alpha, full-range, packed in 32 bits. **No chroma subsampling.** 4× the color information per pixel vs the 8-bit YUV 4:2:0 default. Same format OBS uses. |
-| `SCStreamConfiguration.colorSpaceName` | **Dynamic** — `kCGColorSpaceDisplayP3` on a P3-capable display (`[NSScreen canRepresentDisplayGamut:NSDisplayGamutP3]`), otherwise `kCGColorSpaceSRGB`. | Match SCKit's capture space to what the target display actually is. P3 panels (every Apple Silicon laptop, modern external Apple displays) get full wide-gamut capture; sRGB-only externals get sRGB to avoid mis-tagged saturation. |
-| `AVVideoColorPropertiesKey.AVVideoColorPrimariesKey` | **Dynamic — paired with the capture space.** `AVVideoColorPrimaries_P3_D65` on P3 displays, `AVVideoColorPrimaries_ITU_R_709_2` on sRGB displays. | The file's primaries tag must match the gamut SCKit captured into; otherwise players misinterpret the YCbCr values. ffprobe surfaces P3-D65 as `smpte432`. |
-| `AVVideoColorPropertiesKey.AVVideoTransferFunctionKey` | `AVVideoTransferFunction_ITU_R_709_2` | sRGB-curve transfer (TransferCharacteristics = 1). Same for both gamuts in SDR. |
-| `AVVideoColorPropertiesKey.AVVideoYCbCrMatrixKey` | `AVVideoYCbCrMatrix_ITU_R_709_2` | Rec.709 matrix for the RGB→YCbCr conversion AVFoundation does internally. Same for both gamuts in SDR. |
-| `SCStreamConfiguration.captureDynamicRange` | `SCCaptureDynamicRangeSDR` | Explicit SDR — without it, on a system with an HDR-capable display in the chain SCKit may pick HDR pixel formats that conflict with our sRGB-transfer tagging. |
+| `SCStreamConfiguration.pixelFormat` | `kCVPixelFormatType_32BGRA` | 8-bit BGRA is the stable SDR path and avoids player/tool issues around 10-bit SDR HEVC. |
+| `SCStreamConfiguration.colorSpaceName` | `kCGColorSpaceSRGB` | Lets ScreenCaptureKit do the capture-side conversion into sRGB before the writer receives the sample buffer. |
+| `AVVideoColorPropertiesKey.AVVideoColorPrimariesKey` | `AVVideoColorPrimaries_ITU_R_709_2` | Universal SDR primaries. |
+| `AVVideoColorPropertiesKey.AVVideoTransferFunctionKey` | `AVVideoTransferFunction_ITU_R_709_2` | Universal SDR transfer tag. |
+| `AVVideoColorPropertiesKey.AVVideoYCbCrMatrixKey` | `AVVideoYCbCrMatrix_ITU_R_709_2` | Universal SDR matrix tag. |
+| `SCStreamConfiguration.captureDynamicRange` | `SCCaptureDynamicRangeSDR` on macOS 15+ | Explicit SDR on newer OSes; macOS 13/14 are implicitly SDR for this path. |
 | `SCStreamConfiguration.backgroundColor` | `kCGColorBlack` | Cosmetic. Black on letterbox is safer than the default. |
-
-**Why these specific tags?** Display-P3 video files on macOS are conventionally tagged `primaries=smpte432 / transfer=bt709 / matrix=bt709`. QuickTime, Safari, Chrome, and Quick Look all honor this exact triplet and render the wide gamut correctly. Asymmetric tagging (e.g. primaries=P3 but transfer=P3 too) breaks at least one major player.
 
 ### Codec
 
@@ -278,11 +276,11 @@ The single biggest quality lever. We mirror what OBS does in [mac-sck-video-capt
 |---|---|---|
 | `AVVideoCodecKey` (Apple Silicon) | `AVVideoCodecTypeHEVC` | HW-accelerated on M-series. Same codec the native macOS recorder uses. |
 | `AVVideoCodecKey` (Intel) | `AVVideoCodecTypeH264` | HW HEVC encoder availability is patchy on older Intel Macs. |
-| `AVVideoProfileLevelKey` (HEVC) | `kVTProfileLevel_HEVC_Main10_AutoLevel` (from `<VideoToolbox/VTCompressionProperties.h>`) | **Main10 = 10-bit encode**. Required to actually carry the 10-bit precision we capture in. Without this, the encoder downconverts to 8-bit and the wide-gamut capture is wasted. |
-| `AVVideoProfileLevelKey` (H.264) | `AVVideoProfileLevelH264HighAutoLevel` | Standard high-quality H.264 profile. |
-| `AVVideoAverageBitRateKey` | `width × height × fps × 0.1` bits/s, floor 8 Mbps | VideoToolbox's adaptive default targets general video (~5–10 Mbps even at 4K) and looks soft on screen content. The native macOS recorder runs higher. Our formula gives ~36 Mbps for 3024×1964 @ 60fps, ~12 Mbps for 1080p @ 60fps — in line with QuickTime's native screen captures. |
-| `AVVideoMaxKeyFrameIntervalKey` | `fps` (1 keyframe / second) | Screen content tends to be static for long stretches. Refreshing the I-frame every second keeps fine detail from drifting across long P-frame chains. |
-| `AVVideoAllowFrameReorderingKey` | `NO` | Disables B-frames. They reference both past and future frames; on text/UI content the bidirectional averaging produces a faint perceptible smudging. P-only streams are slightly larger but visibly sharper. |
+| `AVVideoProfileLevelKey` (HEVC) | unset | VideoToolbox selects the default Main 8-bit profile for this SDR path. |
+| `AVVideoProfileLevelKey` (H.264) | default High AutoLevel | Standard high-quality H.264 profile. |
+| `AVVideoAverageBitRateKey` | `width × height × fps × bpp` | bpp comes from `videoQuality`: low/medium/high/xhigh/max, with HEVC lower than H.264 for similar perceived quality. |
+| `AVVideoMaxKeyFrameIntervalKey` | `fps × 2` | Roughly 2-second keyframe cadence. |
+| `AVVideoAllowFrameReorderingKey` | VideoToolbox default | B-frames are enabled by default. |
 | `AVVideoExpectedSourceFrameRateKey` | `_options.fps` (30 or 60) | Hint only; helps the encoder pre-allocate rate-control budget. |
 | Architecture detection | `sysctlbyname("hw.optional.arm64", …)` at runtime | One binary covers both arches. |
 
@@ -301,9 +299,9 @@ The screen `.mov` file is **muxed** — up to three streams in one container:
 
 | Input | Codec | Sample rate | Channels | Bitrate | Source |
 |---|---|---|---|---|---|
-| Video | HEVC Main10 / H.264 High | – | – | adaptive (VTB) | SCKit (`l10r` RGB) |
-| System audio | AAC LC | 48 000 Hz | 2 (stereo, explicit `AVChannelLayoutKey`) | 192 kbps | SCKit `SCStreamOutputTypeAudio` |
-| Microphone | AAC LC | 48 000 Hz | 2 | 192 kbps | SCKit `SCStreamOutputTypeMicrophone` (macOS 15+) |
+| Video | HEVC Main 8-bit / H.264 High | - | - | bpp preset | SCKit BGRA, sRGB capture conversion |
+| System audio | AAC LC | 48 000 Hz | 2 | 256 kbps | SCKit `SCStreamOutputTypeAudio` |
+| Microphone | AAC LC | 48 000 Hz | 2 | 256 kbps | SCKit `SCStreamOutputTypeMicrophone` (macOS 15+) |
 
 System audio config (`SystemAudioTrack.configureSCStreamConfig:`):
 - `capturesAudio = YES` when enabled
@@ -358,13 +356,13 @@ The Electron main process relays frames to the camera window over the `cameraPre
 {
   platform: 'darwin',
   macosVersion: string,         // e.g. "15.4.0"
-  screenCaptureKit: true,       // always — we require macOS 15+
+  screenCaptureKit: true,       // deployment target is macOS 13+
   systemAudio: true,
-  screenCaptureKitMicrophone: true,
+  screenCaptureKitMicrophone: boolean, // true only on macOS 15+
   microphoneFallback: false,    // AVCaptureSession mic path removed
   camera: true,
   separateFiles: false,         // audio is muxed into screen.mov
-  scRecordingOutput: true,      // SCRecordingOutput is available, though we use AVAssetWriter instead
+  scRecordingOutput: boolean,   // true only on macOS 15+; recording uses AVAssetWriter instead
 }
 ```
 
@@ -375,7 +373,7 @@ The Electron main process relays frames to the camera window over the `cameraPre
 A single recording produces, under `outputDir/`:
 
 ```
-screen.mov         HEVC Main10 + AAC (sysaudio) + AAC (mic) muxed
+screen.mov/.mp4    HEVC/H.264 + AAC (sysaudio) + AAC (mic on macOS 15+) muxed
 camera.mov         only when recordCamera = true; H.264 / 1080p AVCaptureSession output
 recording.json     manifest (below)
 ```
@@ -404,20 +402,20 @@ recording.json     manifest (below)
       "path":   "/path/screen.mov",
       "started":  true,
       "finished": true,
-      "codec":          "hevc-main10",
-      "pixelFormat":    "ARGB2101010LEPacked",
-      "colorPrimaries": "P3_D65",
+      "codec":          "hevc",
+      "pixelFormat":    "BGRA",
+      "colorPrimaries": "ITU_R_709_2",
       "colorTransfer":  "ITU_R_709_2",
       "colorMatrix":    "ITU_R_709_2",
-      "colorSpace":     "DisplayP3",
-      "gamut":          "P3",
+      "colorSpace":     "sRGB",
+      "gamut":          "Rec.709",
       "width":  3024,
       "height": 1964,
       "scaleFactor": 2.0,
       "pixelSizeSource": "CGDisplayModeGetPixelWidth",
       "averageBitRate": 35640960,
       "maxKeyFrameInterval": 60,
-      "allowFrameReordering": false,
+      "allowFrameReordering": true,
       "videoSamples": 1804
     },
     { "source": "camera", "path": "…", "started": true, "finished": true, … },
@@ -441,15 +439,15 @@ recording.json     manifest (below)
 Every `streamConfigurationForContent:` call logs one summary line to the console (visible when Electron runs from a terminal, or via Console.app filtered to `openscreen.recorder`):
 
 ```
-[openscreen.recorder] screen config: 3024x1964 @ 60fps  codec=hevc-main10  \
-  pixelFormat=ARGB2101010LEPacked(l10r)  colorSpace=DisplayP3  \
-  primaries=AVVideoColorPrimaries_P3_D65 (gamut=P3)  \
+[openscreen.recorder] screen config: 3024x1964 @ 60fps  codec=hevc  \
+  pixelFormat=BGRA  colorSpace=sRGB  \
+  primaries=AVVideoColorPrimaries_ITU_R_709_2 (gamut=Rec.709)  \
   bitrate=35.6 Mbps  keyframeInterval=60f  \
   scale=2.00x  pixelSizeSource=CGDisplayModeGetPixelWidth  scalesToFit=NO  queueDepth=8  \
-  allowFrameReordering=NO
+  allowFrameReordering=YES
 ```
 
-On an sRGB-only display the line would instead read `colorSpace=sRGB  primaries=AVVideoColorPrimaries_ITU_R_709_2 (gamut=Rec.709)`.
+The screen path is intentionally single-path SDR/BT.709, so P3 displays still log `colorSpace=sRGB` and `gamut=Rec.709`.
 
 The same numbers are in the manifest under `outputs[source=screen]`.
 
@@ -462,7 +460,7 @@ Recording events (subscribe with `addon.onRecordingEvent`):
 | `stopped` | All writers finalized. |
 | `cancelled` | `cancelRecording` invoked — files removed. |
 | `error` | Stream or writer reported a non-recoverable error. |
-| `backpressure` | (Reserved — not currently emitted for the screen path; was used by the old `MediaFileWriter` bounded-inflight design.) |
+| `backpressure` | Emitted once per writer/source when samples are dropped to bound memory. |
 
 ---
 
@@ -479,17 +477,17 @@ Expected on Apple Silicon:
 
 ```
 codec_name=hevc
-profile=Main 10
+profile=Main
 width=3024            # = your display's CGDisplayModeGetPixelWidth
 height=1964
-pix_fmt=yuv420p10le   # 10-bit — proves Main10 actually engaged
+pix_fmt=yuv420p       # 8-bit SDR encode
 color_range=tv
 color_space=bt709     # YCbCr matrix
 color_transfer=bt709
-color_primaries=smpte432   # P3-D65 primaries
+color_primaries=bt709
 ```
 
-`smpte432` is the ITU code for "Display P3 D65 primaries" (ISO/IEC 23001-8 ColourPrimaries value 12). Some ffprobe builds surface it as `display-p3` or `bt2020-12`.
+The screen path is intentionally BT.709-only, even on P3 displays.
 
 ### Display info (so you know what to compare against)
 
@@ -514,11 +512,10 @@ You should see one video stream plus 0–2 audio streams (sysaudio + mic, depend
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Recording resolution is half of the display's pixel count | Stale build, or running on macOS < 15 (extremely unlikely now) | `npx node-gyp rebuild`, restart Electron (native modules load once at process start). |
+| Recording resolution is half of the display's pixel count | Stale build or fallback dimension source | `npx node-gyp rebuild`, restart Electron (native modules load once at process start). |
 | Recording looks blurry but resolution is correct | Player is downscaling (e.g. QuickTime in a small window with "Fit Width") | Verify with `ffprobe`. If the file is at the right dimensions, it's a player issue. |
-| Colors look desaturated in VLC / `ffplay` | Those players are not color-managed and ignore P3 primaries tags. | Verify in QuickTime or Safari — both honor the P3 tags. |
-| Colors look desaturated in **QuickTime** | Pipeline isn't producing 10-bit output. | Check `ffprobe` — `pix_fmt` should be `yuv420p10le` and `profile=Main 10`. If you see `yuv420p` / `Main`, VideoToolbox silently fell back to 8-bit. |
-| `ffprobe` reports `profile=Main` (8-bit) instead of `Main 10` | Older M1 chips, certain virtualised macOS environments, or an SDK quirk. | The fallback is acceptable but loses precision. File an issue with the chip model and macOS version. |
+| Colors look desaturated in QuickTime | Capture-side sRGB conversion or BT.709 tags are missing in the running build. | Check `ffprobe`; expected color fields are all `bt709`. |
+| `ffprobe` reports `profile=Main 10` or P3 primaries | Stale native build or old sample file. | Rebuild the addon and record a fresh sample. |
 | `permissions: screen=denied` after granting | The Electron binary path changed (development rebuild can do this). | Re-grant in System Settings → Privacy & Security → Screen Recording. |
 | Camera preview lags | JS callback is slow; `Napi::ThreadSafeFunction` queue (size 4) drops new frames. | Use `requestAnimationFrame` in the renderer; keep the `putImageData` work on the main thread minimal. |
 | Recording silently produces zero-byte file | `startWriting` failed before first sample. Check the `error` recorder event and the `error` field on `outputs[source=screen]`. | |
@@ -529,15 +526,15 @@ You should see one video stream plus 0–2 audio streams (sysaudio + mic, depend
 
 A short log of why the pipeline looks the way it does, so future-you doesn't re-litigate it:
 
-1. **We use `AVAssetWriter`, not `SCRecordingOutput`.** `SCRecordingOutput` is a convenience wrapper that doesn't expose `AVVideoColorPropertiesKey`. With Display P3 capture it writes inconsistent color tags (P3 primaries but Rec.709 matrix with no proper transfer), which causes opposite-direction shifts in P3-aware vs sRGB-only players. `AVAssetWriter` lets us write the canonical Display-P3 triplet explicitly — and lets us *match* the file's primaries tag to the gamut we asked SCKit to capture into (see #9).
-2. **We use 10-bit packed RGB (`l10r`) for the SCKit pixel format, not 10-bit YCbCr.** That's what OBS uses ([mac-sck-video-capture.m:213](https://github.com/obsproject/obs-studio/blob/master/plugins/mac-capture/mac-sck-video-capture.m#L213)). The RGB→YCbCr conversion happens inside AVFoundation's HEVC Main10 encoder; precision is preserved end-to-end.
-3. **Audio is muxed into the screen file.** A single `screen.mov` with video + sysaudio + mic is what downstream consumers want. Camera stays separate because it's not an SCKit source.
-4. **Bitrate is set explicitly, tuned for screen content.** We initially left `AVVideoAverageBitRateKey` unset on the theory that VideoToolbox's adaptive default would Just Work — and for general video it does. For *screen* content (text, fine UI edges) the default targets too low a bitrate and the output looks visibly soft even at native resolution + 10-bit + P3. We now set `bitrate = width × height × fps × 0.1` bits/s (floor 8 Mbps), which lines up with what QuickTime's native screen recorder writes. Paired with `AVVideoMaxKeyFrameIntervalKey = fps` (1-second keyframes) and `AVVideoAllowFrameReorderingKey = NO` (no B-frames, no inter-frame averaging blur).
-5. **Audio session start is anchored to the first video frame.** AVAssetWriter requires a single `startSessionAtSourceTime:` and we need the file to begin with a displayable frame. The handful of audio samples that arrive earlier are dropped (counted in the manifest).
-6. **`scalesToFit = NO`.** With macOS 14+'s default of `YES`, any rounding error between SCKit's source surface and our configured `width × height` causes silent resampling. `NO` makes those mismatches surface as letterboxing instead of blur, which is a louder failure mode.
-7. **Even-dimension rounding.** HW HEVC encoders silently rescale odd dimensions; we lose at most one row/column of pixels and avoid that rescaling.
-8. **macOS 15 is the floor.** That gives us SCStream microphone capture, eliminates the pre-15 `AVCaptureSession` mic fallback, and lets us assume HEVC Main10 hardware encoding everywhere we'd ship.
-9. **Gamut detection is dynamic, but matched at both ends.** We branch *both* `SCStreamConfiguration.colorSpaceName` and the file's `AVVideoColorPrimariesKey` on `[NSScreen canRepresentDisplayGamut:NSDisplayGamutP3]`. Earlier attempts only switched the SCKit side — that produced files where SCKit captured P3 but the tags claimed Rec.709 (or vice versa), and players disagreed on how to render them. Keeping the capture space and the file's primaries tag in lock-step is what makes the output render consistently across QuickTime, Safari, Chrome, ffplay, and VLC.
+1. **We use `AVAssetWriter`, not `SCRecordingOutput`.** AVAssetWriter gives us explicit codec, bitrate, color-tag, and manifest control.
+2. **We use BGRA 8-bit + BT.709 SDR.** A previous 10-bit/P3 path produced impressive files but weaker cross-player/tool compatibility. The current goal is predictable playback everywhere.
+3. **Audio is muxed into the screen file.** A single `screen.mov` / `screen.mp4` with video + system audio + macOS 15+ mic is what downstream consumers want. Camera stays separate because it is not an SCKit source.
+4. **Bitrate is set explicitly, tuned for screen content.** The current formula is `width × height × fps × bpp`, where bpp comes from the selected quality tier and codec.
+5. **Audio session start is anchored to the first video frame.** AVAssetWriter requires a single `startSessionAtSourceTime:` and we need the file to begin with a displayable frame. The handful of audio samples that arrive earlier are dropped and counted in the manifest.
+6. **`scalesToFit = NO`.** With macOS 14+'s default of `YES`, any rounding error between SCKit's source surface and our configured `width × height` causes silent resampling. `NO` makes those mismatches surface as letterboxing instead of blur.
+7. **Even-dimension rounding.** HW HEVC/H.264 encoders silently rescale odd dimensions; we lose at most one row/column of pixels and avoid that rescaling.
+8. **macOS 13 is the deployment target.** 14+/15+ symbols are availability-gated. Microphone recording remains a macOS 15+ capability until an AVFoundation fallback is added.
+9. **Input sidecars are independent from baked pixels.** `includeCursor` controls whether SCK bakes the cursor into the video; mouse/cursor metadata is still recorded so the editor can render a styled cursor later.
 
 ---
 
@@ -547,6 +544,6 @@ A short log of why the pipeline looks the way it does, so future-you doesn't re-
 - WWDC 2022 — [Take ScreenCaptureKit to the next level](https://developer.apple.com/videos/play/wwdc2022/10155/)
 - WWDC 2023 — [What's new in ScreenCaptureKit](https://developer.apple.com/videos/play/wwdc2023/10136/)
 - WWDC 2024 — [Capture HDR content with ScreenCaptureKit](https://developer.apple.com/videos/play/wwdc2024/10088/)
-- OBS Studio SCKit plugin — [`mac-sck-video-capture.m`](https://github.com/obsproject/obs-studio/blob/master/plugins/mac-capture/mac-sck-video-capture.m) (reference for the `l10r` + Display P3 + queueDepth 8 recipe)
+- Apple Developer Documentation — [ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit), [SCStreamConfiguration](https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration)
 - [Nonstrict — Recording to disk with ScreenCaptureKit](https://nonstrict.eu/blog/2023/recording-to-disk-with-screencapturekit/) (Retina-scaling gotcha, AVOutputSettingsAssistant pattern)
 - `<VideoToolbox/VTCompressionProperties.h>` — the canonical list of HEVC profile/level constants usable as `AVVideoProfileLevelKey`.

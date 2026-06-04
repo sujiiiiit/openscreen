@@ -1,5 +1,3 @@
-import type Konva from "konva"
-
 import {
   ZOOM_BLUR_MOTION_GAIN,
   ZOOM_RADIAL_BLUR_SHADER,
@@ -250,17 +248,6 @@ export function sampleZoomCameraAtTime(
     radialBlurSettings: ZOOM_RADIAL_BLUR_SHADER,
     clipId: clip.id,
   }
-}
-
-export function applyZoomCamera(node: Konva.Node | null, camera: ZoomCamera) {
-  if (!node) return
-  if (camera.scale <= 1 + ZOOM_IDENTITY_EPSILON) {
-    node.scale({ x: 1, y: 1 })
-    node.position({ x: 0, y: 0 })
-    return
-  }
-  node.scale({ x: camera.scale, y: camera.scale })
-  node.position({ x: camera.offsetX, y: camera.offsetY })
 }
 
 export function zoomCamerasEqual(a: ZoomCamera, b: ZoomCamera) {

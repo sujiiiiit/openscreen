@@ -135,7 +135,7 @@ static NSInteger EvenDimensionFromDouble(double value) {
   // call (writer setup, manifest). Coercion rules live in -resolveOptions
   // and mirror docs/screen-recording-addon.md.
   NSString *_resolvedCodecKey;        // "hevc" | "h264"
-  NSString *_resolvedQuality;          // "low" | "medium" | "high"
+  NSString *_resolvedQuality;          // "low" | "medium" | "high" | "xhigh" | "max"
   NSString *_resolvedContainer;        // "mov" | "mp4"
   NSString *_resolvedResolutionMode;   // "native" | "logical"
   int _resolvedFrameRate;              // 0 (native) | 24 | 30 | 60
