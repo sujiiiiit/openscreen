@@ -1320,16 +1320,9 @@ Known unrelated project issue:
 
 - Full `pnpm lint` has failed on pre-existing unrelated files outside this canvas work. Use targeted lint for changed files unless the broader lint cleanup is part of the task.
 
-## PixiJS Migration (Phase 1, in progress)
+## PixiJS canvas
 
-The editor canvas is being migrated from Konva/react-konva to **PixiJS v8**. The Pixi canvas lives in `components/editor/canvas/pixi/` and mounts **in place of** the Konva `<Stage>` only when the runtime flag is on:
-
-```js
-localStorage.setItem("openscreen:pixiCanvas", "1") // then reload
-localStorage.removeItem("openscreen:pixiCanvas")   // back to Konva
-```
-
-Konva remains the **preview default** (the Pixi preview is opt-in behind the flag). The **export pipeline is now PixiJS** (`build-stage.ts` / `run-export.ts` rewritten) and runs unconditionally — so exports drop the deferred cursor + radial blur (an accepted phase-1 regression). The preview paths coexist behind the flag.
+The editor canvas — **preview and export** — is **PixiJS v8** (`components/editor/canvas/pixi/`). The migration from Konva/react-konva is complete; both packages were uninstalled and there is no Konva fallback. `editor-workspace.tsx` is a thin shell that mounts `<PixiCanvas>` and owns only the outer chrome + the keyboard not already handled by the controllers (undo/redo, frame-step, zoom-clip delete, preview Space→play) + preview enter/exit (fullscreen + play).
 
 ### Architecture (imperative controllers, no @pixi/react)
 
@@ -1351,8 +1344,9 @@ app.stage
 
 ### Files (`components/editor/canvas/pixi/`)
 
-- `config.ts` — the `openscreen:pixiCanvas` flag (removed at cutover).
-- `pixi-canvas.tsx` — `Application` lifecycle + provider bridge; owns the host, the white backdrop div, the rotation readout, and the canvas-side multi-select state.
+- `pixi-canvas.tsx` — `Application` lifecycle + provider bridge; owns the host, the white backdrop div, the rotation readout, the canvas-side multi-select state, and the preview fill-fit.
+- `cursor-sprite.ts` / `cursor-controller.ts` — the cursor as one Sprite + a `MotionBlurFilter`; `CursorSprite` is shared by the preview controller and the export. `computeCursorBlur` → filter velocity/kernelSize/offset (zero velocity = sharp).
+- `zoom-blur.ts` — maps a `ZoomCamera`'s radial-blur amount/center/settings onto a `ZoomBlurFilter` (preview + export).
 - `scene.ts` — the scene graph, on-demand render/playback loop, background/grain/grid, per-node video sprites (cover-crop via a dynamic `Texture.frame`), appearance, zoom camera, and the screen-space selection/hover/marquee overlays + handles.
 - `viewport-controller.ts` — wheel/pinch/drag zoom + pan, provider-synced view transform (`setExternalViewTransform` syncs without a feedback loop).
 - `transform-controller.ts` — selection + group move/resize/rotate + marquee + keyboard (nudge/delete/duplicate/lock), ported from the reference; hit-tests via the pure `lib/node-transform.ts`.
@@ -1376,24 +1370,18 @@ Both deferred effects now use **native `pixi-filters`** (the custom WebGL render
 
 Pure derivation math (`computeCursorBlur`, `sampleZoomCameraAtTime` + `radialBlurSettings`) is unchanged.
 
-### Not yet done — the Konva cutover
+### Cutover (done)
 
-The Pixi path is now **feature-complete** (editor + export + cursor + radial blur). The remaining step is the **cutover**, which is bundled because each piece is only safe once Konva is gone (the deletions below are still live on the Konva preview path):
-- Flip the Pixi preview to default (remove the `openscreen:pixiCanvas` flag).
-- Delete the Konva canvas (`editor-workspace` Konva subtree, `canvas-video-node`, `selected-video-transformer`, `artboard-*`, `canvas-cursor-overlay`, `video-scene-draw`, `snap-guide-overlay`), `lib/editor-canvas-snap.ts`, the custom `lib/motion-blur/*` renderers, and the `/motion-blur-lab` route.
-- Remove the `cursorMotionBlurBackend` setting entirely (field + UI + a `project-schema` migration), since the GPU filter has no backend.
-- Uninstall `konva` + `react-konva`.
-
-This is the one **irreversible** step (it changes the shipping default and removes the Konva fallback), so it should land **after a visual pass** confirms the Pixi preview + an export look right.
+Konva is fully removed: `editor-workspace.tsx` is a thin Pixi shell; the Konva canvas + transformer + cursor overlay + snap-guide overlay + `artboard-*` components, `lib/editor-canvas-snap.ts`, the custom `lib/motion-blur/*` renderers (the cursor/zoom blurs are now native pixi-filters), and the `/motion-blur-lab` route are deleted; the `openscreen:pixiCanvas` flag and the `cursorMotionBlurBackend` setting are gone (removing an optional schema field needs no migration — old `project.json` files still validate and drop the unused key on next save); and `konva` + `react-konva` are uninstalled. Canvas snapping is gone (only Shift→45° rotation remains; timeline snapping untouched).
 
 ### Export (migrated)
 
-`build-stage.ts` + `run-export.ts` render through an **offscreen Pixi `Application`** (WebGPU→WebGL2 with a 1px readback probe), reusing the shared `video-appearance.ts` + `background.ts` + `planExportFrames`. `app.canvas` feeds Mediabunny's `CanvasSource` directly — the per-layer composite blit is gone. Sources are `close()`d early so the muxer can plan ahead. The export now applies wallpaper **blur** too (the old Konva export skipped it) — a parity fix. **Phase-1 exports omit the cursor + radial blur** (deferred), matching the locked decision. The bitrate ladder, frame plan, audio, and abort handling are unchanged.
+`build-stage.ts` + `run-export.ts` render through an **offscreen Pixi `Application`** (WebGPU→WebGL2 with a 1px readback probe), reusing the shared `video-appearance.ts` + `background.ts` + `planExportFrames`. `app.canvas` feeds Mediabunny's `CanvasSource` directly — the per-layer composite blit is gone. Sources are `close()`d early so the muxer can plan ahead. The export reuses the shared `cursor-sprite.ts` + `zoom-blur.ts`, so it renders the **cursor** and **radial zoom blur** in parity with the preview, and now applies wallpaper **blur** too (the old Konva export skipped it). The bitrate ladder, frame plan, audio, and abort handling are unchanged.
 
-### Not yet done
+### Known limitations / follow-ups
 
-- **Cutover — blocked by the phase-2 deferral.** Fully removing Konva (delete the Konva canvas + `lib/editor-canvas-snap.ts` + `snap-guide-overlay.tsx`, uninstall `konva`/`react-konva`, flip the preview to Pixi) can't happen yet: the kept-for-phase-2 cursor overlay (`canvas-cursor-overlay.tsx`, react-konva) and radial blur still depend on Konva, and the preview stays Konva-default until it's visually verified. Cutover lands after phase 2 migrates cursor + blur to Pixi.
 - **Floating selection toolbar** in the Pixi path (group ops currently work via keyboard; the sidebar drives the primary node).
+- Descriptive "Konva" references elsewhere in this doc and in `docs/normal-term.md` predate the migration; the behavior they describe now runs on PixiJS.
 
 ### Behavior decisions
 
