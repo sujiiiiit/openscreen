@@ -1367,10 +1367,24 @@ app.stage
 
 Viewport (pan/zoom/fit) · background fill / cover-cropped wallpaper (+blur) / grain overlay · pixel grid · multi-video playback + inactive-clip windowing (provider transport unchanged) · video appearance (squircle/border/shadow) · composition zoom-clip camera · group selection + marquee + group move/resize/rotate + keyboard.
 
-### Phase 2 (in progress)
+### Phase 2 (done) — cursor + blur via native pixi-filters
 
-- **Cursor overlay — preview migrated** (`pixi/cursor-controller.ts`): a cursor Sprite in a content-clipped layer above the video nodes, placed per tick/hover via the shared `cursor-scene` placeCursor + computeCursorBlur, reusing the sprite-motion-blur renderer (sharp per-URL textures; size-varying blurred canvas via a rebuilt CanvasSource texture). **Export-side cursor is not re-added yet** — phase-1 exports still omit it.
-- **Radial zoom blur — deferred.** The zoom-clip *camera* (scale/offset) is migrated in preview + export; only the radial-blur postprocess is deferred (to be a native Pixi filter on the artboard content). The Konva preview still renders it; Pixi preview + export don't yet. All blur settings, types, persistence, and UI are intact.
+Both deferred effects now use **native `pixi-filters`** (the custom WebGL renderers in `lib/motion-blur/*` were literal ports of these), applied directly to display objects — no canvas round-trips, no DOM overlay, no per-frame extract. They render in **both the Pixi preview and the export**.
+
+- **Cursor — `MotionBlurFilter`** (`pixi/cursor-sprite.ts`, shared by `pixi/cursor-controller.ts` + the export): one cursor Sprite with the sharp SVG texture and a `MotionBlurFilter` whose `velocity/kernelSize/offset` come from `computeCursorBlur` (zero velocity = sharp; the filter forces kernelSize 0 and auto-pads). The GPU/CPU `cursorMotionBlurBackend` setting is now moot (the filter is GPU).
+- **Radial zoom blur — `ZoomBlurFilter`** (`pixi/zoom-blur.ts`): attached to the artboard `composite` (bg + grid + content + cursor) during zoom ease; `strength`/`center`/`innerRadius`/`radius` from the zoom camera (center in filter-input px = artboard × viewport scale in preview, output px in export). The artboard border stays outside the composite so it never blurs.
+
+Pure derivation math (`computeCursorBlur`, `sampleZoomCameraAtTime` + `radialBlurSettings`) is unchanged.
+
+### Not yet done — the Konva cutover
+
+The Pixi path is now **feature-complete** (editor + export + cursor + radial blur). The remaining step is the **cutover**, which is bundled because each piece is only safe once Konva is gone (the deletions below are still live on the Konva preview path):
+- Flip the Pixi preview to default (remove the `openscreen:pixiCanvas` flag).
+- Delete the Konva canvas (`editor-workspace` Konva subtree, `canvas-video-node`, `selected-video-transformer`, `artboard-*`, `canvas-cursor-overlay`, `video-scene-draw`, `snap-guide-overlay`), `lib/editor-canvas-snap.ts`, the custom `lib/motion-blur/*` renderers, and the `/motion-blur-lab` route.
+- Remove the `cursorMotionBlurBackend` setting entirely (field + UI + a `project-schema` migration), since the GPU filter has no backend.
+- Uninstall `konva` + `react-konva`.
+
+This is the one **irreversible** step (it changes the shipping default and removes the Konva fallback), so it should land **after a visual pass** confirms the Pixi preview + an export look right.
 
 ### Export (migrated)
 
