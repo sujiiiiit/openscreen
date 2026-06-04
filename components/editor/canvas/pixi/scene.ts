@@ -1,6 +1,7 @@
 import "pixi.js/advanced-blend-modes"
 import {
   type Application,
+  BlurFilter,
   Container,
   Graphics,
   Rectangle,
@@ -28,15 +29,27 @@ import {
   resolveWallpaper,
 } from "./background"
 import { drawPixelGrid } from "./pixel-grid"
+import { applyVideoAppearance, type NodeAppearance } from "./video-appearance"
 
-/** A mounted video node: wrapper container + cover-cropped sprite + its source. */
+/**
+ * A mounted video node. Sub-tree (bottom → top):
+ *   wrapper → [ shadowGfx, content(→sprite, masked by squircleMask), squircleMask, borderGfx ]
+ */
 type VideoNodeView = {
   wrapper: Container
+  content: Container
   sprite: Sprite
+  squircleMask: Graphics
+  borderGfx: Graphics
+  shadowGfx: Graphics
+  blurFilter: BlurFilter
   source: VideoSource
   texture: Texture
   videoEl: HTMLVideoElement
   intrinsic: CanvasSize
+  appearance: NodeAppearance
+  width: number
+  height: number
   crop: VideoCoverCrop | null
   /** Timeline-window visibility (from the provider); combined with readyState. */
   timelineVisible: boolean
@@ -301,7 +314,8 @@ export class CanvasScene {
     id: string,
     videoEl: HTMLVideoElement,
     intrinsic: CanvasSize,
-    transform: NodeTransform
+    transform: NodeTransform,
+    appearance: NodeAppearance
   ) {
     this.unmountVideoNode(id)
 
@@ -330,17 +344,37 @@ export class CanvasScene {
     sprite.eventMode = "none" // hit-testing is handled by the transform controller
     sprite.renderable = false // until the first frame decodes (WebGPU upload guard)
 
+    const content = new Container({ label: `node-content:${id}` })
+    content.addChild(sprite)
+    const squircleMask = new Graphics()
+    squircleMask.eventMode = "none"
+    content.mask = squircleMask
+    const borderGfx = new Graphics()
+    borderGfx.eventMode = "none"
+    const shadowGfx = new Graphics()
+    shadowGfx.eventMode = "none"
+    const blurFilter = new BlurFilter({ strength: 0 })
+
     const wrapper = new Container({ label: `node:${id}` })
-    wrapper.addChild(sprite)
+    // shadow (below) → masked content → mask (in display list, not drawn) → border.
+    wrapper.addChild(shadowGfx, content, squircleMask, borderGfx)
     this.nodesLayer.addChild(wrapper)
 
     const view: VideoNodeView = {
       wrapper,
+      content,
       sprite,
+      squircleMask,
+      borderGfx,
+      shadowGfx,
+      blurFilter,
       source,
       texture,
       videoEl,
       intrinsic,
+      appearance,
+      width: transform.width,
+      height: transform.height,
       crop: null,
       timelineVisible: true,
     }
@@ -412,6 +446,31 @@ export class CanvasScene {
     view.wrapper.pivot.set(t.width / 2, t.height / 2)
     view.wrapper.rotation = t.rotation
     view.wrapper.position.set(t.x + t.width / 2, t.y + t.height / 2)
+
+    view.width = t.width
+    view.height = t.height
+    this.redrawAppearance(view)
+  }
+
+  /** Update a node's size-independent appearance (corner/border/shadow) + redraw. */
+  setNodeAppearance(id: string, appearance: NodeAppearance) {
+    const view = this.nodeViews.get(id)
+    if (!view) return
+    view.appearance = appearance
+    this.redrawAppearance(view)
+    this.requestRender()
+  }
+
+  private redrawAppearance(view: VideoNodeView) {
+    applyVideoAppearance({
+      squircleMask: view.squircleMask,
+      borderGfx: view.borderGfx,
+      shadowGfx: view.shadowGfx,
+      shadowBlur: view.blurFilter,
+      width: view.width,
+      height: view.height,
+      appearance: view.appearance,
+    })
   }
 
   /** Schedule a single render on the next frame (no-op while continuously rendering). */

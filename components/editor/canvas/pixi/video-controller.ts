@@ -1,6 +1,7 @@
 import type { CanvasVideoItem, NodeTransform } from "@/types/editor-canvas"
 
 import type { CanvasScene } from "./scene"
+import type { NodeAppearance } from "./video-appearance"
 
 type VideoFrameCallbackMetadata = {
   mediaTime?: number
@@ -42,6 +43,22 @@ function transformOf(video: CanvasVideoItem): NodeTransform {
     width: video.width,
     height: video.height,
     rotation: video.rotation,
+  }
+}
+
+function appearanceOf(video: CanvasVideoItem): NodeAppearance {
+  return {
+    cornerRadius: video.cornerRadius,
+    cornerSmoothing: video.cornerSmoothing,
+    borderWidth: video.borderWidth,
+    borderColor: video.borderColor,
+    borderOffset: video.borderOffset,
+    borderAlignment: video.borderAlignment,
+    shadowColor: video.shadowColor,
+    shadowBlur: video.shadowBlur,
+    shadowOffsetX: video.shadowOffsetX,
+    shadowOffsetY: video.shadowOffsetY,
+    shadowSpread: video.shadowSpread,
   }
 }
 
@@ -118,6 +135,7 @@ export class VideoController {
       }
       existing.video = video
       if (existing.mounted) {
+        this.scene.setNodeAppearance(video.id, appearanceOf(video))
         this.scene.setNodeTransform(video.id, transformOf(video))
       }
     }
@@ -167,8 +185,12 @@ export class VideoController {
         this.scene.mountVideoNode(
           video.id,
           el,
-          { width: entry.video.intrinsicWidth, height: entry.video.intrinsicHeight },
-          transformOf(entry.video)
+          {
+            width: entry.video.intrinsicWidth,
+            height: entry.video.intrinsicHeight,
+          },
+          transformOf(entry.video),
+          appearanceOf(entry.video)
         )
       }
       if (!entry.registered) {
