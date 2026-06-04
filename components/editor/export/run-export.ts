@@ -323,8 +323,27 @@ export async function runExport(
           })
         )
 
-        // Phase 1 omits the cursor overlay + radial zoom blur (deferred). Render
-        // the whole scene into app.canvas (the export composite Mediabunny reads).
+        // Place the recorded cursor using the screen clip's source time straight
+        // from the plan (honors trims/splits). Same CursorSprite the preview uses.
+        const cursor = handles.cursor
+        if (cursor) {
+          const screenEntry = active.find(
+            (entry) => entry.videoId === cursor.screenVideoId
+          )
+          if (screenEntry) {
+            cursor.cursorSprite.render(
+              cursor.track,
+              cursor.video,
+              screenEntry.sourceTimeSec,
+              cursor.options,
+              cursor.motionBlur
+            )
+          } else {
+            cursor.cursorSprite.hide()
+          }
+        }
+
+        // Render the whole scene into app.canvas (the export composite Mediabunny reads).
         handles.app.render()
 
         await videoSource.add(t, frameDuration)

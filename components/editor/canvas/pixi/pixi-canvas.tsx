@@ -122,7 +122,6 @@ export function PixiCanvas() {
       motionRotation: artboard.cursorMotionRotation,
       motionRotationMode: artboard.cursorMotionRotationMode,
       motionBlur: artboard.cursorMotionBlur,
-      motionBlurBackend: artboard.cursorMotionBlurBackend,
     }),
     [screenVideo, screenClip, artboard]
   )

@@ -23,8 +23,35 @@ import {
   applyVideoAppearance,
   type NodeAppearance,
 } from "@/components/editor/canvas/pixi/video-appearance"
+import {
+  CursorSprite,
+  preloadCursorImages,
+  type CursorPlaceOptions,
+} from "@/components/editor/canvas/pixi/cursor-sprite"
+import {
+  buildCursorTrack,
+  clampCursorClickPressScale,
+  clampCursorMotionBlur,
+  clampCursorMotionRotation,
+  clampCursorMotionRotationMode,
+  clampCursorSetId,
+  clampCursorSize,
+  clampCursorSmoothingMode,
+  CURSOR_CLICK_PRESS_SCALE_DEFAULT,
+  CURSOR_MOTION_BLUR_DEFAULT,
+  CURSOR_MOTION_ROTATION_DEFAULT,
+  CURSOR_MOTION_ROTATION_MODE_DEFAULT,
+  CURSOR_POINTER_CURSOR_ID,
+  CURSOR_SET_DEFAULT,
+  CURSOR_SIZE_DEFAULT,
+  CURSOR_SMOOTHING_MODE_DEFAULT,
+  projectFolderFromObjectUrl,
+  type CursorVideoGeometry,
+} from "@/components/editor/canvas/cursor-scene"
 import { getVideoCoverCrop } from "@/components/editor/canvas/video-cover-crop"
 import type { ZoomCamera } from "@/components/editor/canvas/zoom-scene"
+import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
+import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
 
 /**
  * One exportable video node. The render loop pushes each decoded source canvas
@@ -36,11 +63,24 @@ export interface ExportVideoNode {
   hide(): void
 }
 
+/** The recorded-cursor overlay for the export, placed per frame from the plan. */
+export interface ExportCursorHandle {
+  cursorSprite: CursorSprite
+  track: SmoothedCursorTrack
+  video: CursorVideoGeometry
+  /** Which video the cursor follows — used to find the active screen clip. */
+  screenVideoId: string
+  options: CursorPlaceOptions
+  motionBlur: number
+}
+
 export interface ExportStageHandles {
   /** The offscreen Pixi application; `app.canvas` is the export composite. */
   app: Application
   outputSize: { width: number; height: number }
   nodesByVideoId: Map<string, ExportVideoNode>
+  /** Recorded-cursor overlay, or null when the composition has no cursor data. */
+  cursor: ExportCursorHandle | null
   /** Apply the composition zoom-clip camera (scale + offset) for a frame. */
   applyZoomCamera: (camera: ZoomCamera) => void
   dispose: () => void
@@ -124,6 +164,10 @@ export async function buildExportStage(
     nodesByVideoId.set(video.id, built.handle)
   }
 
+  // Cursor sits above the video nodes in the content camera (same z-order as the
+  // editor preview), so it zooms + clips with the content.
+  const cursor = await buildExportCursor(state, assetUrlsByVideoId, contentCamera)
+
   const applyZoomCamera = (camera: ZoomCamera) => {
     backgroundCamera.scale.set(camera.scale)
     backgroundCamera.position.set(camera.offsetX, camera.offsetY)
@@ -133,6 +177,7 @@ export async function buildExportStage(
 
   const dispose = () => {
     nodesByVideoId.clear()
+    cursor?.cursorSprite.destroy()
     try {
       app.destroy({ removeView: true }, { children: true })
     } catch {
@@ -140,7 +185,85 @@ export async function buildExportStage(
     }
   }
 
-  return { app, outputSize, nodesByVideoId, applyZoomCamera, dispose }
+  return { app, outputSize, nodesByVideoId, cursor, applyZoomCamera, dispose }
+}
+
+/**
+ * Load the recorded cursor track + build a {@link CursorSprite} for the export
+ * (placed per frame by the render loop using the screen clip's source time).
+ * Returns null when there is no screen recording / cursor data. Cursor SVGs are
+ * pre-decoded so the per-frame loop never awaits.
+ */
+async function buildExportCursor(
+  state: ProjectStateV1,
+  assetUrlsByVideoId: Record<string, string>,
+  parent: Container
+): Promise<ExportCursorHandle | null> {
+  if (state.artboard.cursorCustomRenderingEnabled === false) return null
+  const screenVideo = state.videos.find(
+    (video) => video.role === "screen" && (video.onCanvas ?? true)
+  )
+  if (!screenVideo) return null
+  const url = assetUrlsByVideoId[screenVideo.id]
+  if (!url) return null
+  const folder = projectFolderFromObjectUrl(url)
+  if (!folder) return null
+
+  const data = await window.api?.projects.getCursorData(folder)
+  const smoothingMode = clampCursorSmoothingMode(
+    state.artboard.cursorSmoothingMode ?? CURSOR_SMOOTHING_MODE_DEFAULT
+  )
+  const track = buildCursorTrack(data ?? null, { smoothingMode })
+  if (!track) return null
+
+  const alwaysUsePointer = state.artboard.cursorAlwaysUsePointer === true
+  const cursorSetId = clampCursorSetId(state.artboard.cursorSetId)
+  const urls = new Set<string>()
+  const cursorIds = alwaysUsePointer ? [CURSOR_POINTER_CURSOR_ID] : track.cursorIds
+  for (const cursorId of cursorIds) {
+    const asset = resolveCursorAsset(cursorId, cursorSetId, CURSOR_SET_DEFAULT)
+    if (asset) urls.add(asset.url)
+  }
+  if (urls.size === 0) return null
+  await preloadCursorImages(urls)
+
+  const cursorSprite = new CursorSprite(parent)
+  const video: CursorVideoGeometry = {
+    x: screenVideo.x,
+    y: screenVideo.y,
+    width: screenVideo.width,
+    height: screenVideo.height,
+    rotation: screenVideo.rotation,
+    intrinsicWidth: screenVideo.intrinsicWidth,
+    intrinsicHeight: screenVideo.intrinsicHeight,
+  }
+  const options: CursorPlaceOptions = {
+    sizeMultiplier: clampCursorSize(
+      state.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT
+    ),
+    clickPressScale: clampCursorClickPressScale(
+      state.artboard.cursorClickPressScale ?? CURSOR_CLICK_PRESS_SCALE_DEFAULT
+    ),
+    cursorSet: cursorSetId,
+    alwaysUsePointer,
+    motionRotation: clampCursorMotionRotation(
+      state.artboard.cursorMotionRotation ?? CURSOR_MOTION_ROTATION_DEFAULT
+    ),
+    motionRotationMode: clampCursorMotionRotationMode(
+      state.artboard.cursorMotionRotationMode ??
+        CURSOR_MOTION_ROTATION_MODE_DEFAULT
+    ),
+    smoothingMode,
+    referenceSize: {
+      width: state.artboard.width,
+      height: state.artboard.height,
+    },
+  }
+  const motionBlur = clampCursorMotionBlur(
+    state.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT
+  )
+
+  return { cursorSprite, track, video, screenVideoId: screenVideo.id, options, motionBlur }
 }
 
 function appearanceOf(video: ProjectVideo): NodeAppearance {
