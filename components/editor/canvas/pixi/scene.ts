@@ -1,8 +1,29 @@
-import { type Application, Container, Graphics } from "pixi.js"
+import "pixi.js/advanced-blend-modes"
+import {
+  type Application,
+  Container,
+  Graphics,
+  Rectangle,
+  Sprite,
+  Texture,
+  TilingSprite,
+} from "pixi.js"
 
 import type { CanvasPalette } from "@/lib/theme-colors"
-import type { CanvasSize, ViewTransform } from "@/types/editor-canvas"
+import type {
+  ArtboardBackground,
+  CanvasSize,
+  ViewTransform,
+} from "@/types/editor-canvas"
 
+import {
+  blurredWallpaperPadding,
+  computeCoverCrop,
+  getNoiseTexture,
+  loadBlurredWallpaperBitmap,
+  loadWallpaperBitmap,
+  resolveWallpaper,
+} from "./background"
 import { drawPixelGrid } from "./pixel-grid"
 
 /** Artboard edge stroke, matching openscreen's Konva `rgba(0,0,0,0.10)` 1px border. */
@@ -51,8 +72,10 @@ export class CanvasScene {
   private readonly contentCamera = new Container({ label: "content-camera" })
   private readonly backgroundMask = new Graphics({ label: "background-mask" })
   private readonly contentMask = new Graphics({ label: "content-mask" })
-  /** Artboard background fill / wallpaper / grain (populated later). */
+  /** Artboard background fill / wallpaper / grain. */
   private readonly surface = new Container({ label: "surface" })
+  private readonly backgroundHolder = new Container({ label: "bg-fill" })
+  private readonly grainHolder = new Container({ label: "grain" })
   /** Editable nodes — one wrapper container per video (populated later). */
   private readonly nodesLayer = new Container({ label: "nodes" })
 
@@ -74,6 +97,10 @@ export class CanvasScene {
   private artboardSize: CanvasSize
   private lastView: ViewTransform = { scale: 1, x: 0, y: 0 }
   private lastViewport: CanvasSize = { width: 0, height: 0 }
+  private lastBackground: ArtboardBackground | null = null
+  private lastGrain = 0
+  /** Bumped per setBackground so a stale async wallpaper load is ignored. */
+  private surfaceGen = 0
 
   private rafId: number | null = null
   private destroyed = false
@@ -97,6 +124,10 @@ export class CanvasScene {
     this.backgroundCamera.mask = this.backgroundMask
     this.backgroundCamera.eventMode = "none"
     this.backgroundMask.eventMode = "none"
+    this.surface.eventMode = "none"
+    this.backgroundHolder.eventMode = "none"
+    this.grainHolder.eventMode = "none"
+    this.surface.addChild(this.backgroundHolder, this.grainHolder)
     this.backgroundCamera.addChild(this.surface)
 
     this.gridGfx.mask = this.gridMask
@@ -150,6 +181,8 @@ export class CanvasScene {
     this.artboardSize = size
     this.rebuildArtboardGeometry()
     this.redrawGrid()
+    // Cover-crop + grain coverage depend on the artboard size.
+    this.setBackground(this.lastBackground, this.lastGrain)
     this.requestRender()
   }
 
@@ -157,6 +190,85 @@ export class CanvasScene {
     this.palette = palette
     this.redrawGrid()
     this.requestRender()
+  }
+
+  /**
+   * Render the artboard background (color fill or cover-cropped wallpaper with
+   * optional blur) plus the film-grain overlay. Wallpaper bitmaps load async; a
+   * generation token discards a stale load if the background changes mid-flight.
+   * Background fill + grain are clipped to the artboard via the background mask.
+   */
+  setBackground(background: ArtboardBackground | null, grain: number) {
+    this.lastBackground = background
+    this.lastGrain = grain
+    const gen = ++this.surfaceGen
+    this.clearHolder(this.backgroundHolder)
+    this.clearHolder(this.grainHolder)
+
+    const { width, height } = this.artboardSize
+
+    if (background?.type === "color") {
+      const fill = new Graphics()
+      fill.rect(0, 0, width, height).fill(background.value)
+      fill.eventMode = "none"
+      this.backgroundHolder.addChild(fill)
+    } else {
+      const { src, blurRadius } = resolveWallpaper(background)
+      if (src) {
+        const padding = blurRadius > 0 ? blurredWallpaperPadding(blurRadius) : 0
+        const loader =
+          blurRadius > 0
+            ? loadBlurredWallpaperBitmap(src, blurRadius)
+            : loadWallpaperBitmap(src)
+        loader
+          .then((bitmap) => {
+            if (gen !== this.surfaceGen || this.destroyed) return
+            const crop = computeCoverCrop(bitmap, this.artboardSize, padding)
+            if (!crop) return
+            const base = Texture.from(bitmap)
+            const texture = new Texture({
+              source: base.source,
+              frame: new Rectangle(
+                crop.cropX,
+                crop.cropY,
+                crop.cropWidth,
+                crop.cropHeight
+              ),
+            })
+            const sprite = new Sprite(texture)
+            sprite.width = this.artboardSize.width
+            sprite.height = this.artboardSize.height
+            sprite.eventMode = "none"
+            this.clearHolder(this.backgroundHolder)
+            this.backgroundHolder.addChild(sprite)
+            this.requestRender()
+          })
+          .catch(() => {
+            /* wallpaper load failed; the white DOM backdrop shows through */
+          })
+      }
+    }
+
+    const grainAlpha = Math.max(0, Math.min(1, grain / 100))
+    if (grainAlpha > 0) {
+      const texture = getNoiseTexture()
+      if (texture) {
+        const tiling = new TilingSprite({ texture, width, height })
+        tiling.alpha = grainAlpha
+        tiling.blendMode = "overlay"
+        tiling.eventMode = "none"
+        this.grainHolder.addChild(tiling)
+      }
+    }
+
+    this.requestRender()
+  }
+
+  /** Remove + free a holder's children, keeping shared texture sources alive. */
+  private clearHolder(holder: Container) {
+    for (const child of holder.removeChildren()) {
+      child.destroy({ children: true, texture: false, textureSource: false })
+    }
   }
 
   /** Schedule a single render on the next frame (no-op while continuously rendering). */

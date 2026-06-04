@@ -54,6 +54,10 @@ export function PixiCanvas() {
   const viewTransformRef = useRef(viewTransform)
   const setViewTransformRef = useRef(setViewTransform)
   const setViewportSizeRef = useRef(setViewportSize)
+  const artboardBgRef = useRef({
+    background: artboard.background,
+    grain: artboard.grain,
+  })
   useEffect(() => {
     artboardSizeRef.current = { width: artboard.width, height: artboard.height }
   }, [artboard.width, artboard.height])
@@ -66,6 +70,12 @@ export function PixiCanvas() {
   useEffect(() => {
     setViewportSizeRef.current = setViewportSize
   }, [setViewportSize])
+  useEffect(() => {
+    artboardBgRef.current = {
+      background: artboard.background,
+      grain: artboard.grain,
+    }
+  }, [artboard.background, artboard.grain])
 
   // ── PixiJS lifecycle (mount once) ──────────────────────────────────────────
   useEffect(() => {
@@ -141,6 +151,10 @@ export function PixiCanvas() {
       // provider's current view so the artboard lands correctly on first paint.
       setViewportSizeRef.current(size)
       controller.setExternalViewTransform(viewTransformRef.current)
+      scene.setBackground(
+        artboardBgRef.current.background,
+        artboardBgRef.current.grain
+      )
 
       themeObserver = new MutationObserver(() => {
         sceneRef.current?.setColors(resolveCanvasPalette(getIsDark()))
@@ -189,6 +203,10 @@ export function PixiCanvas() {
       height: artboard.height,
     })
   }, [artboard.width, artboard.height])
+
+  useEffect(() => {
+    sceneRef.current?.setBackground(artboard.background, artboard.grain)
+  }, [artboard.background, artboard.grain])
 
   useEffect(() => {
     controllerRef.current?.setPreviewMode(isPreviewMode)
