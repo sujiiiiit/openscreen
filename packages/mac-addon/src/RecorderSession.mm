@@ -6,6 +6,7 @@
 #include "CameraPreview.h"
 #include "CameraTrack.h"
 #include "Events.h"
+#include "InputTrack.h"
 #include "MicrophoneTrack.h"
 #include "ScreenTrack.h"
 #include "SystemAudioTrack.h"
@@ -18,6 +19,7 @@
   CameraTrack *_camera;
   SystemAudioTrack *_systemAudio;
   MicrophoneTrack *_microphone;
+  InputTrack *_input;
   SCStream *_stream;
   NSDate *_startedAt;
   CMTime _hostStartTime;
@@ -35,6 +37,7 @@
     _camera = [[CameraTrack alloc] initWithOptions:options];
     _systemAudio = [[SystemAudioTrack alloc] initWithOptions:options screenTrack:_screen];
     _microphone = [[MicrophoneTrack alloc] initWithOptions:options screenTrack:_screen];
+    _input = [[InputTrack alloc] initWithOptions:options];
     _hostStartTime = kCMTimeInvalid;
   }
   return self;
@@ -80,12 +83,13 @@
   }
 
   [_screen setOutputURL:[_outputDirectory URLByAppendingPathComponent:
-      [self fileNameForSource:@"screen" extension:@"mov"]]];
+      [self fileNameForSource:@"screen" extension:[_screen fileExtension]]]];
   [_camera setOutputURL:[_outputDirectory URLByAppendingPathComponent:
       [self fileNameForSource:@"camera" extension:@"mov"]]];
   _manifestURL = [_outputDirectory URLByAppendingPathComponent:
       [self fileNameForSource:@"recording" extension:@"json"]];
 
+  [_input setOutputDirectory:_outputDirectory];
   [_camera prepareWriter];
   return YES;
 }
@@ -104,168 +108,191 @@
 }
 
 - (BOOL)startSync:(NSError **)error {
-  @autoreleasepool {
-    if (![self prepareOutputFiles:error]) {
-      [self teardownPartialStart];
-      return NO;
-    }
-
-    SCShareableContent *content = nil;
-    BOOL contentFromCache = NO;
-    if (![_screen getShareableContent:&content wasFromCache:&contentFromCache error:error]) {
-      [self teardownPartialStart];
-      return NO;
-    }
-
-    NSError *filterError = nil;
-    SCContentFilter *filter = [_screen contentFilterFromContent:content error:&filterError];
-    // If the cached snapshot pre-dates a freshly-opened window or app, the
-    // lookup returns nil with code 2201 (window) / 2203 (application). Drop
-    // the cache and re-fetch fresh once before surfacing the failure, so a
-    // stale prewarm never silently rejects a valid target the user just picked.
-    if (!filter && contentFromCache &&
-        (filterError.code == 2201 || filterError.code == 2203)) {
-      [ScreenTrack invalidateShareableContentCache];
-      content = nil;
-      NSError *refetchError = nil;
-      if (![_screen getShareableContent:&content wasFromCache:NULL error:&refetchError]) {
-        if (error) *error = refetchError;
-        [self teardownPartialStart];
-        return NO;
-      }
-      filterError = nil;
-      filter = [_screen contentFilterFromContent:content error:&filterError];
-    }
-    if (!filter) {
-      if (error) *error = filterError;
-      [self teardownPartialStart];
-      return NO;
-    }
-
-    // Build the configuration first — that resolves dimensions and codec,
-    // which the writer needs.
-    SCStreamConfiguration *configuration = [_screen streamConfigurationForContent:content];
-    [_systemAudio configureSCStreamConfig:configuration];
-    [_microphone configureSCStreamConfig:configuration];
-
-    if (![_screen prepareWriter:error]) {
-      [self teardownPartialStart];
-      return NO;
-    }
-    if ([_systemAudio isEnabled]) {
-      if (![_screen addSystemAudioInput:error]) {
-        [self teardownPartialStart];
-        return NO;
-      }
-    }
-    if ([_microphone isEnabled]) {
-      if (![_screen addMicrophoneInput:error]) {
-        [self teardownPartialStart];
-        return NO;
-      }
-    }
-
-    if (![_camera setupAVCaptureSession:error]) {
-      [self teardownPartialStart];
-      return NO;
-    }
-
-    _stream = [[SCStream alloc] initWithFilter:filter
-                                  configuration:configuration
-                                      delegate:self];
-
-    if (![_screen addToStream:_stream error:error]) {
-      [self teardownPartialStart];
-      return NO;
-    }
-    if (![_systemAudio addToStream:_stream error:error]) {
-      [self teardownPartialStart];
-      return NO;
-    }
-    if (![_microphone addToStream:_stream error:error]) {
-      [self teardownPartialStart];
-      return NO;
-    }
-
-    _startedAt = [NSDate date];
-    _hostStartTime = CMClockGetTime(CMClockGetHostTimeClock());
-    _running = YES;
-
-    if ([_camera hasCaptureSession]) [_camera startCapture];
-
-    __block NSError *startError = nil;
-    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-    [_stream startCaptureWithCompletionHandler:^(NSError *streamError) {
-      startError = streamError;
-      dispatch_semaphore_signal(semaphore);
-    }];
-    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-
-    if (startError) {
-      if (error) *error = startError;
-      [self teardownPartialStart];
-      return NO;
-    }
-
-    EmitEvent({"started", _options.sessionId, "", "", 0});
-    SetActiveRecorder(self);
-    AdoptPendingPreviewForRecorder(self);
-    return YES;
+  // See note in -stopSync: regarding inner @autoreleasepool + NSError out
+  // params. The worker's outer pool already bounds memory for this call.
+  if (![self prepareOutputFiles:error]) {
+    [self teardownPartialStart];
+    return NO;
   }
+
+  SCShareableContent *content = nil;
+  BOOL contentFromCache = NO;
+  if (![_screen getShareableContent:&content wasFromCache:&contentFromCache error:error]) {
+    [self teardownPartialStart];
+    return NO;
+  }
+
+  NSError *filterError = nil;
+  SCContentFilter *filter = [_screen contentFilterFromContent:content error:&filterError];
+  // If the cached snapshot pre-dates a freshly-opened window or app, the
+  // lookup returns nil with code 2201 (window) / 2203 (application). Drop
+  // the cache and re-fetch fresh once before surfacing the failure, so a
+  // stale prewarm never silently rejects a valid target the user just picked.
+  if (!filter && contentFromCache &&
+      (filterError.code == 2201 || filterError.code == 2203)) {
+    [ScreenTrack invalidateShareableContentCache];
+    content = nil;
+    NSError *refetchError = nil;
+    if (![_screen getShareableContent:&content wasFromCache:NULL error:&refetchError]) {
+      if (error) *error = refetchError;
+      [self teardownPartialStart];
+      return NO;
+    }
+    filterError = nil;
+    filter = [_screen contentFilterFromContent:content error:&filterError];
+  }
+  if (!filter) {
+    if (error) *error = filterError;
+    [self teardownPartialStart];
+    return NO;
+  }
+
+  // Build the configuration first — that resolves dimensions and codec,
+  // which the writer needs.
+  SCStreamConfiguration *configuration = [_screen streamConfigurationForContent:content];
+  [_systemAudio configureSCStreamConfig:configuration];
+  [_microphone configureSCStreamConfig:configuration];
+
+  if (![_screen prepareWriter:error]) {
+    [self teardownPartialStart];
+    return NO;
+  }
+  if ([_systemAudio isEnabled]) {
+    if (![_screen addSystemAudioInput:error]) {
+      [self teardownPartialStart];
+      return NO;
+    }
+  }
+  if ([_microphone isEnabled]) {
+    if (![_screen addMicrophoneInput:error]) {
+      [self teardownPartialStart];
+      return NO;
+    }
+  }
+
+  if (![_camera setupAVCaptureSession:error]) {
+    [self teardownPartialStart];
+    return NO;
+  }
+
+  _stream = [[SCStream alloc] initWithFilter:filter
+                                configuration:configuration
+                                    delegate:self];
+
+  if (![_screen addToStream:_stream error:error]) {
+    [self teardownPartialStart];
+    return NO;
+  }
+  if (![_systemAudio addToStream:_stream error:error]) {
+    [self teardownPartialStart];
+    return NO;
+  }
+  if (![_microphone addToStream:_stream error:error]) {
+    [self teardownPartialStart];
+    return NO;
+  }
+
+  _startedAt = [NSDate date];
+  _hostStartTime = CMClockGetTime(CMClockGetHostTimeClock());
+  _running = YES;
+
+  if ([_input isEnabled]) {
+    NSError *inputError = nil;
+    if (![_input startWithHostStartMs:TimeToMilliseconds(_hostStartTime)
+                      startedAtUnixMs:[_startedAt timeIntervalSince1970] * 1000.0
+                                error:&inputError]) {
+      // Input capture is auxiliary — a failure here must not abort the
+      // recording. Surface it as a non-fatal event and continue.
+      EmitEvent({"error", _options.sessionId, "input",
+                 ToStdString([inputError localizedDescription]), 0});
+    }
+  }
+
+  if ([_camera hasCaptureSession]) [_camera startCapture];
+
+  __block NSError *startError = nil;
+  dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+  [_stream startCaptureWithCompletionHandler:^(NSError *streamError) {
+    startError = streamError;
+    dispatch_semaphore_signal(semaphore);
+  }];
+  dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+
+  if (startError) {
+    if (error) *error = startError;
+    [self teardownPartialStart];
+    return NO;
+  }
+
+  EmitEvent({"started", _options.sessionId, "", "", 0});
+  SetActiveRecorder(self);
+  AdoptPendingPreviewForRecorder(self);
+  return YES;
 }
 
 - (BOOL)stopSync:(NSError **)error {
-  @autoreleasepool {
-    if (!_running && !_stream) return YES;
+  // NOTE: do NOT wrap this body in `@autoreleasepool`. Out-param NSErrors
+  // written via `*error = X` get autoreleased into the *current* pool. An
+  // inner pool would drain at function return, killing the NSError before
+  // ARC's writeback in the caller retains it for its strong local — read
+  // ISA on freed memory and crash inside `objc_retain`. The worker's outer
+  // pool (in `Execute()`) already bounds memory for this call.
+  if (!_running && !_stream) return YES;
 
-    _stopping = YES;
-    [_screen markStopping];
-    [_camera markStopping];
-    [_systemAudio markStopping];
-    [_microphone markStopping];
-    ClearActiveRecorder(self);
+  _stopping = YES;
+  [_screen markStopping];
+  [_camera markStopping];
+  [_systemAudio markStopping];
+  [_microphone markStopping];
+  [_input markStopping];
+  ClearActiveRecorder(self);
 
-    __block NSError *streamStopError = nil;
-    if (_stream) {
-      // Bound the wait: SCKit's stopCapture completion has been observed to
-      // hang indefinitely when the system audio stack is wedged. Time out
-      // after 10s so the JS state machine can transition out of "stopping"
-      // and surface an error to the user instead of leaving the UI frozen.
-      dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-      [_stream stopCaptureWithCompletionHandler:^(NSError *stopError) {
-        streamStopError = stopError;
-        dispatch_semaphore_signal(semaphore);
-      }];
-      dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
-      if (dispatch_semaphore_wait(semaphore, deadline) != 0) {
-        streamStopError =
-            MakeError(2403, @"ScreenCaptureKit stopCapture did not complete within 10s");
-        EmitEvent({"error", _options.sessionId, "screen",
-                   ToStdString([streamStopError localizedDescription]), 0});
-      }
+  __block NSError *streamStopError = nil;
+  if (_stream) {
+    // Bound the wait: SCKit's stopCapture completion has been observed to
+    // hang indefinitely when the system audio stack is wedged. Time out
+    // after 10s so the JS state machine can transition out of "stopping"
+    // and surface an error to the user instead of leaving the UI frozen.
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    [_stream stopCaptureWithCompletionHandler:^(NSError *stopError) {
+      streamStopError = stopError;
+      dispatch_semaphore_signal(semaphore);
+    }];
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
+    if (dispatch_semaphore_wait(semaphore, deadline) != 0) {
+      streamStopError =
+          MakeError(2403, @"ScreenCaptureKit stopCapture did not complete within 10s");
+      EmitEvent({"error", _options.sessionId, "screen",
+                 ToStdString([streamStopError localizedDescription]), 0});
     }
-
-    if ([_camera hasCaptureSession]) [_camera stopCapture];
-    ReleasePreviewForRecorderOnStop(self);
-
-    NSError *screenFinishError = nil;
-    BOOL screenOk = [_screen finishWriterSync:&screenFinishError];
-    NSError *cameraFinishError = nil;
-    BOOL cameraOk = [_camera finishWriterSync:&cameraFinishError];
-
-    _running = NO;
-    [self writeManifest];
-
-    if (streamStopError || !screenOk || !cameraOk) {
-      if (error) {
-        *error = streamStopError ?: screenFinishError ?: cameraFinishError;
-      }
-      return NO;
-    }
-
-    EmitEvent({"stopped", _options.sessionId, "", "", 0});
-    return YES;
   }
+
+  if ([_camera hasCaptureSession]) [_camera stopCapture];
+  ReleasePreviewForRecorderOnStop(self);
+
+  NSError *screenFinishError = nil;
+  BOOL screenOk = [_screen finishWriterSync:&screenFinishError];
+  NSError *cameraFinishError = nil;
+  BOOL cameraOk = [_camera finishWriterSync:&cameraFinishError];
+  // Anchor the cursor timeline to the screen video's first-frame host time so
+  // the recorded cursor and the video share source time 0 (otherwise the
+  // ScreenCaptureKit startup delay makes the cursor lag the video). Must run
+  // before -finish writes the input session block.
+  [_input setVideoStartHostMs:[_screen sessionStartHostMs]];
+  [_input finish];
+
+  _running = NO;
+  [self writeManifest];
+
+  if (streamStopError || !screenOk || !cameraOk) {
+    if (error) {
+      *error = streamStopError ?: screenFinishError ?: cameraFinishError;
+    }
+    return NO;
+  }
+
+  EmitEvent({"stopped", _options.sessionId, "", "", 0});
+  return YES;
 }
 
 - (BOOL)pauseSync:(NSError **)error {
@@ -281,6 +308,7 @@
   _paused = YES;
   [_screen setPaused:YES];
   [_camera setPaused:YES];
+  [_input setPaused:YES];
   EmitEvent({"paused", _options.sessionId, "", "", 0});
   return YES;
 }
@@ -297,6 +325,7 @@
   if (!_paused) return YES;
   [_screen setPaused:NO];
   [_camera setPaused:NO];
+  [_input setPaused:NO];
   _paused = NO;
   EmitEvent({"resumed", _options.sessionId, "", "", 0});
   return YES;
@@ -317,6 +346,10 @@
   [_camera markStopping];
   [_systemAudio markStopping];
   [_microphone markStopping];
+  [_input markStopping];
+  // Tear down the global monitor / cursor sampler now; the sidecar files are
+  // discarded along with the rest of this cancelled recording's output.
+  [_input finish];
   ClearActiveRecorder(self);
   if (_stream) {
     // Mirror the 10s deadline used in -stopSync. SCKit's stopCapture has been
@@ -360,6 +393,8 @@
     files[@"camera"] = [[_camera url] path];
   }
   files[@"manifest"] = [_manifestURL path];
+  NSDictionary *inputFiles = [_input filesDictionary];
+  if (inputFiles) [files addEntriesFromDictionary:inputFiles];
   return files;
 }
 
@@ -408,6 +443,8 @@
   if (systemAudioMeta) [outputs addObject:systemAudioMeta];
   NSDictionary *microphoneMeta = [_microphone metadata];
   if (microphoneMeta) [outputs addObject:microphoneMeta];
+  NSDictionary *inputMeta = [_input metadata];
+  if (inputMeta) [outputs addObject:inputMeta];
   return outputs;
 }
 

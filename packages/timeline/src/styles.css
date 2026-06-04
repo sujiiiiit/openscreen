@@ -1,0 +1,50 @@
+@layer components {
+  /* react-virtualized scrollbar overrides — cannot reach via JSX className */
+  .timeline-editor-time-area .ReactVirtualized__Grid {
+    outline: none;
+  }
+  .timeline-editor-time-area .ReactVirtualized__Grid::-webkit-scrollbar {
+    display: none;
+  }
+  .timeline-editor-edit-area .ReactVirtualized__Grid {
+    outline: none !important;
+    overflow: overlay !important;
+  }
+  .timeline-editor-edit-area .ReactVirtualized__Grid::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+  .timeline-editor-edit-area .ReactVirtualized__Grid::-webkit-scrollbar-track {
+    background-color: transparent !important;
+  }
+  .timeline-editor-edit-area .ReactVirtualized__Grid::-webkit-scrollbar-thumb {
+    background: #313132;
+    border-radius: 16px;
+  }
+  .timeline-editor:hover .timeline-editor-edit-area .ReactVirtualized__Grid::-webkit-scrollbar {
+    height: 4px;
+  }
+
+  /* Cursor — chained transforms, easier as a marker class than arbitrary Tailwind */
+  .timeline-editor-cursor-body {
+    transform: translateX(-25%) scaleX(0.5);
+  }
+  .timeline-editor-cursor-top {
+    transform: translate(-50%, 0) scaleX(2);
+  }
+
+  /* Row tick-grid background — multi-layer gradient is verbose as a Tailwind arbitrary value */
+  .timeline-editor-edit-row-bg {
+    background-repeat: no-repeat, repeat;
+    background-image: linear-gradient(var(--timeline-bg), var(--timeline-bg)),
+      linear-gradient(90deg, var(--timeline-divider) 1px, transparent 0);
+  }
+
+  /* Resize handles stay as invisible hit zones — interactjs still binds to
+     .timeline-editor-action-left-stretch / -right-stretch for the gesture.
+     A cursor change on hover is the only affordance left. */
+  .timeline-editor-action-left-stretch,
+  .timeline-editor-action-right-stretch {
+    cursor: ew-resize;
+  }
+}

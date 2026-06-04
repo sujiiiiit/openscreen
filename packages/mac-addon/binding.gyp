@@ -13,6 +13,8 @@
         "src/SystemAudioTrack.mm",
         "src/MicrophoneTrack.mm",
         "src/CameraPreview.mm",
+        "src/CursorTrack.mm",
+        "src/InputTrack.mm",
         "src/RecorderSession.mm",
         "src/RecordingWorkers.mm",
         "src/Bindings.mm"
@@ -29,7 +31,7 @@
       "conditions": [
         ["OS==\"mac\"", {
           "xcode_settings": {
-            "MACOSX_DEPLOYMENT_TARGET": "15.0",
+            "MACOSX_DEPLOYMENT_TARGET": "13.0",
             "GCC_ENABLE_CPP_EXCEPTIONS": "NO",
             "CLANG_CXX_LIBRARY": "libc++",
             "OTHER_CPLUSPLUSFLAGS": [
@@ -48,7 +50,8 @@
               "-framework AudioToolbox",
               "-framework AppKit",
               "-framework Foundation",
-              "-framework Accelerate"
+              "-framework Accelerate",
+              "-framework IOKit"
             ]
           }
         }]

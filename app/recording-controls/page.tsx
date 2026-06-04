@@ -22,9 +22,17 @@ const EMPTY_STATE: RecorderState = {
     cameraDeviceId: null,
     cameraLabel: "No camera",
     hideCameraPreview: false,
-    hideCursor: false,
+    hideCursor: true,
     systemAudioScope: "all",
     systemAudioApplications: [],
+    captureKeystrokes: false,
+    recordingQuality: {
+      videoCodec: "hevc",
+      videoQuality: "high",
+      container: "mov",
+      resolutionMode: "native",
+      frameRate: 60,
+    },
   },
   sessionId: null,
   outputDir: null,
@@ -109,7 +117,7 @@ export default function RecordingControlsPage() {
   return (
     <div
       data-window="recording-controls"
-      className="flex h-13 w-full items-center justify-center overflow-hidden"
+      className="flex h-13 w-full items-center justify-center overflow-hidden bg-transparent"
       style={DRAG}
     >
       <div className="flex h-full w-full items-center px-2 select-none">

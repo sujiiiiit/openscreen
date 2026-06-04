@@ -45,6 +45,33 @@ static RecordingOptions ParseRecordingOptions(const Napi::CallbackInfo &info) {
   options.microphoneDeviceId = GetStringProp(object, "microphoneDeviceId");
   options.cameraDeviceId = GetStringProp(object, "cameraDeviceId");
 
+  // Input capture (mouse / keystrokes / cursor shapes) → Screen Studio-style
+  // sidecar JSON. captureKeyStrokes / captureCursorShapes imply captureInput.
+  options.captureInput = GetBoolProp(object, "captureInput", false);
+  options.captureKeyStrokes = GetBoolProp(object, "captureKeyStrokes", false);
+  options.captureCursorShapes = GetBoolProp(object, "captureCursorShapes", false);
+  if (options.captureKeyStrokes || options.captureCursorShapes) {
+    options.captureInput = true;
+  }
+
+  // Screen video quality settings (all optional; ScreenTrack coerces invalid
+  // combinations before recording starts so AVAssetWriter never sees a
+  // configuration it would reject).
+  options.videoCodec = GetStringProp(object, "videoCodec");
+  options.videoQuality = GetStringProp(object, "videoQuality", "high");
+  options.container = GetStringProp(object, "container", "mov");
+  options.resolutionMode = GetStringProp(object, "resolutionMode", "native");
+  options.frameRate = GetIntProp(object, "frameRate", -1);
+  // Mirror frameRate→fps so legacy code paths that read `fps` (manifest,
+  // logging) still see the user's choice. A `frameRate` of 0 means "native"
+  // (120 timescale); -1 means "not provided, use fps".
+  if (options.frameRate == 0) {
+    // Leave fps at its existing value (used for bitrate budget; native frame
+    // rate is treated as an upper bound rather than a guaranteed rate).
+  } else if (options.frameRate > 0) {
+    options.fps = options.frameRate;
+  }
+
   Napi::Value audioAppsValue = object.Get("audioApplications");
   if (audioAppsValue.IsArray()) {
     Napi::Array audioApps = audioAppsValue.As<Napi::Array>();
@@ -350,7 +377,10 @@ static Napi::Value GetCapabilities(const Napi::CallbackInfo &info) {
                               (long)version.patchVersion].UTF8String);
   result.Set("screenCaptureKit", true);
   result.Set("systemAudio", true);
-  result.Set("screenCaptureKitMicrophone", true);
+  // SCStream-based microphone capture (`captureMicrophone`) is macOS 15+.
+  result.Set("screenCaptureKitMicrophone",
+             IsMacOSAtLeast(15) ? Napi::Boolean::New(env, true)
+                                 : Napi::Boolean::New(env, false));
   result.Set("microphoneFallback", false);
   result.Set("camera", true);
   result.Set("separateFiles", false);

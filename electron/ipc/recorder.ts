@@ -4,21 +4,26 @@ import {
   app,
   dialog,
   ipcMain,
-  screen,
   type IpcMainInvokeEvent,
   type MenuItemConstructorOptions,
 } from 'electron'
-import { mkdirSync, rmSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import * as path from 'node:path'
 import addon, {
   type AudioDevice,
   type CameraDevice,
   type CaptureTarget,
+  type ContainerFormat,
+  type FrameRate,
   type RecordingFiles,
   type RecordingResult,
+  type ResolutionMode,
   type StartRecordingOptions,
+  type VideoCodec,
+  type VideoQuality,
   type WindowSource,
 } from '@openscreen/mac-addon'
+import { resolveDisplayUnderCursor } from './display-target'
 
 // IMPORTANT: the exported types below are mirrored in `types/api.d.ts` so
 // the renderer can typecheck the preload bridge without importing from
@@ -30,6 +35,22 @@ export type RecorderPickerMode = 'display' | 'window' | 'region'
 export interface RecorderMenuAnchor {
   x: number
   y: number
+}
+
+/**
+ * Screen-recording quality settings exposed through the Recording Quality
+ * window. The main process is the source of truth for validation — unknown
+ * enum values get replaced with defaults before the IPC reply is returned
+ * to the UI.
+ *
+ * Defaults: HEVC, High quality, MOV container, native resolution, 60 fps.
+ */
+export interface RecordingQualitySettings {
+  videoCodec: VideoCodec
+  videoQuality: VideoQuality
+  container: ContainerFormat
+  resolutionMode: ResolutionMode
+  frameRate: FrameRate
 }
 
 export interface RecorderSettings {
@@ -52,6 +73,15 @@ export interface RecorderSettings {
   // Sticky across recordings; the user manages the list manually via the
   // system audio menu.
   systemAudioApplications: string[]
+  // Opt-in keystroke capture. Mouse + cursor metadata is always recorded
+  // (Screen Studio-style sidecars); keystrokes are sensitive (plaintext typed
+  // text, incl. passwords) and additionally require macOS Input Monitoring
+  // permission, so they are off by default and gated behind this toggle.
+  captureKeystrokes: boolean
+  // Screen-recording quality (codec / container / resolution / etc.).
+  // Persisted to a JSON file in userData so settings survive app restarts.
+  // See RecordingQualitySettings for field meanings.
+  recordingQuality: RecordingQualitySettings
 }
 
 export type RecorderStatus =
@@ -88,11 +118,22 @@ interface RegisterRecorderHandlersOptions {
   // recorder bar (idle) and the compact recording controls window
   // (recording / paused).
   onStatusChanged?: (status: RecorderStatus, snapshot: RecorderState) => void
+  // Opens the Recording Quality settings window. Wired from main.ts so the
+  // BrowserWindow factory can use SHARED_WEB_PREFERENCES / loadAppRoute
+  // without re-implementing them here.
+  openRecordingSettingsWindow?: () => void
+  // Lets the user pick an existing project from disk and open it in the
+  // editor without first making a recording. Wired from main.ts so it can
+  // show a native folder dialog parented to the recorder bar window and
+  // hand the picked folder to the main editor window.
+  openProjectFromDialog?: () => void
 }
 
 let cameraPreviewListener: ((deviceId: string | null) => void) | null = null
 let getRecorderWindowRef: (() => BrowserWindow | null) | null = null
 let getControlsWindowRef: (() => BrowserWindow | null) | null = null
+let openRecordingSettingsWindowRef: (() => void) | null = null
+let openProjectFromDialogRef: (() => void) | null = null
 let statusChangedListener:
   | ((status: RecorderStatus, snapshot: RecorderState) => void)
   | null = null
@@ -116,6 +157,101 @@ const NO_MICROPHONE_MENU_LABEL = "Don't record microphone"
 const NO_CAMERA_MENU_LABEL = "Don't record camera"
 const NO_SYSTEM_AUDIO_MENU_LABEL = "Don't record system audio"
 
+const RECORDING_QUALITY_FILE = 'recording-quality.json'
+
+function defaultRecordingQualitySettings(): RecordingQualitySettings {
+  return {
+    videoCodec: 'hevc',
+    videoQuality: 'high',
+    container: 'mov',
+    resolutionMode: 'native',
+    frameRate: 60,
+  }
+}
+
+function recordingQualityFilePath(): string {
+  return path.join(app.getPath('userData'), RECORDING_QUALITY_FILE)
+}
+
+function readPersistedRecordingQuality(): Partial<RecordingQualitySettings> {
+  try {
+    const raw = readFileSync(recordingQualityFilePath(), 'utf-8')
+    const parsed = JSON.parse(raw) as Partial<RecordingQualitySettings>
+    if (parsed && typeof parsed === 'object') return parsed
+  } catch {
+    // File missing or unreadable on first launch — fall back to defaults.
+  }
+  return {}
+}
+
+function loadRecordingQualitySettings(): RecordingQualitySettings {
+  // Persisted values feed into the same coercion path the IPC handler uses,
+  // so any unknown enum value (e.g. an older build that wrote `proRes422`
+  // or `hevcWithAlpha`) gets normalized back to defaults on load.
+  return coerceRecordingQualitySettings({
+    ...defaultRecordingQualitySettings(),
+    ...readPersistedRecordingQuality(),
+  })
+}
+
+function persistRecordingQualitySettings(value: RecordingQualitySettings): void {
+  try {
+    writeFileSync(recordingQualityFilePath(), JSON.stringify(value, null, 2))
+  } catch (error) {
+    // Settings persistence is best-effort. The next change will retry; a
+    // failed write doesn't block recording.
+    if (process.env.NODE_ENV === 'development') {
+      console.warn('[recorder] failed to persist recording quality', error)
+    }
+  }
+}
+
+/**
+ * Coerce a partial settings update onto a valid set. Unknown enum values are
+ * replaced with defaults so the form can never wedge.
+ */
+function coerceRecordingQualitySettings(
+  patch: Partial<RecordingQualitySettings>,
+): RecordingQualitySettings {
+  const defaults = defaultRecordingQualitySettings()
+  const validCodecs: VideoCodec[] = ['hevc', 'h264']
+  const codec: VideoCodec =
+    patch.videoCodec && validCodecs.includes(patch.videoCodec)
+      ? patch.videoCodec
+      : defaults.videoCodec
+
+  const container: ContainerFormat =
+    patch.container === 'mp4' || patch.container === 'mov'
+      ? patch.container
+      : defaults.container
+
+  const validQualities: VideoQuality[] = ['low', 'medium', 'high', 'xhigh', 'max']
+  const videoQuality: VideoQuality =
+    patch.videoQuality && validQualities.includes(patch.videoQuality)
+      ? patch.videoQuality
+      : defaults.videoQuality
+
+  const resolutionMode: ResolutionMode =
+    patch.resolutionMode === 'native' || patch.resolutionMode === 'logical'
+      ? patch.resolutionMode
+      : defaults.resolutionMode
+
+  const validFrameRates: FrameRate[] = [0, 24, 30, 60]
+  const frameRate: FrameRate =
+    patch.frameRate !== undefined &&
+    validFrameRates.includes(patch.frameRate as FrameRate)
+      ? (patch.frameRate as FrameRate)
+      : defaults.frameRate
+
+  return {
+    videoCodec: codec,
+    videoQuality,
+    container,
+    resolutionMode,
+    frameRate,
+  }
+}
+
 const state: RecorderState = {
   status: 'idle',
   settings: {
@@ -125,9 +261,11 @@ const state: RecorderState = {
     cameraDeviceId: null,
     cameraLabel: NO_CAMERA_LABEL,
     hideCameraPreview: false,
-    hideCursor: false,
+    hideCursor: true,
     systemAudioScope: 'all',
     systemAudioApplications: [],
+    captureKeystrokes: false,
+    recordingQuality: loadRecordingQualitySettings(),
   },
   sessionId: null,
   outputDir: null,
@@ -150,6 +288,10 @@ function refreshPausedMs(): void {
       // Session was torn down between renders — ignore.
     }
   }
+}
+
+export function getLatestRecordingDir(): string | null {
+  return state.outputDir
 }
 
 function publicState(): RecorderState {
@@ -195,9 +337,16 @@ function outputDirectory(): string {
 }
 
 function defaultCaptureTarget(): CaptureTarget {
+  const display = resolveDisplayUnderCursor()
   return {
     type: 'display',
-    displayId: screen.getPrimaryDisplay().id,
+    displayId: display.displayId,
+    title: 'Display',
+    applicationName: 'Display',
+    x: display.bounds.x,
+    y: display.bounds.y,
+    width: display.pixelWidth,
+    height: display.pixelHeight,
   }
 }
 
@@ -391,6 +540,21 @@ function setHideCursor(hidden: boolean): void {
   emitState()
 }
 
+function setCaptureKeystrokes(enabled: boolean): void {
+  if (!canChangeSettings()) return
+  if (state.settings.captureKeystrokes === enabled) return
+
+  state.settings.captureKeystrokes = enabled
+  state.lastError = null
+  // Enabling keystroke capture needs macOS Input Monitoring. Surface the TCC
+  // prompt now so the grant is in place before the next recording; the native
+  // side independently no-ops key capture if the grant is still missing.
+  if (enabled && process.platform === 'darwin') {
+    addon.requestPermissions(['inputMonitoring']).catch(() => {})
+  }
+  emitState()
+}
+
 function microphoneMenuTemplate(devices: AudioDevice[]): MenuItemConstructorOptions[] {
   const enabled = canChangeSettings()
   const template: MenuItemConstructorOptions[] = [
@@ -541,6 +705,24 @@ function recorderSettingsMenuTemplate(): MenuItemConstructorOptions[] {
       enabled: canChangeSettings(),
       click: () => setHideCursor(!state.settings.hideCursor),
     },
+    {
+      label: 'Capture keystrokes',
+      type: 'checkbox',
+      checked: state.settings.captureKeystrokes,
+      enabled: canChangeSettings(),
+      click: () => setCaptureKeystrokes(!state.settings.captureKeystrokes),
+    },
+    { type: 'separator' },
+    {
+      label: 'Open project',
+      enabled: canChangeSettings(),
+      click: () => openProjectFromDialogRef?.(),
+    },
+    {
+      label: 'Settings',
+      enabled: canChangeSettings(),
+      click: () => openRecordingSettingsWindowRef?.(),
+    },
   ]
 }
 
@@ -679,17 +861,38 @@ export async function startRecording(targetOverride?: CaptureTarget): Promise<Re
         state.settings.systemAudioApplications.length === 0
       )
 
+    // Coerce one last time so any persisted-but-now-impossible combination
+    // (settings file pre-dates a macOS downgrade, etc.) is normalized before
+    // the native addon sees it. The native side coerces too, but doing it
+    // here keeps the manifest and the renderer view in sync.
+    const quality = coerceRecordingQualitySettings(state.settings.recordingQuality)
+    state.settings.recordingQuality = quality
+
     const options: StartRecordingOptions = {
       outputDir,
       target,
-      fps: 60,
       includeCursor: !state.settings.hideCursor,
       excludeOwnApp: true,
+      // Always capture Screen Studio-style input metadata (mouse + cursor
+      // shapes) alongside the video. This is intentionally INDEPENDENT of
+      // `hideCursor`/`includeCursor`: "Don't record cursor" only removes the
+      // cursor from the recorded video pixels — the cursor *metadata* is still
+      // captured so an editor can redraw a restyled cursor from it. Keystrokes
+      // are opt-in (and gated by Input Monitoring on the native side).
+      captureInput: true,
+      captureCursorShapes: true,
+      captureKeyStrokes: state.settings.captureKeystrokes,
       recordSystemAudio: systemAudioEnabled,
       recordMicrophone: state.settings.microphoneDeviceId !== null,
       microphoneDeviceId: state.settings.microphoneDeviceId ?? undefined,
       recordCamera: state.settings.cameraDeviceId !== null,
       cameraDeviceId: state.settings.cameraDeviceId ?? undefined,
+      // Screen video quality.
+      videoCodec: quality.videoCodec,
+      videoQuality: quality.videoQuality,
+      container: quality.container,
+      resolutionMode: quality.resolutionMode,
+      frameRate: quality.frameRate,
     }
     // System audio scoping: when the user picks the 'selected' mode, send the
     // bundle IDs they've checked. 'all' mode and 'off' state both leave
@@ -994,7 +1197,32 @@ export function registerRecorderHandlers(options: RegisterRecorderHandlersOption
   getRecorderWindowRef = options.getRecorderWindow
   getControlsWindowRef = options.getControlsWindow ?? null
   statusChangedListener = options.onStatusChanged ?? null
+  openRecordingSettingsWindowRef = options.openRecordingSettingsWindow ?? null
+  openProjectFromDialogRef = options.openProjectFromDialog ?? null
   ipcMain.handle('recorder:getState', () => publicState())
+  ipcMain.handle(
+    'recorder:getRecordingSettings',
+    (): RecordingQualitySettings => state.settings.recordingQuality,
+  )
+  ipcMain.handle(
+    'recorder:setRecordingSettings',
+    (_event, patch: Partial<RecordingQualitySettings>): RecordingQualitySettings => {
+      // Coercion is the source of truth — the renderer's optimistic UI may
+      // send any partial; we return the canonical resolved set so the form
+      // reflects any value normalization.
+      const next = coerceRecordingQualitySettings({
+        ...state.settings.recordingQuality,
+        ...patch,
+      })
+      state.settings.recordingQuality = next
+      persistRecordingQualitySettings(next)
+      emitState()
+      return next
+    },
+  )
+  ipcMain.handle('recorder:openRecordingSettings', () => {
+    openRecordingSettingsWindowRef?.()
+  })
   ipcMain.handle(
     'recorder:showInputMenu',
     (event, kind: RecorderInputKind, anchor: RecorderMenuAnchor) => {

@@ -24,28 +24,42 @@
 }
 
 - (BOOL)isEnabled {
-  return _options.recordMicrophone;
+  // SCStream-based microphone capture (`captureMicrophone`,
+  // `microphoneCaptureDeviceID`) is macOS 15.0+ only. The selectors don't
+  // exist on 13/14, so attempting to use the SCK mic path there would throw
+  // NSInvalidArgumentException. Report disabled so the rest of the pipeline
+  // never asks us to wire a mic input.
+  if (!_options.recordMicrophone) return NO;
+  if (@available(macOS 15.0, *)) return YES;
+  return NO;
 }
 
 - (void)configureSCStreamConfig:(SCStreamConfiguration *)configuration {
   if (!_options.recordMicrophone) return;
-  configuration.captureMicrophone = YES;
-  if (!_options.microphoneDeviceId.empty()) {
-    configuration.microphoneCaptureDeviceID = ToNSString(_options.microphoneDeviceId);
+  if (@available(macOS 15.0, *)) {
+    configuration.captureMicrophone = YES;
+    if (!_options.microphoneDeviceId.empty()) {
+      configuration.microphoneCaptureDeviceID = ToNSString(_options.microphoneDeviceId);
+    }
   }
 }
 
 - (BOOL)addToStream:(SCStream *)stream error:(NSError **)error {
-  if (!_options.recordMicrophone) return YES;
-  NSError *addOutputError = nil;
-  if (![stream addStreamOutput:self
-                          type:SCStreamOutputTypeMicrophone
-            sampleHandlerQueue:_queue
-                         error:&addOutputError]) {
-    if (error) {
-      *error = addOutputError ?: MakeError(2503, @"Could not add microphone output");
+  // -isEnabled bakes in the 15+ availability check; on macOS 13/14 this
+  // returns NO and we skip the SCStreamOutputTypeMicrophone wiring entirely
+  // (the enum value itself is also 15+).
+  if (![self isEnabled]) return YES;
+  if (@available(macOS 15.0, *)) {
+    NSError *addOutputError = nil;
+    if (![stream addStreamOutput:self
+                            type:SCStreamOutputTypeMicrophone
+              sampleHandlerQueue:_queue
+                           error:&addOutputError]) {
+      if (error) {
+        *error = addOutputError ?: MakeError(2503, @"Could not add microphone output");
+      }
+      return NO;
     }
-    return NO;
   }
   return YES;
 }
@@ -68,7 +82,14 @@
     didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                    ofType:(SCStreamOutputType)type {
   if (_stopping || !CMSampleBufferIsValid(sampleBuffer)) return;
-  if (type != SCStreamOutputTypeMicrophone) return;
+  // SCStreamOutputTypeMicrophone is macOS 15+. -addToStream: only registers
+  // this delegate on 15+ too, so reaching here implies the symbol exists at
+  // runtime — the @available gate just silences the unguarded-symbol warning.
+  if (@available(macOS 15.0, *)) {
+    if (type != SCStreamOutputTypeMicrophone) return;
+  } else {
+    return;
+  }
   ScreenTrack *screenTrack = _screenTrack;
   if (!screenTrack) return;
   [screenTrack appendMicrophoneSampleBuffer:sampleBuffer];

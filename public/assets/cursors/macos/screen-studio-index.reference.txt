@@ -1,0 +1,208 @@
+import { Vec, VecInput, VecModel, vec } from "@s/shared/point";
+import { objectMap, swapObjectKeysAndValues } from "@s/shared/object";
+
+interface CursorHighQualityAsset {
+  name: CursorAssetName;
+  nsName: NsCursorName | null;
+  filename: string;
+  hotspot: VecModel;
+  size: Vec;
+  url: string;
+}
+
+const nsCursorNames = [
+  "arrow",
+  "iBeam",
+  "crosshair",
+  "closedHand",
+  "openHand",
+  "pointingHand",
+  "resizeLeft",
+  "resizeRight",
+  "resizeLeftRight",
+  "resizeUp",
+  "resizeDown",
+  "resizeUpDown",
+  "disappearingItem",
+  "iBeamCursorForVerticalLayout",
+  "operationNotAllowed",
+  "dragLink",
+  "dragCopy",
+  "contextualMenu",
+  "windowResizeNorthEast",
+  "windowResizeNorthWestSouthEast",
+  "zoomIn",
+  "windowResizeNorthWest",
+  "windowResizeSouthEast",
+  "windowResizeEastWest",
+  "windowResizeNorth",
+  "windowResizeEast",
+  "windowResizeNorthSouth",
+  "windowResizeNorthEastSouthWest",
+  "windowResizeWest",
+  "windowResizeSouth",
+  "windowResizeSouthWest",
+  "bottomRightResize",
+  "bottomLeftResize",
+  "topRightResize",
+  "topLeftResize",
+  "help",
+  "notAllowed",
+  "makeAlias",
+  "copy",
+  "zoomOut",
+  "busyButClickable",
+] as const;
+
+export type NsCursorName = (typeof nsCursorNames)[number];
+
+export function getIsCursorNsName(name: string): name is NsCursorName {
+  return nsCursorNames.includes(name as NsCursorName);
+}
+
+const cursorAssetNames = [
+  "beachball",
+  "busybutclickable",
+  "cell",
+  "closedhand",
+  "contextualmenu",
+  "copy",
+  "cross",
+  "crosshair",
+  "help",
+  "makealias",
+  "move",
+  "notallowed",
+  "openhand",
+  "pointer",
+  "pointinghand",
+  "poof",
+  "resizedown",
+  "resizeeast",
+  "resizeeastwest",
+  "resizeleftright",
+  "resizeleft",
+  "resizenorth",
+  "resizenortheastsouthwest",
+  "resizenortheast",
+  "resizenorthsouth",
+  "resizenorthwestsoutheast",
+  "resizenorthwest",
+  "resizeright",
+  "resizesouth",
+  "resizesoutheast",
+  "resizesouthwest",
+  "resizeupdown",
+  "resizeup",
+  "resizewest",
+  "screenshotselection",
+  "screenshotwindow",
+  "zoomout",
+  "zoomin",
+  "ibeamstroke",
+  "ibeamverticalstroke",
+  "ibeamvertical",
+  "ibeam",
+] as const;
+
+export type CursorAssetName = (typeof cursorAssetNames)[number];
+
+const customHotspots: Partial<Record<CursorAssetName, VecInput>> = {
+  notallowed: [8, 0],
+  copy: [8, 0],
+  poof: [8, 0],
+  busybutclickable: [8, 0],
+  makealias: [21.75, 10],
+  contextualmenu: [9, 7.4],
+  pointer: [12, 8.4],
+  pointinghand: [13.5, 9],
+  zoomout: [15, 15],
+  zoomin: [15, 15],
+};
+
+const nsNameAssetNameLookup: Record<NsCursorName, CursorAssetName> = {
+  arrow: "pointer",
+  iBeam: "ibeamstroke",
+  crosshair: "cross",
+  closedHand: "closedhand",
+  openHand: "openhand",
+  pointingHand: "pointinghand",
+  resizeLeft: "resizeleft",
+  resizeRight: "resizeright",
+  resizeLeftRight: "resizeleftright",
+  resizeUp: "resizeup",
+  resizeDown: "resizedown",
+  resizeUpDown: "resizeupdown",
+  disappearingItem: "poof",
+  iBeamCursorForVerticalLayout: "ibeamvertical",
+  operationNotAllowed: "notallowed",
+  dragLink: "makealias",
+  dragCopy: "copy",
+  contextualMenu: "contextualmenu",
+  windowResizeNorthEast: "resizenortheast",
+  windowResizeNorthWestSouthEast: "resizenorthwestsoutheast",
+  zoomIn: "zoomin",
+  windowResizeNorthWest: "resizenorthwest",
+  windowResizeSouthEast: "resizesoutheast",
+  windowResizeEastWest: "resizeeastwest",
+  windowResizeNorth: "resizenorth",
+  windowResizeEast: "resizeeast",
+  windowResizeNorthSouth: "resizenorthsouth",
+  windowResizeNorthEastSouthWest: "resizenortheastsouthwest",
+  windowResizeWest: "resizewest",
+  windowResizeSouth: "resizesouth",
+  windowResizeSouthWest: "resizesouthwest",
+  bottomRightResize: "resizesoutheast",
+  bottomLeftResize: "resizesouthwest",
+  topRightResize: "resizenortheast",
+  topLeftResize: "resizenorthwest",
+  help: "help",
+  notAllowed: "notallowed",
+  makeAlias: "makealias",
+  copy: "copy",
+  zoomOut: "zoomout",
+  busyButClickable: "busybutclickable",
+};
+
+const assetNameNsNameLookup = swapObjectKeysAndValues(nsNameAssetNameLookup);
+
+const size: Vec = { x: 35, y: 35 };
+const center: Vec = { x: 17.5, y: 17.5 };
+
+const cursors = cursorAssetNames.map((cursorAssetName): CursorHighQualityAsset => {
+  return {
+    name: cursorAssetName,
+    nsName: assetNameNsNameLookup[cursorAssetName] ?? null,
+    filename: `${cursorAssetName}.svg`,
+    hotspot: vec(customHotspots[cursorAssetName] ?? center),
+    url: `screen-studio-asset://cursors/macos/png/${cursorAssetName}.png`,
+    size,
+  };
+});
+
+const nsNameCursorAssetLookup: Record<NsCursorName, CursorHighQualityAsset> = objectMap(
+  nsNameAssetNameLookup,
+  (nsName) => {
+    return cursors.find((cursor) => cursor.name === nsName)!;
+  },
+);
+
+export function getCursorAssetNameByNsName(nsName: NsCursorName): CursorAssetName | null {
+  if (!getIsCursorNsName(nsName)) {
+    return null;
+  }
+
+  return nsNameAssetNameLookup[nsName] ?? null;
+}
+
+export function getCursorAssetByNsName(nsName: NsCursorName): CursorHighQualityAsset | null {
+  if (!getIsCursorNsName(nsName)) {
+    return null;
+  }
+
+  return nsNameCursorAssetLookup[nsName] ?? null;
+}
+
+export function getIsCursorAssetName(name: string): name is CursorAssetName {
+  return cursorAssetNames.includes(name as CursorAssetName);
+}

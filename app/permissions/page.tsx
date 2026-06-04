@@ -105,7 +105,7 @@ export default function PermissionsPage() {
   return (
     <main
       data-window="permission"
-      className="flex h-screen w-screen flex-col text-foreground select-none"
+      className="flex h-screen w-screen flex-col text-foreground select-none bg-transparent"
       style={DRAG}
     >
       <header className="p-5">

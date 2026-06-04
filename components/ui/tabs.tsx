@@ -1,7 +1,10 @@
 "use client";
 
 import {
+  Children,
+  cloneElement,
   createContext,
+  isValidElement,
   useCallback,
   useContext,
   useEffect,
@@ -10,6 +13,8 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type MouseEvent,
+  type ReactElement,
   type ReactNode,
 } from "react";
 import { motion } from "motion/react";
@@ -183,6 +188,12 @@ type TabsTriggerProps = {
   children: ReactNode;
   className?: string;
   disabled?: boolean;
+  asChild?: boolean;
+};
+
+type TriggerChildProps = {
+  onClick?: (event: MouseEvent<HTMLElement>) => void;
+  className?: string;
 };
 
 export function TabsTrigger({
@@ -190,6 +201,7 @@ export function TabsTrigger({
   children,
   className,
   disabled,
+  asChild,
 }: TabsTriggerProps) {
   const {
     activeTab,
@@ -205,6 +217,26 @@ export function TabsTrigger({
     registerValue(value);
     return () => unregisterValue(value);
   }, [value, registerValue, unregisterValue]);
+
+  if (asChild && isValidElement(children)) {
+    const child = Children.only(children) as ReactElement<TriggerChildProps>;
+    const childProps = child.props;
+    return cloneElement(child, {
+      role: "tab",
+      id: `${baseId}-tab-${value}`,
+      "aria-selected": isActive,
+      "aria-controls": `${baseId}-panel-${value}`,
+      "data-state": isActive ? "active" : "inactive",
+      "data-tabs-trigger": value,
+      tabIndex: isActive ? 0 : -1,
+      disabled,
+      onClick: (event: MouseEvent<HTMLElement>) => {
+        childProps.onClick?.(event);
+        if (!event.defaultPrevented) setActiveTab(value);
+      },
+      className: [childProps.className, className].filter(Boolean).join(" "),
+    } as Partial<TriggerChildProps> & Record<string, unknown>);
+  }
 
   return (
     <button

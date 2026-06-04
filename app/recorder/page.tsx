@@ -38,9 +38,19 @@ const EMPTY_STATE: RecorderState = {
     cameraDeviceId: null,
     cameraLabel: "No camera",
     hideCameraPreview: false,
-    hideCursor: false,
+    hideCursor: true,
     systemAudioScope: "all",
     systemAudioApplications: [],
+    captureKeystrokes: false,
+    // Initial placeholder for renderer hydration. The real values are
+    // streamed in by recorder:changed once the main process loads them.
+    recordingQuality: {
+      videoCodec: "hevc",
+      videoQuality: "high",
+      container: "mov",
+      resolutionMode: "native",
+      frameRate: 60,
+    },
   },
   sessionId: null,
   outputDir: null,
@@ -119,7 +129,7 @@ export default function RecorderPage() {
   return (
     <div
       data-window="recorder"
-      className="flex w-full h-13 items-center justify-center overflow-hidden"
+      className="flex w-full h-13 items-center justify-center overflow-hidden bg-transparent"
       style={DRAG}
     >
       <div className="flex h-full w-full items-center overflow-hidden px-1 select-none">

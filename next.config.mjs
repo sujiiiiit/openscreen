@@ -4,6 +4,7 @@ const nextConfig = {
   output: process.env.NEXT_EXPORT ? 'export' : undefined,
   trailingSlash: true,
   images: { unoptimized: true },
+  transpilePackages: ['@openscreen/timeline', '@openscreen/timeline-engine'],
 }
 
 export default nextConfig

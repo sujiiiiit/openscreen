@@ -1,0 +1,287 @@
+import { ITimelineEngine, TimelineEngine, TimelineRow } from '@openscreen/timeline-engine';
+import React, { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
+import { ScrollSync } from 'react-virtualized';
+import { TimelineClassNamesContext } from '../interface/class_names';
+import { MIN_SCALE_COUNT, PREFIX, START_CURSOR_TIME } from '../interface/const';
+import { TimelineEditor, TimelineState } from '../interface/timeline';
+import { cn } from '../utils/cn';
+import { checkProps } from '../utils/check_props';
+import { getScaleCountByRows, parserPixelToTime, parserTimeToPixel } from '../utils/deal_data';
+import { Cursor } from './cursor/cursor';
+import { EditArea } from './edit_area/edit_area';
+import { TimeArea, TimeAreaHandle } from './time_area/time_area';
+
+export const Timeline = React.forwardRef<TimelineState, TimelineEditor>((props, ref) => {
+  const checkedProps = checkProps(props);
+  const { style, className, classNames } = props;
+  let {
+    effects,
+    editorData: data,
+    scrollTop,
+    autoScroll,
+    hideCursor,
+    disableDrag,
+    scale,
+    scaleWidth,
+    startLeft,
+    minScaleCount,
+    maxScaleCount,
+    maxCursorTime,
+    onTimeAreaHover,
+    onChange,
+    engine,
+    autoReRender = true,
+    onScroll: onScrollVertical,
+  } = checkedProps;
+
+  const engineRef = useRef<ITimelineEngine>(engine || new TimelineEngine());
+  const domRef = useRef<HTMLDivElement>(null);
+  const areaRef = useRef<HTMLDivElement>(null);
+  // Shared between Cursor (sets on drag) and the root hover handler (reads to
+  // skip hover events). Keeps the package from re-emitting hover positions
+  // while the main playhead is being dragged.
+  const draggingCursorRef = useRef(false);
+  // Set by EditArea while a clip is being moved/resized (or a row reordered) so
+  // the root hover handler suppresses the preview cursor during the drag.
+  const draggingActionRef = useRef(false);
+
+  const scrollSync = useRef<ScrollSync>(null);
+  const timeAreaRef = useRef<TimeAreaHandle>(null);
+
+  // Editor data
+  const [editorData, setEditorData] = useState(data);
+  // Scale count
+  const [scaleCount, setScaleCount] = useState(MIN_SCALE_COUNT);
+  // Cursor position
+  const [cursorTime, setCursorTime] = useState(START_CURSOR_TIME);
+  // Whether playback is running
+  const [isPlaying, setIsPlaying] = useState(false);
+  // Current timeline width
+  const [width, setWidth] = useState(Number.MAX_SAFE_INTEGER);
+
+  /** Watch for data changes */
+  useLayoutEffect(() => {
+    handleSetScaleCount(getScaleCountByRows(data, { scale }));
+    setEditorData(data);
+  }, [data, minScaleCount, maxScaleCount, scale]);
+
+  useEffect(() => {
+    engineRef.current.effects = effects;
+  }, [effects]);
+
+  useEffect(() => {
+    engineRef.current.data = editorData;
+  }, [editorData]);
+
+  useEffect(() => {
+    autoReRender && engineRef.current.reRender();
+  }, [editorData]);
+
+  // deprecated
+  useEffect(() => {
+    scrollSync.current && scrollSync.current.setState({ scrollTop: scrollTop });
+  }, [scrollTop]);
+
+  /** Dynamically set the scale count */
+  const handleSetScaleCount = (value: number) => {
+    const data = Math.min(maxScaleCount, Math.max(minScaleCount, value));
+    setScaleCount(data);
+  };
+
+  /** Handle a programmatic data change */
+  const handleEditorDataChange = (editorData: TimelineRow[]) => {
+    const result = onChange?.(editorData);
+    if (result !== false) {
+      engineRef.current.data = editorData;
+      autoReRender && engineRef.current.reRender();
+    }
+  };
+
+  /** Handle the cursor */
+  const handleSetCursor = (param: { left?: number; time?: number; updateTime?: boolean }) => {
+    let { left, time = 0, updateTime = true } = param;
+    if (typeof left === 'undefined' && typeof time === 'undefined') return false;
+
+    if (typeof time === 'undefined') {
+      if (typeof left === 'undefined') left = parserTimeToPixel(time, { startLeft, scale, scaleWidth });
+      time = parserPixelToTime(left, { startLeft, scale, scaleWidth });
+    }
+
+    let result = true;
+    if (updateTime) {
+      result = engineRef.current.setTime(time);
+      autoReRender && engineRef.current.reRender();
+    }
+    result && setCursorTime(time);
+    return result;
+  };
+
+  /** Adjust scrollLeft */
+  const handleDeltaScrollLeft = (delta: number) => {
+    // Stop auto-scrolling once the maximum distance is reached
+    const data = (scrollSync.current?.state?.scrollLeft ?? 0) + delta;
+    if (data > scaleCount * (scaleWidth - 1) + startLeft - width) return;
+    scrollSync.current && scrollSync.current.setState({ scrollLeft: Math.max(scrollSync.current.state.scrollLeft + delta, 0) });
+  };
+
+  // Wire up engine-related events
+  useEffect(() => {
+    const handleTime = ({ time }: { time: number }) => {
+      handleSetCursor({ time, updateTime: false });
+    };
+    const handlePlay = () => setIsPlaying(true);
+    const handlePaused = () => setIsPlaying(false);
+    engineRef.current.on('setTimeByTick', handleTime);
+    engineRef.current.on('play', handlePlay);
+    engineRef.current.on('paused', handlePaused);
+  }, []);
+
+  // ref data
+  useImperativeHandle(ref, () => ({
+    get target() {
+      return domRef.current;
+    },
+    get listener() {
+      return engineRef.current;
+    },
+    get isPlaying() {
+      return engineRef.current.isPlaying;
+    },
+    get isPaused() {
+      return engineRef.current.isPaused;
+    },
+    setPlayRate: engineRef.current.setPlayRate.bind(engineRef.current),
+    getPlayRate: engineRef.current.getPlayRate.bind(engineRef.current),
+    setTime: (time: number) => handleSetCursor({ time }),
+    getTime: engineRef.current.getTime.bind(engineRef.current),
+    reRender: engineRef.current.reRender.bind(engineRef.current),
+    play: (param: Parameters<TimelineState['play']>[0]) => engineRef.current.play({ ...param }),
+    pause: engineRef.current.pause.bind(engineRef.current),
+    setScrollLeft: (val) => {
+      scrollSync.current && scrollSync.current.setState({ scrollLeft: Math.max(val, 0) });
+    },
+    setScrollTop: (val) => {
+      scrollSync.current && scrollSync.current.setState({ scrollTop: Math.max(val, 0) });
+    },
+  }));
+
+  // Watch for timeline area width changes
+  useEffect(() => {
+    if (areaRef.current) {
+      const resizeObserver = new ResizeObserver(() => {
+        if (!areaRef.current) return;
+        setWidth(areaRef.current.getBoundingClientRect().width);
+      });
+      resizeObserver.observe(areaRef.current!);
+      return () => {
+        resizeObserver && resizeObserver.disconnect();
+      };
+    }
+  }, []);
+
+  // Emit the timeline time under the pointer for the hover preview cursor.
+  // Lives on the root (not just the ruler) so hovering anywhere over the
+  // timeline — ruler *or* tracks — previews that frame. Suppressed while the
+  // main playhead or a clip is being dragged so we never emit a competing
+  // hover stream over the active interaction. scrollLeft is read live from the
+  // ScrollSync instance to stay correct mid-scroll.
+  const handleRootHoverMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (hideCursor || !onTimeAreaHover) return;
+    if (draggingCursorRef.current || draggingActionRef.current) return;
+    const node = domRef.current;
+    if (!node) return;
+    const rect = node.getBoundingClientRect();
+    const scroll = scrollSync.current?.state.scrollLeft ?? 0;
+    const position = e.clientX - rect.left;
+    const left = Math.max(position + scroll, startLeft);
+    if (left > maxScaleCount * scaleWidth + startLeft - scroll) return;
+
+    const rawTime = parserPixelToTime(left, { startLeft, scale, scaleWidth });
+    const time = Number.isFinite(maxCursorTime) ? Math.min(rawTime, maxCursorTime) : rawTime;
+    onTimeAreaHover(time);
+  };
+
+  const handleRootHoverLeave = () => {
+    if (hideCursor || !onTimeAreaHover) return;
+    onTimeAreaHover(null);
+  };
+
+  return (
+    <TimelineClassNamesContext.Provider value={classNames ?? {}}>
+    <div
+      ref={domRef}
+      style={style}
+      onMouseMove={handleRootHoverMove}
+      onMouseLeave={handleRootHoverLeave}
+      className={cn(
+        PREFIX,
+        'relative flex h-[600px] w-[600px] min-h-8 flex-col overflow-hidden bg-timeline-bg text-xs',
+        disableDrag && `${PREFIX}-disable`,
+        className,
+        classNames?.root,
+      )}
+    >
+      <ScrollSync ref={scrollSync}>
+        {({ scrollLeft, scrollTop, onScroll }) => (
+          <>
+            <TimeArea
+              {...checkedProps}
+              ref={timeAreaRef}
+              timelineWidth={width}
+              disableDrag={disableDrag || isPlaying}
+              setCursor={handleSetCursor}
+              cursorTime={cursorTime}
+              editorData={editorData}
+              scaleCount={scaleCount}
+              setScaleCount={handleSetScaleCount}
+              onScroll={onScroll}
+              scrollLeft={scrollLeft}
+            />
+            <EditArea
+              {...checkedProps}
+              timelineWidth={width}
+              ref={(ref) => {
+                (areaRef.current as any) = ref?.domRef.current;
+              }}
+              disableDrag={disableDrag || isPlaying}
+              draggingActionRef={draggingActionRef}
+              editorData={editorData}
+              cursorTime={cursorTime}
+              scaleCount={scaleCount}
+              setScaleCount={handleSetScaleCount}
+              scrollTop={scrollTop}
+              scrollLeft={scrollLeft}
+              setEditorData={handleEditorDataChange}
+              deltaScrollLeft={autoScroll ? handleDeltaScrollLeft : () => {}}
+              onScroll={(params) => {
+                onScroll(params);
+                // Sync the ruler immediately (bypass the ScrollSync → prop → Grid state chain
+                // which lags 2 React renders behind the tracks, causing visual desync).
+                timeAreaRef.current?.syncScrollLeft(params.scrollLeft);
+                onScrollVertical && onScrollVertical(params);
+              }}
+            />
+            {!hideCursor && (
+              <Cursor
+                {...checkedProps}
+                timelineWidth={width}
+                disableDrag={isPlaying}
+                scrollLeft={scrollLeft}
+                scaleCount={scaleCount}
+                setScaleCount={handleSetScaleCount}
+                setCursor={handleSetCursor}
+                cursorTime={cursorTime}
+                editorData={editorData}
+                areaRef={areaRef}
+                scrollSync={scrollSync}
+                deltaScrollLeft={autoScroll ? handleDeltaScrollLeft : undefined}
+                draggingCursorRef={draggingCursorRef}
+              />
+            )}
+          </>
+        )}
+      </ScrollSync>
+    </div>
+    </TimelineClassNamesContext.Provider>
+  );
+});

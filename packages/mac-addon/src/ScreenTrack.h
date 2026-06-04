@@ -27,6 +27,12 @@
 // Output destination.
 - (void)setOutputURL:(NSURL *)url;
 
+// The container's file extension after option coercion ("mov" or "mp4"). Used
+// by RecorderSession to assemble the screen file name. Resolved during
+// -initWithOptions:sessionId: so it's safe to call before
+// -streamConfigurationForContent:.
+- (NSString *)fileExtension;
+
 // SCKit setup.
 //
 // `getShareableContent:` is the legacy single-arg variant: always fresh, used
@@ -94,4 +100,12 @@
 - (NSURL *)url;
 - (BOOL)hasWriter;
 - (BOOL)hasStarted;
+
+// Host-clock time (ms, CMClockGetHostTimeClock domain) of the first written
+// video frame — i.e. the moment that maps to source time 0 in the .mov. The
+// input track anchors its cursor timeline to this so cursor and video share an
+// origin (ScreenCaptureKit delivers the first frame ~100–200 ms after the
+// stream starts, so hostStartMs would lag the video by that much). Returns 0
+// before the first frame is written.
+- (double)sessionStartHostMs;
 @end

@@ -5,7 +5,7 @@ export type WindowConfig = Omit<BrowserWindowConstructorOptions, 'x' | 'y' | 'we
 
 // Shared options for the recorder bar across platforms.
 const recorderBarBase: WindowConfig = {
-  title: 'OpenScreen Recorder',
+  title: 'Recorder - openscreen',
   width: 665,
   height: 52,
   minHeight: 52,
@@ -86,6 +86,53 @@ const permissionBase: WindowConfig = {
   acceptFirstMouse: true,
 }
 
+// Recording Quality settings window. Triggered from the recorder bar's
+// settings menu ("Recording quality…"). Modal-ish floating panel large
+// enough for codec / quality / container / HDR / alpha controls + a live
+// bitrate preview.
+const recordingSettingsBase: WindowConfig = {
+  title: 'Recording Quality',
+  width: 480,
+  height: 640,
+  show: false,
+  backgroundColor: '#00000000',
+  alwaysOnTop: true,
+  hasShadow: true,
+  roundedCorners: true,
+  fullscreen: false,
+  fullscreenable: false,
+  resizable: false,
+  maximizable: false,
+  minimizable: false,
+  movable: true,
+  acceptFirstMouse: true,
+}
+
+// Export window. Triggered from the editor titlebar's Export button. Hosts
+// the settings form (resolution / format / fps) and swaps to a progress +
+// cancel view during encode. Same vibrancy panel chrome as the permission
+// and Recording Quality windows so the three feel like one family of
+// utility surfaces — but unlike those, the export window is NOT
+// alwaysOnTop: a long export shouldn't sit over the user's other work
+// while they wait, and the window is a regular minimisable surface.
+const exportBase: WindowConfig = {
+  title: 'Export',
+  width: 560,
+  height: 280,
+  show: false,
+  backgroundColor: '#00000000',
+  alwaysOnTop: false,
+  hasShadow: true,
+  roundedCorners: true,
+  fullscreen: false,
+  fullscreenable: false,
+  resizable: false,
+  maximizable: false,
+  minimizable: true,
+  movable: true,
+  acceptFirstMouse: true,
+}
+
 const windowPickerBase: WindowConfig = {
   title: 'OpenScreen Picker',
   width: 1,
@@ -142,6 +189,12 @@ if (process.platform === 'darwin') {
   cameraBase.titleBarStyle = 'hidden'
   cameraBase.vibrancy = 'under-window'
   cameraBase.visualEffectState = 'active'
+  recordingSettingsBase.titleBarStyle = 'hidden'
+  recordingSettingsBase.vibrancy = 'under-window'
+  recordingSettingsBase.visualEffectState = 'active'
+  exportBase.titleBarStyle = 'hidden'
+  exportBase.vibrancy = 'under-window'
+  exportBase.visualEffectState = 'active'
 } else {
   // Windows / Linux: no NSWindow chrome to inherit — go fully frameless and
   // transparent. backgroundMaterial 'acrylic' provides the native blur on
@@ -154,11 +207,17 @@ if (process.platform === 'darwin') {
   permissionBase.transparent = true
   cameraBase.frame = false
   cameraBase.transparent = true
+  recordingSettingsBase.frame = false
+  recordingSettingsBase.transparent = true
+  exportBase.frame = false
+  exportBase.transparent = true
   if (process.platform === 'win32') {
     recorderBarBase.backgroundMaterial = 'acrylic'
     recordingControlsBase.backgroundMaterial = 'acrylic'
     permissionBase.backgroundMaterial = 'acrylic'
     cameraBase.backgroundMaterial = 'acrylic'
+    recordingSettingsBase.backgroundMaterial = 'acrylic'
+    exportBase.backgroundMaterial = 'acrylic'
   }
 }
 
@@ -168,4 +227,6 @@ export const windowConfigs = {
   permissionWin: permissionBase,
   cameraWin: cameraBase,
   windowPickerWin: windowPickerBase,
+  recordingSettingsWin: recordingSettingsBase,
+  exportWin: exportBase,
 }

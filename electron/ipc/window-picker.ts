@@ -15,6 +15,7 @@ import addon, {
 } from '@openscreen/mac-addon'
 import { subscribeActiveSpaceChange } from '../mac-spaces'
 import { windowConfigs } from '../windowConfigs'
+import { resolveDisplayUnderCursor } from './display-target'
 import type { RecorderPickerMode } from './recorder'
 
 export interface PickerOverlayTarget {
@@ -74,6 +75,7 @@ const MIN_REGION_HEIGHT = 90
 
 let options: RegisterWindowPickerOptions | null = null
 let overlayWin: BrowserWindow | null = null
+let activeRegionOverlayWin: BrowserWindow | null = null
 let pickerMode: RecorderPickerMode | null = null
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let activeTarget: ActivePickerTarget | null = null
@@ -83,8 +85,8 @@ let lastResolvedAt = 0
 let windowSnapshot: WindowSource[] = []
 let windowSnapshotUpdatedAt = 0
 let cachedVirtualBounds: Rectangle | null = null
-let overlayBoundsDirty = true
-let overlayIgnoresMouse: boolean | null = null
+const overlayIgnoresMouse = new WeakMap<BrowserWindow, boolean>()
+const regionOverlayWins = new Set<BrowserWindow>()
 let confirming = false
 let regionOverlayLocked = false
 let displayListenersRegistered = false
@@ -202,6 +204,13 @@ function displayBounds(display: Display): Rectangle {
   return roundedBounds(display.bounds)
 }
 
+function overlayDisplayBoundsForTarget(target: ActivePickerTarget): Rectangle {
+  const matchingDisplay = screen
+    .getAllDisplays()
+    .find((display) => display.id === target.displayId)
+  return displayBounds(matchingDisplay ?? displayForBounds(target.bounds))
+}
+
 function evenDimension(value: number): number {
   const rounded = Math.round(value)
   const even = rounded % 2 === 0 ? rounded : rounded - 1
@@ -293,26 +302,24 @@ function regionPickerTarget(bounds: Rectangle, display: Display): ActivePickerTa
 }
 
 function displayPickerTarget(cursor = screen.getCursorScreenPoint()): ActivePickerTarget {
-  const electronDisplay = screen.getDisplayNearestPoint(cursor)
-  const bounds = displayBounds(electronDisplay)
-  const width = Math.round(bounds.width * electronDisplay.scaleFactor)
-  const height = Math.round(bounds.height * electronDisplay.scaleFactor)
+  const resolvedDisplay = resolveDisplayUnderCursor(cursor)
+  const bounds = resolvedDisplay.bounds
   return {
     mode: 'display',
     title: 'Display',
-    sizeLabel: `${Math.round(width)} × ${Math.round(height)}`,
+    sizeLabel: `${resolvedDisplay.pixelWidth} × ${resolvedDisplay.pixelHeight}`,
     modeLabel: 'Full screen',
     bounds,
-    displayId: electronDisplay.id,
+    displayId: resolvedDisplay.displayId,
     target: {
       type: 'display',
-      displayId: electronDisplay.id,
+      displayId: resolvedDisplay.displayId,
       title: 'Display',
       applicationName: 'Display',
       x: bounds.x,
       y: bounds.y,
-      width,
-      height,
+      width: resolvedDisplay.pixelWidth,
+      height: resolvedDisplay.pixelHeight,
     },
   }
 }
@@ -339,8 +346,15 @@ function sameWindowSource(source: WindowSource, candidate: WindowSource): boolea
 }
 
 function targetPayload(target: ActivePickerTarget): PickerOverlayTarget {
-  const overlayBounds = overlayWin && !overlayWin.isDestroyed()
-    ? overlayWin.getBounds()
+  return targetPayloadForOverlay(target, overlayWin)
+}
+
+function targetPayloadForOverlay(
+  target: ActivePickerTarget,
+  overlay: BrowserWindow | null,
+): PickerOverlayTarget {
+  const overlayBounds = overlay && !overlay.isDestroyed()
+    ? overlay.getBounds()
     : virtualDesktopBounds()
   return {
     mode: target.mode,
@@ -359,6 +373,26 @@ function targetPayload(target: ActivePickerTarget): PickerOverlayTarget {
   }
 }
 
+function activeOverlays(): BrowserWindow[] {
+  const overlays = new Set<BrowserWindow>()
+  for (const overlay of regionOverlayWins) {
+    if (!overlay.isDestroyed()) overlays.add(overlay)
+  }
+  if (overlayWin && !overlayWin.isDestroyed()) overlays.add(overlayWin)
+  return Array.from(overlays)
+}
+
+function sendTargetToOverlay(
+  overlay: BrowserWindow,
+  target: ActivePickerTarget | null,
+): void {
+  if (overlay.isDestroyed()) return
+  overlay.webContents.send(
+    'windowPicker:targetChanged',
+    target ? targetPayloadForOverlay(target, overlay) : null,
+  )
+}
+
 function cursorIsInControlZone(target: ActivePickerTarget): boolean {
   const cursor = screen.getCursorScreenPoint()
   const centerX = target.bounds.x + target.bounds.width / 2
@@ -372,8 +406,8 @@ function cursorIsInControlZone(target: ActivePickerTarget): boolean {
 }
 
 function setOverlayIgnoresMouse(overlay: BrowserWindow, ignore: boolean): void {
-  if (overlayIgnoresMouse === ignore) return
-  overlayIgnoresMouse = ignore
+  if (overlayIgnoresMouse.get(overlay) === ignore) return
+  overlayIgnoresMouse.set(overlay, ignore)
   overlay.setIgnoreMouseEvents(ignore, { forward: true })
 }
 
@@ -384,26 +418,46 @@ function updateOverlayInteractivity(
   setOverlayIgnoresMouse(overlay, !cursorIsInControlZone(target))
 }
 
-function syncOverlayBounds(overlay: BrowserWindow): void {
-  if (!overlayBoundsDirty) return
+function overlayBoundsForTarget(
+  target: ActivePickerTarget | null,
+  overlay: BrowserWindow,
+): Rectangle {
+  if (target && target.mode !== 'region') {
+    return overlayDisplayBoundsForTarget(target)
+  }
+  if (target?.mode === 'region') {
+    return roundedBounds(overlay.getBounds())
+  }
+  return virtualDesktopBounds()
+}
 
-  const nextBounds = virtualDesktopBounds()
+function syncOverlayBounds(
+  overlay: BrowserWindow,
+  target: ActivePickerTarget | null = activeTarget,
+): void {
+  const nextBounds = overlayBoundsForTarget(target, overlay)
   if (boundsKey(overlay.getBounds()) !== boundsKey(nextBounds)) {
     overlay.setBounds(nextBounds, false)
+    // AppKit may clear collectionBehavior on setBounds. Re-pin immediately
+    // so a display picker overlay moved from monitor to monitor stays visible
+    // on the active Space for that monitor.
+    pinOverlayAcrossSpaces(overlay)
   }
-  overlayBoundsDirty = false
 }
 
 function markOverlayBoundsDirty(): void {
   cachedVirtualBounds = null
   invalidateWindowSnapshot()
-  overlayBoundsDirty = true
+  if (pickerMode === 'region' && regionOverlayWins.size > 0 && !activeRegionOverlayWin) {
+    createRegionOverlays()
+    return
+  }
   const overlay = overlayWin
   if (!overlay || overlay.isDestroyed()) return
 
   syncOverlayBounds(overlay)
   if (activeTarget) {
-    overlay.webContents.send('windowPicker:targetChanged', targetPayload(activeTarget))
+    sendTargetToOverlay(overlay, activeTarget)
   }
 }
 
@@ -447,8 +501,13 @@ function pinOverlayAcrossSpaces(overlay: BrowserWindow): void {
   }
 }
 
-function createOverlay(): BrowserWindow {
-  const bounds = virtualDesktopBounds()
+function createOverlay({
+  bounds = virtualDesktopBounds(),
+  primary = true,
+}: {
+  bounds?: Rectangle
+  primary?: boolean
+} = {}): BrowserWindow {
   const overlay = new BrowserWindow({
     ...windowConfigs.windowPickerWin,
     x: bounds.x,
@@ -459,22 +518,24 @@ function createOverlay(): BrowserWindow {
   })
 
   pinOverlayAcrossSpaces(overlay)
-  overlayIgnoresMouse = null
   setOverlayIgnoresMouse(overlay, true)
   overlay.on('closed', () => {
     if (overlayWin === overlay) {
       overlayWin = null
-      overlayIgnoresMouse = null
     }
+    if (activeRegionOverlayWin === overlay) {
+      activeRegionOverlayWin = null
+    }
+    regionOverlayWins.delete(overlay)
+    overlayIgnoresMouse.delete(overlay)
   })
   overlay.webContents.on('did-finish-load', () => {
     if (activeTarget) {
-      overlay.webContents.send('windowPicker:targetChanged', targetPayload(activeTarget))
+      sendTargetToOverlay(overlay, activeTarget)
     }
   })
   options?.loadAppRoute(overlay, '/window-picker/')
-  overlayWin = overlay
-  overlayBoundsDirty = false
+  if (primary) overlayWin = overlay
   return overlay
 }
 
@@ -487,10 +548,67 @@ function pickerOverlay(): BrowserWindow {
 function clearOverlayTarget(): void {
   activeTarget = null
   lastTargetKey = ''
-  const overlay = overlayWin
-  if (!overlay || overlay.isDestroyed()) return
-  setOverlayIgnoresMouse(overlay, pickerMode === 'region' ? false : true)
-  overlay.webContents.send('windowPicker:targetChanged', null)
+  for (const overlay of activeOverlays()) {
+    setOverlayIgnoresMouse(overlay, pickerMode === 'region' ? false : true)
+    sendTargetToOverlay(overlay, null)
+  }
+}
+
+function destroyRegionOverlaysExcept(keepOverlay: BrowserWindow | null): void {
+  for (const overlay of Array.from(regionOverlayWins)) {
+    if (overlay === keepOverlay) continue
+    setOverlayIgnoresMouse(overlay, true)
+    if (!overlay.isDestroyed()) overlay.destroy()
+    regionOverlayWins.delete(overlay)
+  }
+  if (keepOverlay && !keepOverlay.isDestroyed()) {
+    regionOverlayWins.add(keepOverlay)
+  }
+}
+
+function activateRegionOverlay(overlay: BrowserWindow): void {
+  if (overlay.isDestroyed()) return
+  activeRegionOverlayWin = overlay
+  overlayWin = overlay
+  destroyRegionOverlaysExcept(overlay)
+  setOverlayIgnoresMouse(overlay, false)
+  if (!overlay.isVisible()) {
+    overlay.showInactive()
+  }
+  pinOverlayAcrossSpaces(overlay)
+  overlay.moveTop()
+}
+
+function createRegionOverlays(): BrowserWindow[] {
+  activeRegionOverlayWin = null
+  activeTarget = null
+  lastTargetKey = ''
+  destroyRegionOverlaysExcept(null)
+  if (overlayWin && !overlayWin.isDestroyed()) {
+    setOverlayIgnoresMouse(overlayWin, true)
+    overlayWin.destroy()
+  }
+  overlayWin = null
+
+  const displays = screen.getAllDisplays()
+  const overlayDisplays = displays.length > 0
+    ? displays
+    : [screen.getPrimaryDisplay()]
+
+  return overlayDisplays.map((display, index) => {
+    const overlay = createOverlay({
+      bounds: displayBounds(display),
+      primary: index === 0,
+    })
+    regionOverlayWins.add(overlay)
+    setOverlayIgnoresMouse(overlay, false)
+    if (!overlay.isVisible()) {
+      overlay.showInactive()
+    }
+    pinOverlayAcrossSpaces(overlay)
+    overlay.moveTop()
+    return overlay
+  })
 }
 
 function resetPickerTracking({ resetCursor = true } = {}): void {
@@ -506,19 +624,26 @@ function resetPickerTracking({ resetCursor = true } = {}): void {
 function destroyOverlay(): void {
   const overlay = overlayWin
   overlayWin = null
-  overlayIgnoresMouse = null
+  activeRegionOverlayWin = null
   regionOverlayLocked = false
   resetPickerTracking()
+  for (const regionOverlay of Array.from(regionOverlayWins)) {
+    if (regionOverlay === overlay) continue
+    setOverlayIgnoresMouse(regionOverlay, true)
+    if (!regionOverlay.isDestroyed()) regionOverlay.destroy()
+  }
+  regionOverlayWins.clear()
   if (!overlay || overlay.isDestroyed()) return
 
   setOverlayIgnoresMouse(overlay, true)
   overlay.destroy()
-  overlayIgnoresMouse = null
 }
 
-function showTarget(target: ActivePickerTarget): void {
-  const overlay = pickerOverlay()
-  syncOverlayBounds(overlay)
+function showTarget(
+  target: ActivePickerTarget,
+  overlay = pickerOverlay(),
+): void {
+  syncOverlayBounds(overlay, target)
   if (target.mode === 'region') {
     setOverlayIgnoresMouse(overlay, false)
   } else {
@@ -539,29 +664,31 @@ function showTarget(target: ActivePickerTarget): void {
   activeTarget = target
   if (nextKey !== lastTargetKey || iconChanged) {
     lastTargetKey = nextKey
-    overlay.webContents.send('windowPicker:targetChanged', targetPayload(target))
+    sendTargetToOverlay(overlay, target)
   }
 }
 
 function handleActiveSpaceChanged(): void {
   if (!pickerMode && !regionOverlayLocked) return
-  const overlay = overlayWin
-  if (!overlay || overlay.isDestroyed()) return
+  const overlays = activeOverlays()
+  if (overlays.length === 0) return
   // AppKit may have cleared the collection behavior during the Space
   // transition; re-pin before forcing a re-resolve so the overlay shows up on
   // the new Space immediately rather than waiting for the next revalidate tick.
-  pinOverlayAcrossSpaces(overlay)
-  if (!overlay.isVisible()) overlay.showInactive()
-  if (overlay.isVisible()) overlay.moveTop()
+  for (const overlay of overlays) {
+    pinOverlayAcrossSpaces(overlay)
+    if (!overlay.isVisible()) overlay.showInactive()
+    if (overlay.isVisible()) overlay.moveTop()
+  }
   if (regionOverlayLocked) {
-    if (activeTarget) {
-      overlay.webContents.send('windowPicker:targetChanged', targetPayload(activeTarget))
+    if (activeTarget && overlayWin && !overlayWin.isDestroyed()) {
+      sendTargetToOverlay(overlayWin, activeTarget)
     }
     return
   }
   if (pickerMode === 'region') {
-    if (activeTarget) {
-      overlay.webContents.send('windowPicker:targetChanged', targetPayload(activeTarget))
+    if (activeTarget && overlayWin && !overlayWin.isDestroyed()) {
+      sendTargetToOverlay(overlayWin, activeTarget)
     }
     return
   }
@@ -657,7 +784,7 @@ function scheduleWindowIconFetch(source: WindowSource): void {
 
     const overlay = overlayWin
     if (!overlay || overlay.isDestroyed()) return
-    overlay.webContents.send('windowPicker:targetChanged', targetPayload(nextTarget))
+    sendTargetToOverlay(overlay, nextTarget)
   }, 0)
 }
 
@@ -728,16 +855,6 @@ function pollPickerTarget(): void {
   showTarget(target)
 }
 
-function showRegionOverlay(overlay: BrowserWindow): void {
-  clearOverlayTarget()
-  setOverlayIgnoresMouse(overlay, false)
-  if (!overlay.isVisible()) {
-    overlay.showInactive()
-    pinOverlayAcrossSpaces(overlay)
-    overlay.moveTop()
-  }
-}
-
 function regionSelectionFromRenderer(
   sender: WebContents,
   bounds: RegionSelectionBounds | null,
@@ -752,6 +869,7 @@ function regionSelectionFromRenderer(
   }
 
   if (!bounds) {
+    activateRegionOverlay(overlay)
     clearOverlayTarget()
     return { target: null, message: null }
   }
@@ -793,8 +911,9 @@ function regionSelectionFromRenderer(
   }
 
   const nextTarget = regionPickerTarget(globalBounds, touchedDisplays[0])
-  showTarget(nextTarget)
-  return { target: targetPayload(nextTarget), message: null }
+  activateRegionOverlay(overlay)
+  showTarget(nextTarget, overlay)
+  return { target: targetPayloadForOverlay(nextTarget, overlay), message: null }
 }
 
 function stopPolling(): void {
@@ -836,7 +955,10 @@ function lockRegionOverlayForRecording(target: ActivePickerTarget): void {
   confirming = false
   regionOverlayLocked = true
   activeTarget = target
-  const overlay = pickerOverlay()
+  const overlay = activeRegionOverlayWin && !activeRegionOverlayWin.isDestroyed()
+    ? activeRegionOverlayWin
+    : pickerOverlay()
+  activateRegionOverlay(overlay)
   syncOverlayBounds(overlay)
   pinOverlayAcrossSpaces(overlay)
   setOverlayIgnoresMouse(overlay, true)
@@ -844,7 +966,7 @@ function lockRegionOverlayForRecording(target: ActivePickerTarget): void {
     overlay.showInactive()
   }
   overlay.moveTop()
-  overlay.webContents.send('windowPicker:targetChanged', targetPayload(target))
+  sendTargetToOverlay(overlay, target)
   options?.onPickerFinished()
 }
 
@@ -878,15 +1000,14 @@ export function startWindowPicker(mode: RecorderPickerMode): void {
   lastCursorKey = ''
   lastResolvedAt = 0
   invalidateWindowSnapshot()
-  overlayBoundsDirty = true
-  const overlay = pickerOverlay()
-  // Re-pin every session in case the overlay was first created on a different
-  // Space and AppKit dropped CanJoinAllSpaces in the meantime.
-  pinOverlayAcrossSpaces(overlay)
-  syncOverlayBounds(overlay)
   if (mode === 'region') {
-    showRegionOverlay(overlay)
+    createRegionOverlays()
   } else {
+    const overlay = pickerOverlay()
+    // Re-pin every session in case the overlay was first created on a different
+    // Space and AppKit dropped CanJoinAllSpaces in the meantime.
+    pinOverlayAcrossSpaces(overlay)
+    syncOverlayBounds(overlay)
     pollPickerTarget()
     pollTimer = setInterval(pollPickerTarget, PICKER_POLL_INTERVAL_MS)
   }

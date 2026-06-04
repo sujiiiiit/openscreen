@@ -1,36 +1,61 @@
-"use client";
+"use client"
 
 import {
   ResizableHandle,
   ResizablePanel,
   ResizablePanelGroup,
-} from "@/components/ui/resizable";
-import { TooltipProvider } from "@/components/ui/tooltip";
-import { Titlebar } from "@/components/ui/titlebar";
-import EditorSidebar from "@/components/editor/sidebar";
-import EditorMain from "@/components/editor/main";
-import EditorFooter from "@/components/editor/footer";
+} from "@/components/ui/resizable"
+import { TooltipProvider } from "@/components/ui/tooltip"
+import { Titlebar } from "@/components/ui/titlebar"
+import { EditorCanvasProvider } from "@/components/editor/canvas/provider"
+import { ProjectProvider } from "@/components/editor/project/provider"
+import { SidebarTabsProvider } from "@/components/editor/sidebar/tabs-provider"
+import { SidebarSelectionBridge } from "@/components/editor/sidebar/selection-bridge"
+import EditorSidebar from "@/components/editor/sidebar"
+import EditorMain from "@/components/editor/main"
+import EditorFooter from "@/components/editor/footer"
 
 export default function Page() {
   return (
     <TooltipProvider>
-      <div className="h-dvh w-dvw overflow-hidden flex flex-col">
-        <Titlebar />
-        <div className="flex-1 min-h-0">
-          <ResizablePanelGroup orientation="vertical">
-            <ResizablePanel>
-              <section className="flex h-full flex-row">
-                <EditorSidebar />
-                <EditorMain />
-              </section>
-            </ResizablePanel>
-            <ResizableHandle withHandle />
-            <ResizablePanel defaultSize={31} minSize={30} maxSize={60}>
-              <EditorFooter />
-            </ResizablePanel>
-          </ResizablePanelGroup>
-        </div>
-      </div>
+      <ProjectProvider>
+        <EditorCanvasProvider>
+          <SidebarTabsProvider>
+            <SidebarSelectionBridge />
+            <div className="flex h-dvh w-dvw flex-col overflow-hidden">
+              <Titlebar />
+              <div className="min-h-0 flex-1">
+                <ResizablePanelGroup
+                  id="editor-root-layout"
+                  orientation="vertical"
+                >
+                  <ResizablePanel
+                    id="editor-workspace-panel"
+                    defaultSize="69%"
+                    minSize="260px"
+                    style={{ overflow: "hidden" }}
+                  >
+                    <section className="flex h-full min-h-0 flex-row overflow-hidden">
+                      <EditorSidebar />
+                      <EditorMain />
+                    </section>
+                  </ResizablePanel>
+                  <ResizableHandle aria-label="Resize workspace and timeline" />
+                  <ResizablePanel
+                    id="editor-timeline-panel"
+                    defaultSize="31%"
+                    minSize="140px"
+                    maxSize="60%"
+                    style={{ overflow: "hidden" }}
+                  >
+                    <EditorFooter />
+                  </ResizablePanel>
+                </ResizablePanelGroup>
+              </div>
+            </div>
+          </SidebarTabsProvider>
+        </EditorCanvasProvider>
+      </ProjectProvider>
     </TooltipProvider>
-  );
+  )
 }

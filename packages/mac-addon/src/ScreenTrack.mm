@@ -14,31 +14,79 @@
 
 #include "Events.h"
 
-// Match OBS: 10-bit packed RGB (`l10r` = kCVPixelFormatType_ARGB2101010LEPacked).
-// Capturing in 10-bit avoids the precision loss of 8-bit YCbCr 4:2:0 — text
-// edges and saturated colours stay sharp through to the encoder.
-static const OSType kPixelFormat = kCVPixelFormatType_ARGB2101010LEPacked;
+// SDR pipeline pixel format. Matches BetterCapture's choice (and Apple's
+// recommended SDR default): BGRA 8-bit. A previous iteration here used
+// `ARGB2101010LEPacked` (10-bit RGB) to preserve more capture precision —
+// OBS does the same — but the result was a "10-bit Display-P3 throughout"
+// pipeline that diverged from BetterCapture's output in two ways the user
+// could see:
+//   1. Colors appeared more saturated on P3 displays (correctly P3, but
+//      different from BetterCapture's BT.709-tagged output).
+//   2. Some downstream tools / players mishandle 10-bit SDR HEVC.
+// Sticking with BGRA 8-bit makes our SDR output bit-for-bit comparable to
+// BetterCapture (same primaries, same matrix, same bit depth, same encoder
+// profile).
+static const OSType kSDRPixelFormat = kCVPixelFormatType_32BGRA;
 
-static AVVideoCodecType PreferredScreenCodec() {
+static BOOL IsAppleSiliconCPU(void) {
   int isAppleSilicon = 0;
   size_t size = sizeof(isAppleSilicon);
-  if (sysctlbyname("hw.optional.arm64", &isAppleSilicon, &size, NULL, 0) == 0 &&
-      isAppleSilicon == 1) {
-    return AVVideoCodecTypeHEVC;
-  }
-  return AVVideoCodecTypeH264;
+  return sysctlbyname("hw.optional.arm64", &isAppleSilicon, &size, NULL, 0) == 0 &&
+         isAppleSilicon == 1;
 }
 
-static NSString *ProfileLevelForCodec(AVVideoCodecType codec) {
-  if ([codec isEqualToString:AVVideoCodecTypeHEVC]) {
-    // HEVC Main10 — required to preserve the 10-bit precision we capture in.
-    // HEVC profile/level constants live in VideoToolbox per AVVideoSettings.h
-    // ("HEVC profiles/levels are defined in VideoToolbox/VTCompressionProperties.h,
-    // e.g. kVTProfileLevel_HEVC_Main_AutoLevel. The constants defined there
-    // can be used as the value for the key AVVideoProfileLevelKey.").
-    return (__bridge NSString *)kVTProfileLevel_HEVC_Main10_AutoLevel;
-  }
-  return AVVideoProfileLevelH264HighAutoLevel;
+static AVVideoCodecType DefaultScreenCodec(void) {
+  return IsAppleSiliconCPU() ? AVVideoCodecTypeHEVC : AVVideoCodecTypeH264;
+}
+
+// Map the JS `videoCodec` string onto an AVVideoCodecType. Returns nil if the
+// string is empty/unknown (caller falls back to DefaultScreenCodec).
+//
+// Two codecs intentionally exposed: HEVC (default) and H.264 (compat).
+// ProRes was dropped (300+ Mbps editing-only files); HEVC-with-Alpha and
+// HDR were dropped because the pipeline emits universally-playable BT.709
+// SDR — alpha needs niche post-editing workflows and HDR needs an HDR
+// display + downstream tools that handle BT.2020/PQ correctly.
+static AVVideoCodecType CodecTypeForKey(NSString *key) {
+  if (key.length == 0) return nil;
+  if ([key isEqualToString:@"hevc"]) return AVVideoCodecTypeHEVC;
+  if ([key isEqualToString:@"h264"]) return AVVideoCodecTypeH264;
+  return nil;
+}
+
+static NSString *KeyForCodecType(AVVideoCodecType codec) {
+  if ([codec isEqualToString:AVVideoCodecTypeHEVC]) return @"hevc";
+  if ([codec isEqualToString:AVVideoCodecTypeH264]) return @"h264";
+  return codec ?: @"";
+}
+
+// Bits-per-pixel multipliers, one per quality preset. HEVC needs roughly
+// half the bitrate of H.264 for the same perceived quality, so the HEVC
+// column is ⅔ to ¾ of H.264 at every tier.
+//
+//   Low    H.264 0.04   HEVC 0.02   — long captures, storage-bound
+//   Medium H.264 0.20   HEVC 0.15   — balanced
+//   High   H.264 0.60   HEVC 0.40   — default, matches BetterCapture "High"
+//   XHigh  H.264 1.20   HEVC 0.80   — 2× of High; near-lossless on screen content
+//   Max    H.264 2.40   HEVC 1.60   — 4× of High; minimal compression
+//
+// XHigh / Max are above the typical "diminishing returns" knee for HEVC —
+// VideoToolbox won't always spend every requested bit (a static UI frame
+// produces a tiny encoded payload regardless of the budget), so the
+// effective file size grows sub-linearly past XHigh. Useful when the user
+// wants to remove encoding as a quality variable entirely.
+static double BitsPerPixelForCodec(AVVideoCodecType codec, NSString *quality) {
+  BOOL isHEVC = [codec isEqualToString:AVVideoCodecTypeHEVC];
+  if ([quality isEqualToString:@"low"])    return isHEVC ? 0.02 : 0.04;
+  if ([quality isEqualToString:@"medium"]) return isHEVC ? 0.15 : 0.20;
+  if ([quality isEqualToString:@"xhigh"])  return isHEVC ? 0.80 : 1.20;
+  if ([quality isEqualToString:@"max"])    return isHEVC ? 1.60 : 2.40;
+  return isHEVC ? 0.40 : 0.60;  // Default = High.
+}
+
+static AVFileType FileTypeForContainer(NSString *container) {
+  if ([container isEqualToString:@"mp4"]) return AVFileTypeMPEG4;
+  return AVFileTypeQuickTimeMovie;
 }
 
 static BOOL CGRectFromFrameAttachment(id value, CGRect *rect) {
@@ -81,6 +129,17 @@ static NSInteger EvenDimensionFromDouble(double value) {
   // ivar has been released (otherwise the manifest loses the error reason).
   NSError *_savedWriterError;
   AVVideoCodecType _codec;
+
+  // Resolved (coerced) screen-recording settings. Filled in by -resolveOptions
+  // before -streamConfigurationForContent: returns, used by every subsequent
+  // call (writer setup, manifest). Coercion rules live in -resolveOptions
+  // and mirror docs/screen-recording-addon.md.
+  NSString *_resolvedCodecKey;        // "hevc" | "h264"
+  NSString *_resolvedQuality;          // "low" | "medium" | "high"
+  NSString *_resolvedContainer;        // "mov" | "mp4"
+  NSString *_resolvedResolutionMode;   // "native" | "logical"
+  int _resolvedFrameRate;              // 0 (native) | 24 | 30 | 60
+  double _resolvedBitsPerPixel;
 
   dispatch_queue_t _videoQueue;
   // Single lock around session-start + AVAssetWriter status checks. Individual
@@ -163,12 +222,66 @@ static NSInteger EvenDimensionFromDouble(double value) {
     // std::atomic default-ctor leaves the value indeterminate pre-C++20; init
     // explicitly so the very first compare/load is well-defined.
     _stopping.store(false, std::memory_order_relaxed);
+    [self resolveOptions];
   }
   return self;
 }
 
 - (void)setOutputURL:(NSURL *)url {
   _url = url;
+}
+
+- (NSString *)fileExtension {
+  // _resolvedContainer is set by -resolveOptions, called during -init.
+  return [_resolvedContainer isEqualToString:@"mp4"] ? @"mp4" : @"mov";
+}
+
+#pragma mark - Option resolution
+
+// Coerce user-supplied options onto a configuration AVAssetWriter will accept.
+// Rules match docs/screen-recording-addon.md and BetterCapture's
+// SettingsStore coercion logic. Called once from -init; the resolved values
+// live in _resolved* ivars and are read by stream / writer / manifest paths.
+//
+- (void)resolveOptions {
+  // 1. Codec — explicit string > CPU-default.
+  AVVideoCodecType codec = CodecTypeForKey(ToNSString(_options.videoCodec));
+  if (!codec) codec = DefaultScreenCodec();
+
+  // 2. Container — both HEVC and H.264 work in both MOV and MP4, so the
+  // only validation is the enum itself.
+  NSString *container = [ToNSString(_options.container) lowercaseString];
+  if (![container isEqualToString:@"mp4"]) container = @"mov";
+
+  // 3. Quality — bpp multiplier for the H.264 / HEVC encoder.
+  NSString *quality = [ToNSString(_options.videoQuality) lowercaseString];
+  if (![quality isEqualToString:@"low"] &&
+      ![quality isEqualToString:@"medium"] &&
+      ![quality isEqualToString:@"high"] &&
+      ![quality isEqualToString:@"xhigh"] &&
+      ![quality isEqualToString:@"max"]) {
+    quality = @"high";
+  }
+
+  // 4. Resolution mode — "native" (× pointPixelScale) or "logical" (1×).
+  NSString *resolutionMode = [ToNSString(_options.resolutionMode) lowercaseString];
+  if (![resolutionMode isEqualToString:@"logical"]) resolutionMode = @"native";
+
+  // 5. Frame rate — 0 (native), 24, 30, 60. Sentinel -1 means "fall back to
+  // legacy fps" (which Bindings.mm already validated to 30 or 60).
+  int frameRate = _options.frameRate;
+  if (frameRate < 0) frameRate = _options.fps;
+  if (frameRate != 0 && frameRate != 24 && frameRate != 30 && frameRate != 60) {
+    frameRate = 60;
+  }
+
+  _codec = codec;
+  _resolvedCodecKey = KeyForCodecType(codec);
+  _resolvedQuality = quality;
+  _resolvedContainer = container;
+  _resolvedResolutionMode = resolutionMode;
+  _resolvedFrameRate = frameRate;
+  _resolvedBitsPerPixel = BitsPerPixelForCodec(codec, quality);
 }
 
 #pragma mark - SCKit setup
@@ -481,6 +594,7 @@ static BOOL FetchShareableContentSync(SCShareableContent **outContent, NSError *
 
 - (SCStreamConfiguration *)streamConfigurationForContent:(SCShareableContent *)content {
   SCStreamConfiguration *configuration = [[SCStreamConfiguration alloc] init];
+
   int width = _options.width;
   int height = _options.height;
   CGFloat scale = 1.0;
@@ -488,6 +602,7 @@ static BOOL FetchShareableContentSync(SCShareableContent **outContent, NSError *
   NSScreen *targetScreen = nil;
   BOOL isRegionCapture = _options.target.type == "region";
   BOOL isWindowCapture = _options.target.type == "window";
+  BOOL logicalResolution = [_resolvedResolutionMode isEqualToString:@"logical"];
 
   if (isRegionCapture) {
     SCDisplay *display = [self displayFromContent:content];
@@ -501,9 +616,13 @@ static BOOL FetchShareableContentSync(SCShareableContent **outContent, NSError *
       _configuredSourceRect = sourceRect;
       _hasConfiguredSourceRect = YES;
       if (width <= 0 || height <= 0) {
-        width = (int)EvenDimensionFromDouble(sourceRect.size.width * scale);
-        height = (int)EvenDimensionFromDouble(sourceRect.size.height * scale);
-        source = @"region.sourceRect * scaleFactor";
+        // Logical mode: bare source-rect points (1×); native: × pointPixelScale.
+        CGFloat effectiveScale = logicalResolution ? 1.0 : scale;
+        width = (int)EvenDimensionFromDouble(sourceRect.size.width * effectiveScale);
+        height = (int)EvenDimensionFromDouble(sourceRect.size.height * effectiveScale);
+        source = logicalResolution
+            ? @"region.sourceRect (logical)"
+            : @"region.sourceRect * scaleFactor";
       }
     }
   }
@@ -513,28 +632,46 @@ static BOOL FetchShareableContentSync(SCShareableContent **outContent, NSError *
       SCWindow *window = [self windowFromContent:content];
       targetScreen = [NSScreen mainScreen];
       scale = targetScreen ? targetScreen.backingScaleFactor : 2.0;
-      width = (int)MAX(640, llround(window.frame.size.width * scale));
-      height = (int)MAX(360, llround(window.frame.size.height * scale));
-      source = @"window.frame * backingScaleFactor";
+      CGFloat effectiveScale = logicalResolution ? 1.0 : scale;
+      width = (int)MAX(640, llround(window.frame.size.width * effectiveScale));
+      height = (int)MAX(360, llround(window.frame.size.height * effectiveScale));
+      source = logicalResolution
+          ? @"window.frame (logical)"
+          : @"window.frame * backingScaleFactor";
     } else {
       SCDisplay *display = [self displayFromContent:content];
       targetScreen = display ? [self screenForDisplayID:display.displayID] : nil;
-      NSInteger pixelWidth = 0;
-      NSInteger pixelHeight = 0;
-      NSString *resolvedSource = nil;
-      [self resolveDisplayPixelsForDisplay:display
-                                     width:&pixelWidth
-                                    height:&pixelHeight
-                                     scale:&scale
-                                    source:&resolvedSource];
-      width = (int)MAX(640, pixelWidth);
-      height = (int)MAX(360, pixelHeight);
-      source = resolvedSource ?: @"unknown";
+      if (logicalResolution) {
+        // Logical points — use the SCDisplay's logical dimensions when
+        // available, falling back to NSScreen.frame.
+        NSInteger pointWidth = display ? (NSInteger)display.width : 0;
+        NSInteger pointHeight = display ? (NSInteger)display.height : 0;
+        if ((pointWidth <= 0 || pointHeight <= 0) && targetScreen) {
+          pointWidth = (NSInteger)llround(targetScreen.frame.size.width);
+          pointHeight = (NSInteger)llround(targetScreen.frame.size.height);
+        }
+        width = (int)MAX(640, pointWidth);
+        height = (int)MAX(360, pointHeight);
+        scale = targetScreen ? targetScreen.backingScaleFactor : 1.0;
+        source = @"SCDisplay (logical)";
+      } else {
+        NSInteger pixelWidth = 0;
+        NSInteger pixelHeight = 0;
+        NSString *resolvedSource = nil;
+        [self resolveDisplayPixelsForDisplay:display
+                                       width:&pixelWidth
+                                      height:&pixelHeight
+                                       scale:&scale
+                                      source:&resolvedSource];
+        width = (int)MAX(640, pixelWidth);
+        height = (int)MAX(360, pixelHeight);
+        source = resolvedSource ?: @"unknown";
+      }
     }
   }
   if (!targetScreen) targetScreen = [NSScreen mainScreen];
 
-  // HEVC / H.264 hardware encoders reject odd dimensions.
+  // H.264 / HEVC hardware encoders reject odd dimensions.
   if (width % 2 != 0) width -= 1;
   if (height % 2 != 0) height -= 1;
 
@@ -542,48 +679,64 @@ static BOOL FetchShareableContentSync(SCShareableContent **outContent, NSError *
   _configuredHeight = height;
   _configuredScaleFactor = scale;
   _pixelSizeSource = source;
-  _codec = PreferredScreenCodec();
 
   configuration.width = width;
   configuration.height = height;
   configuration.scalesToFit = isWindowCapture ? YES : NO;
-  configuration.preservesAspectRatio = YES;
-  if (isWindowCapture) {
-    configuration.ignoreGlobalClipSingleWindow = YES;
-    configuration.ignoreShadowsSingleWindow = YES;
-    configuration.includeChildWindows = NO;
+  // preservesAspectRatio / ignore{Global,Shadows}SingleWindow are 14.0+;
+  // includeChildWindows is 14.2+. Gate each behind its availability so the
+  // addon stays buildable + runnable on macOS 13.
+  if (@available(macOS 14.0, *)) {
+    configuration.preservesAspectRatio = YES;
+    if (isWindowCapture) {
+      configuration.ignoreGlobalClipSingleWindow = YES;
+      configuration.ignoreShadowsSingleWindow = YES;
+    }
   }
-  configuration.minimumFrameInterval = CMTimeMake(1, _options.fps > 0 ? _options.fps : 60);
-  configuration.queueDepth = 5;
+  if (isWindowCapture) {
+    if (@available(macOS 14.2, *)) {
+      configuration.includeChildWindows = NO;
+    }
+  }
+  // Frame rate: 0 → native (1/120 minimum interval); explicit values → 1/fps.
+  int frameRate = _resolvedFrameRate;
+  if (frameRate == 0) {
+    configuration.minimumFrameInterval = CMTimeMake(1, 120);
+  } else {
+    configuration.minimumFrameInterval = CMTimeMake(1, frameRate);
+  }
+  // SCStreamConfiguration's default queueDepth is 8 — BetterCapture leaves
+  // it alone. A smaller queue (we previously used 5) drops frames sooner
+  // when the encoder lags, with no upside.
+  configuration.queueDepth = 8;
   configuration.showsCursor = _options.includeCursor;
-  // 10-bit packed RGB — same as OBS uses ([mac-sck-video-capture.m]). Carries
-  // the full Display-P3 gamut with no chroma subsampling between capture and
-  // encoder.
-  configuration.pixelFormat = kPixelFormat;
+  configuration.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
+
+  // "Apple gold-standard" SDR pipeline:
+  //   * pixelFormat = BGRA 8-bit.
+  //   * captureDynamicRange = .SDR (macOS 15+; on 13/14 SCK is implicitly SDR).
+  //   * colorSpaceName = kCGColorSpaceSRGB. ScreenCaptureKit performs a
+  //     hardware-accelerated GPU color conversion when `colorSpaceName` is
+  //     set, so on a Display-P3 screen it transforms the wide-gamut source
+  //     pixels into sRGB *correctly* (perceptual gamut mapping) before
+  //     delivering the buffer. Without this, SCKit hands AVAssetWriter a
+  //     buffer in some untagged working space, AVAssetWriter then performs
+  //     its own conversion to BT.709, and the resulting file looks
+  //     washed-out compared to a `Cmd+Shift+3` screenshot of the same
+  //     content. sRGB and BT.709 share primaries; with the writer tagged
+  //     BT.709 (in -videoColorProperties) the only remaining transform is
+  //     a small transfer-function adjustment (sRGB piecewise ≈ BT.709
+  //     gamma 2.4) that AVAssetWriter handles cleanly. The OBS team hit
+  //     the same gotcha (obsproject/obs-studio#12414, #9658).
+  configuration.pixelFormat = kSDRPixelFormat;
+  configuration.colorSpaceName = kCGColorSpaceSRGB;
   if (@available(macOS 15.0, *)) {
-    // Explicit SDR — Main10 still encodes SDR; HDR would need PQ/HLG transfer.
     configuration.captureDynamicRange = SCCaptureDynamicRangeSDR;
   }
-  // Dynamic gamut detection: match SCKit's capture colour space AND the
-  // file's AVVideoColorPropertiesKey to the target screen's actual gamut.
-  // On a P3-capable display we tag Display P3 / P3-D65; on a non-P3 display
-  // we tag sRGB / Rec.709. Keeping both ends in sync is what makes this
-  // work — earlier attempts only switched the SCKit side, which produced
-  // inconsistent file tags.
-  BOOL p3Capable = targetScreen &&
-      [targetScreen canRepresentDisplayGamut:NSDisplayGamutP3];
-  if (p3Capable) {
-    configuration.colorSpaceName = kCGColorSpaceDisplayP3;
-    _configuredColorSpace = @"DisplayP3";
-    _configuredColorPrimaries = AVVideoColorPrimaries_P3_D65;
-    _configuredGamut = @"P3";
-  } else {
-    configuration.colorSpaceName = kCGColorSpaceSRGB;
-    _configuredColorSpace = @"sRGB";
-    _configuredColorPrimaries = AVVideoColorPrimaries_ITU_R_709_2;
-    _configuredGamut = @"Rec.709";
-  }
-  configuration.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
+  (void)targetScreen;  // No longer used for gamut detection.
+  _configuredColorSpace = @"sRGB";
+  _configuredColorPrimaries = AVVideoColorPrimaries_ITU_R_709_2;
+  _configuredGamut = @"Rec.709";
 
   // Compute compression properties up front so the bitrate / keyframe
   // values show up in the startup log alongside the rest of the config.
@@ -626,14 +779,19 @@ static BOOL FetchShareableContentSync(SCShareableContent **outContent, NSError *
     }
   }
 
-  NSLog(@"[openscreen.recorder] screen config: %ldx%ld @ %dfps  codec=%@  "
-        @"pixelFormat=ARGB2101010LEPacked(l10r)  colorSpace=%@  "
-        @"primaries=%@ (gamut=%@)  bitrate=%.1f Mbps  keyframeInterval=%ldf  "
-        @"scale=%.2fx  pixelSizeSource=%@  scalesToFit=%@  queueDepth=5  "
-        @"allowFrameReordering=NO  audioApps=%lu",
+  int loggedFps = (_resolvedFrameRate == 0) ? 120 : _resolvedFrameRate;
+  NSLog(@"[openscreen.recorder] screen config: %ldx%ld @ %dfps (mode=%@)  "
+        @"codec=%@  container=%@  quality=%@  "
+        @"pixelFormat=BGRA  colorSpace=%@  primaries=%@ (gamut=%@)  "
+        @"bitrate=%.1f Mbps  keyframeInterval=%ldf  scale=%.2fx  "
+        @"pixelSizeSource=%@  scalesToFit=%@  queueDepth=8  "
+        @"allowFrameReordering=YES  audioApps=%lu",
         (long)_configuredWidth, (long)_configuredHeight,
-        (int)(_options.fps > 0 ? _options.fps : 60),
-        [self codecString], _configuredColorSpace,
+        loggedFps,
+        (_resolvedFrameRate == 0 ? @"native (1/120)" : @"explicit"),
+        [self codecString], _resolvedContainer,
+        _resolvedQuality,
+        _configuredColorSpace,
         _configuredColorPrimaries, _configuredGamut,
         _configuredBitRate / 1'000'000.0,
         (long)_configuredKeyframeInterval,
@@ -647,54 +805,46 @@ static BOOL FetchShareableContentSync(SCShareableContent **outContent, NSError *
 #pragma mark - AVAssetWriter
 
 - (NSDictionary *)videoColorProperties {
-  // Primaries follow whichever gamut was chosen in
-  // -streamConfigurationForContent: (P3-D65 on a P3 display, Rec.709 on
-  // sRGB-only displays). Transfer + YCbCr matrix stay Rec.709 in both cases
-  // — that combination is the canonical SDR tag set across primaries.
-  NSString *primaries = _configuredColorPrimaries ?: AVVideoColorPrimaries_P3_D65;
+  // Universal SDR colorimetry — BT.709 primaries / transfer / matrix. Works
+  // on every macOS / iOS / web player. Wide-gamut input is perceptually
+  // mapped to BT.709 on the SCK capture side (see
+  // -streamConfigurationForContent: where colorSpaceName = sRGB), so the
+  // file's tag accurately describes its content.
   return @{
-    AVVideoColorPrimariesKey:   primaries,
+    AVVideoColorPrimariesKey:   AVVideoColorPrimaries_ITU_R_709_2,
     AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
     AVVideoYCbCrMatrixKey:      AVVideoYCbCrMatrix_ITU_R_709_2,
   };
 }
 
 - (NSDictionary *)videoCompressionProperties {
-  NSInteger fps = _options.fps > 0 ? _options.fps : 60;
-
-  // Bitrate tuned for SCREEN content (text, UI, fine edges) rather than
-  // generic video. VideoToolbox's adaptive default for HEVC Main10 targets
-  // around 5-10 Mbps even at 4K, which is fine for live-action but visibly
-  // soft for desktop content. The native macOS screen recorder runs much
-  // higher.
+  // Bitrate uses BetterCapture's bits-per-pixel table:
   //
-  // Formula: ~0.1 bits per pixel per frame.
-  //   3024 × 1964 @ 60fps  ≈ 36 Mbps   (matches QuickTime native recordings)
-  //   1920 × 1080 @ 60fps  ≈ 12 Mbps
-  //   3840 × 2160 @ 30fps  ≈ 25 Mbps
-  // Floor at 8 Mbps so small displays still get crisp text.
-  double bpp = 0.1;
+  //   Low    H.264 0.04   HEVC 0.02
+  //   Medium H.264 0.20   HEVC 0.15
+  //   High   H.264 0.60   HEVC 0.40    (default — matches BetterCapture "High")
+  //
+  // Formula: bitrate = width × height × fps × bpp. HEVC needs roughly half
+  // the rate of H.264 for the same perceived quality. No floor.
+  int fps = _resolvedFrameRate == 0 ? 60 : _resolvedFrameRate;
+  if (fps <= 0) fps = 60;
+  double bpp = _resolvedBitsPerPixel > 0 ? _resolvedBitsPerPixel : 0.40;
   NSInteger bitRate = (NSInteger)(_configuredWidth * _configuredHeight * fps * bpp);
-  if (bitRate < 8'000'000) bitRate = 8'000'000;
 
-  // Keyframe every ~1 second. Screen content tends to be static for long
-  // stretches; refreshing the I-frame regularly stops detail from drifting
-  // through long P-frame chains.
-  NSInteger maxKeyframeInterval = fps;
+  // Keyframe every ~2 seconds — matches BetterCapture; recent keyframe to
+  // seek to without inflating file size.
+  NSInteger maxKeyframeInterval = fps * 2;
 
   _configuredBitRate = bitRate;
   _configuredKeyframeInterval = maxKeyframeInterval;
 
+  // No profile-level key — VideoToolbox picks HEVC Main 8-bit / H.264 High
+  // AutoLevel by default, matching BetterCapture's SDR output.
+  // B-frames intentionally left at VideoToolbox default (enabled).
   return @{
-    AVVideoAverageBitRateKey:          @(bitRate),
-    AVVideoMaxKeyFrameIntervalKey:     @(maxKeyframeInterval),
-    AVVideoExpectedSourceFrameRateKey: @(fps),
-    AVVideoProfileLevelKey:            ProfileLevelForCodec(_codec),
-    // Disable B-frames. They reference both past and future frames; on
-    // text/UI content the bidirectional averaging produces a faint
-    // smudging that's perceptible even at high bitrates. P-only streams
-    // are slightly larger but visibly sharper.
-    AVVideoAllowFrameReorderingKey:    @NO,
+    AVVideoAverageBitRateKey:           @(bitRate),
+    AVVideoMaxKeyFrameIntervalKey:      @(maxKeyframeInterval),
+    AVVideoExpectedSourceFrameRateKey:  @(fps),
   };
 }
 
@@ -710,8 +860,9 @@ static BOOL FetchShareableContentSync(SCShareableContent **outContent, NSError *
   }
 
   NSError *writerError = nil;
+  AVFileType fileType = FileTypeForContainer(_resolvedContainer);
   _writer = [[AVAssetWriter alloc] initWithURL:_url
-                                      fileType:AVFileTypeQuickTimeMovie
+                                      fileType:fileType
                                          error:&writerError];
   if (!_writer || writerError) {
     if (error) *error = writerError ?: MakeError(2303, @"Could not create AVAssetWriter");
@@ -719,19 +870,20 @@ static BOOL FetchShareableContentSync(SCShareableContent **outContent, NSError *
     return NO;
   }
 
-  NSDictionary *videoSettings = @{
-    AVVideoCodecKey:                 _codec,
-    AVVideoWidthKey:                 @(_configuredWidth),
-    AVVideoHeightKey:                @(_configuredHeight),
-    AVVideoColorPropertiesKey:       [self videoColorProperties],
-    AVVideoCompressionPropertiesKey: [self videoCompressionProperties],
-  };
+  // Video output settings — both codecs we expose (HEVC, H.264) take both
+  // the color and compression dictionaries.
+  NSMutableDictionary *videoSettings = [NSMutableDictionary dictionary];
+  videoSettings[AVVideoCodecKey] = _codec;
+  videoSettings[AVVideoWidthKey] = @(_configuredWidth);
+  videoSettings[AVVideoHeightKey] = @(_configuredHeight);
+  NSDictionary *colorProps = [self videoColorProperties];
+  if (colorProps) videoSettings[AVVideoColorPropertiesKey] = colorProps;
+  NSDictionary *compressionProps = [self videoCompressionProperties];
+  if (compressionProps) videoSettings[AVVideoCompressionPropertiesKey] = compressionProps;
 
   _videoInput = [[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeVideo
                                                outputSettings:videoSettings];
   _videoInput.expectsMediaDataInRealTime = YES;
-  // Pixel buffers come in as ARGB2101010LEPacked. AVAssetWriter handles the
-  // RGB → 10-bit YCbCr conversion internally for the Main10 encoder.
   if (![_writer canAddInput:_videoInput]) {
     if (error) *error = MakeError(2304, @"AVAssetWriter rejected the video input");
     _writer = nil;
@@ -743,18 +895,17 @@ static BOOL FetchShareableContentSync(SCShareableContent **outContent, NSError *
 }
 
 - (NSDictionary *)audioOutputSettings {
-  // 48 kHz stereo AAC at 192 kbps. Matches what SCStream delivers for the
-  // sysaudio and microphone outputs after our configuration tweaks.
-  AudioChannelLayout channelLayout;
-  memset(&channelLayout, 0, sizeof(channelLayout));
-  channelLayout.mChannelLayoutTag = kAudioChannelLayoutTag_Stereo;
-  NSData *layoutData = [NSData dataWithBytes:&channelLayout length:sizeof(channelLayout)];
+  // 48 kHz stereo AAC at 256 kbps. Matches BetterCapture exactly — same
+  // codec, same sample rate, same channel count, same bitrate, and no
+  // explicit AVChannelLayoutKey (AVAssetWriter derives the layout from the
+  // number of channels). Previously we set 192 kbps + an explicit stereo
+  // layout dict; both produce technically-valid AAC, but 256 kbps gives a
+  // noticeably cleaner system-audio track, especially for music.
   return @{
     AVFormatIDKey:         @(kAudioFormatMPEG4AAC),
     AVSampleRateKey:       @48000,
     AVNumberOfChannelsKey: @2,
-    AVEncoderBitRateKey:   @192000,
-    AVChannelLayoutKey:    layoutData,
+    AVEncoderBitRateKey:   @256000,
   };
 }
 
@@ -1191,8 +1342,12 @@ static CMSampleBufferRef ScreenTrackShiftedSampleBuffer(
 - (BOOL)hasWriter     { return _writer != nil; }
 - (BOOL)hasStarted    { return _started; }
 
+- (double)sessionStartHostMs {
+  return CMTIME_IS_VALID(_sessionStartTime) ? TimeToMilliseconds(_sessionStartTime) : 0;
+}
+
 - (NSString *)codecString {
-  if ([_codec isEqualToString:AVVideoCodecTypeHEVC]) return @"hevc-main10";
+  if ([_codec isEqualToString:AVVideoCodecTypeHEVC]) return @"hevc";
   if ([_codec isEqualToString:AVVideoCodecTypeH264]) return @"h264";
   return _codec ?: @"";
 }
@@ -1204,14 +1359,17 @@ static CMSampleBufferRef ScreenTrackShiftedSampleBuffer(
   meta[@"started"] = @(_started);
   meta[@"finished"] = @(_finished);
   meta[@"codec"] = [self codecString];
-  meta[@"pixelFormat"] = @"ARGB2101010LEPacked";
-  if ([_configuredColorPrimaries isEqualToString:AVVideoColorPrimaries_P3_D65]) {
-    meta[@"colorPrimaries"] = @"P3_D65";
-  } else if ([_configuredColorPrimaries isEqualToString:AVVideoColorPrimaries_ITU_R_709_2]) {
-    meta[@"colorPrimaries"] = @"ITU_R_709_2";
-  } else if (_configuredColorPrimaries) {
-    meta[@"colorPrimaries"] = _configuredColorPrimaries;
-  }
+  // Resolved configuration. Each field reflects the *coerced* value the
+  // writer used, not the user's original request.
+  if (_resolvedCodecKey) meta[@"videoCodec"] = _resolvedCodecKey;
+  if (_resolvedQuality) meta[@"videoQuality"] = _resolvedQuality;
+  if (_resolvedContainer) meta[@"container"] = _resolvedContainer;
+  if (_resolvedResolutionMode) meta[@"resolutionMode"] = _resolvedResolutionMode;
+  meta[@"frameRate"] = @(_resolvedFrameRate);
+  if (_resolvedBitsPerPixel > 0) meta[@"bitsPerPixel"] = @(_resolvedBitsPerPixel);
+  meta[@"pixelFormat"] = @"BGRA";
+  // Universal SDR colorimetry — BT.709 throughout.
+  meta[@"colorPrimaries"] = @"ITU_R_709_2";
   meta[@"colorTransfer"] = @"ITU_R_709_2";
   meta[@"colorMatrix"] = @"ITU_R_709_2";
   if (_configuredGamut) meta[@"gamut"] = _configuredGamut;
@@ -1219,8 +1377,10 @@ static CMSampleBufferRef ScreenTrackShiftedSampleBuffer(
   if (_configuredKeyframeInterval > 0) {
     meta[@"maxKeyFrameInterval"] = @(_configuredKeyframeInterval);
   }
-  meta[@"allowFrameReordering"] = @NO;
-  meta[@"queueDepth"] = @5;
+  // BetterCapture-aligned defaults: B-frames enabled (VT default), queueDepth
+  // at SCK's default of 8.
+  meta[@"allowFrameReordering"] = @YES;
+  meta[@"queueDepth"] = @8;
   if (_pauseCycleCount > 0) meta[@"pauseCycles"] = @(_pauseCycleCount);
   CMTime totalPaused = [self pauseAccumulated];
   if (CMTimeCompare(totalPaused, kCMTimeZero) > 0) {

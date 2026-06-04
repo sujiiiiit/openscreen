@@ -6,6 +6,7 @@ import type {
   RecorderMenuAnchor,
   RecorderPickerMode,
   RecorderState,
+  RecordingQualitySettings,
 } from './ipc/recorder'
 import type {
   PickerOverlayTarget,
@@ -13,6 +14,19 @@ import type {
   RegionSelectionResult,
   WindowPickerSession,
 } from './ipc/window-picker'
+import type { CursorTrackData, ProjectSummary } from './ipc/projects'
+import type {
+  ImportAssetPayload,
+  ImportAssetResult,
+  ProjectStateV1,
+  SaveProjectStateResult,
+} from './ipc/project-schema'
+import type {
+  ExportJobState,
+  ExportProgress,
+  ExportSettings,
+} from './ipc/export-schema'
+import type { ExportStartPayload } from './ipc/export'
 import type {
   WindowStateChange,
   WindowStateSnapshot,
@@ -43,6 +57,14 @@ const api = {
     close: (): Promise<void> => ipcRenderer.invoke('recorder:close'),
     onChanged: (callback: (state: RecorderState) => void) =>
       subscribe<RecorderState>('recorder:changed', callback),
+    getRecordingSettings: (): Promise<RecordingQualitySettings> =>
+      ipcRenderer.invoke('recorder:getRecordingSettings'),
+    setRecordingSettings: (
+      patch: Partial<RecordingQualitySettings>,
+    ): Promise<RecordingQualitySettings> =>
+      ipcRenderer.invoke('recorder:setRecordingSettings', patch),
+    openRecordingSettings: (): Promise<void> =>
+      ipcRenderer.invoke('recorder:openRecordingSettings'),
   },
   permissions: {
     getStatus: () => ipcRenderer.invoke('permissions:getStatus'),
@@ -68,6 +90,26 @@ const api = {
     onStateChanged: (callback: (state: WindowStateChange) => void) =>
       subscribe<WindowStateChange>('window:stateChanged', callback),
   },
+  projects: {
+    getLatest: (): Promise<ProjectSummary | null> =>
+      ipcRenderer.invoke('projects:getLatest'),
+    open: (folderPath: string): Promise<ProjectSummary | null> =>
+      ipcRenderer.invoke('projects:open', folderPath),
+    pickAndOpen: (): Promise<ProjectSummary | null> =>
+      ipcRenderer.invoke('projects:pickAndOpen'),
+    saveState: (
+      folderPath: string,
+      state: ProjectStateV1,
+    ): Promise<SaveProjectStateResult> =>
+      ipcRenderer.invoke('projects:saveState', folderPath, state),
+    importAsset: (
+      folderPath: string,
+      payload: ImportAssetPayload,
+    ): Promise<ImportAssetResult> =>
+      ipcRenderer.invoke('projects:importAsset', folderPath, payload),
+    getCursorData: (folderPath: string): Promise<CursorTrackData | null> =>
+      ipcRenderer.invoke('projects:getCursorData', folderPath),
+  },
   windowPicker: {
     confirm: (): Promise<void> => ipcRenderer.invoke('windowPicker:confirm'),
     cancel: (): Promise<void> => ipcRenderer.invoke('windowPicker:cancel'),
@@ -83,6 +125,30 @@ const api = {
       ipcRenderer.invoke('windowPicker:setRegionSelection', bounds),
     onTargetChanged: (callback: (target: PickerOverlayTarget | null) => void) =>
       subscribe<PickerOverlayTarget | null>('windowPicker:targetChanged', callback),
+  },
+  export: {
+    openWindow: (payload: ExportStartPayload): Promise<void> =>
+      ipcRenderer.invoke('export:openWindow', payload),
+    getStartPayload: (): Promise<ExportStartPayload | null> =>
+      ipcRenderer.invoke('export:getStartPayload'),
+    getState: (): Promise<ExportJobState> => ipcRenderer.invoke('export:getState'),
+    getSettings: (): Promise<ExportSettings> =>
+      ipcRenderer.invoke('export:getSettings'),
+    setSettings: (patch: Partial<ExportSettings>): Promise<ExportSettings> =>
+      ipcRenderer.invoke('export:setSettings', patch),
+    markPreparing: (): Promise<void> => ipcRenderer.invoke('export:markPreparing'),
+    reportProgress: (progress: ExportProgress): Promise<void> =>
+      ipcRenderer.invoke('export:reportProgress', progress),
+    reportDone: (bytes: ArrayBuffer): Promise<{ outputPath: string }> =>
+      ipcRenderer.invoke('export:reportDone', bytes),
+    reportError: (message: string): Promise<void> =>
+      ipcRenderer.invoke('export:reportError', message),
+    cancel: (): Promise<void> => ipcRenderer.invoke('export:cancel'),
+    revealOutput: (path: string): Promise<void> =>
+      ipcRenderer.invoke('export:revealOutput', path),
+    closeWindow: (): Promise<void> => ipcRenderer.invoke('export:closeWindow'),
+    onStateChanged: (callback: (state: ExportJobState) => void) =>
+      subscribe<ExportJobState>('export:stateChanged', callback),
   },
 }
 

@@ -1,4 +1,11 @@
-export type PermissionKind = 'screen' | 'camera' | 'microphone' | 'systemAudio'
+export type PermissionKind =
+  | 'screen'
+  | 'camera'
+  | 'microphone'
+  | 'systemAudio'
+  // Input Monitoring (TCC ListenEvent). Required only to capture global
+  // keystrokes; mouse / cursor capture needs no permission.
+  | 'inputMonitoring'
 
 export type PermissionState =
   | 'granted'
@@ -30,10 +37,44 @@ export interface CaptureTargetMetadata {
   scaleFactor?: number
 }
 
+// Video codec for the screen track. The native side picks `hevc` on Apple
+// Silicon and `h264` on Intel when the caller passes nothing.
+//   - `hevc` : HEVC (H.265). Default. Best size/quality balance.
+//   - `h264` : H.264 High AutoLevel. Maximum playback compatibility.
+//
+// ProRes 422 / 4444, HEVC-with-Alpha, and HDR were intentionally dropped to
+// keep the output universally playable. The pipeline always emits BT.709
+// SDR — see docs/screen-recording-addon.md.
+export type VideoCodec = 'hevc' | 'h264'
+
+// Bitrate preset for H.264 / HEVC. Higher quality = larger files.
+//   - `low`    : Smallest files. Good for long captures.
+//   - `medium` : Reasonable balance.
+//   - `high`   : Default. Crisp text and edges.
+//   - `xhigh`  : 2× of High. Near-lossless on screen content.
+//   - `max`    : 4× of High. Minimal compression; large files.
+export type VideoQuality = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
+// Output container. Both `hevc` and `h264` work in both MOV and MP4.
+// MOV is the default for QuickTime compatibility; MP4 is universally playable
+// on Windows / Linux.
+export type ContainerFormat = 'mov' | 'mp4'
+
+// Resolution mode. `native` multiplies logical points by the display's
+// `pointPixelScale` (Retina). `logical` uses the bare logical-point
+// dimensions. Both still snap to even pixel counts for codec compatibility.
+export type ResolutionMode = 'native' | 'logical'
+
+// Frame rate selection. `0` means "native refresh" — the native side sets a
+// 1/120 minimum interval, letting SCK deliver up to the display's refresh
+// rate (e.g. 120 Hz on ProMotion). Explicit values pin the rate.
+export type FrameRate = 0 | 24 | 30 | 60
+
 export interface StartRecordingOptions {
   outputDir: string
   basename?: string
   target: CaptureTarget
+  /** Legacy fps option. Prefer `frameRate`. Kept for back-compat. */
   fps?: 30 | 60
   width?: number
   height?: number
@@ -51,6 +92,47 @@ export interface StartRecordingOptions {
   // a window-targeted capture's SCContentFilter already constrains audio to
   // the picked window's owning app.
   audioApplications?: string[]
+
+  // ── Screen video quality settings ────────────────────────────────────
+  //
+  // Every field is optional. Unknown enum values are coerced onto defaults
+  // by the native side. Resolved values are written back into the
+  // recording's manifest under `outputs`, so you can verify what was
+  // actually used by reading `<basename>-recording.json`.
+  /** Video codec. Default: `hevc` (Apple Silicon) / `h264` (Intel). */
+  videoCodec?: VideoCodec
+  /** Bitrate preset for the encoder. Default: `high`. */
+  videoQuality?: VideoQuality
+  /** Output container. Default: `mov`. */
+  container?: ContainerFormat
+  /** Resolution mode. Default: `native`. */
+  resolutionMode?: ResolutionMode
+  /** Frame rate. `0` = native refresh. Default: `60`. */
+  frameRate?: FrameRate
+
+  // ── Input capture (Screen Studio-style sidecar metadata) ─────────────
+  //
+  // When enabled, the session records mouse moves/drags/clicks (and, when
+  // `captureKeyStrokes` is also on AND Input Monitoring is granted,
+  // keystrokes) plus cursor-shape changes into streaming JSON sidecar files
+  // next to the screen video, using Screen Studio's field schema. None of
+  // these alter the recorded video — to let an editor restyle the cursor,
+  // also pass `includeCursor: false`.
+  /**
+   * Master switch for input capture. Implied by `captureKeyStrokes` /
+   * `captureCursorShapes`. Default: `false`.
+   */
+  captureInput?: boolean
+  /**
+   * Record keystrokes (`keystrokes-0.json`). Requires Input Monitoring
+   * permission; silently no-ops for keys if not granted. Default: `false`.
+   */
+  captureKeyStrokes?: boolean
+  /**
+   * Build the NSCursor catalog (`cursors.json` + `cursors/*.png`) and stamp a
+   * semantic `cursorId` onto every event. Default: `false`.
+   */
+  captureCursorShapes?: boolean
 }
 
 export interface Capabilities {
@@ -122,6 +204,12 @@ export interface RecordingFiles {
   screen: string
   camera?: string
   manifest: string
+  // Screen Studio-style input sidecars, present only when captureInput is on.
+  // Coordinates are display-relative logical points, top-left origin.
+  mouseMoves?: string
+  mouseClicks?: string
+  keyStrokes?: string
+  cursors?: string
 }
 
 export interface RecordingSession {
@@ -129,9 +217,34 @@ export interface RecordingSession {
   files: RecordingFiles
 }
 
+export interface InputSessionMetadata {
+  processTimeStartMs: number
+  processTimeEndMs: number
+  unixStartMs: number
+  unixEndMs: number
+  durationMs: number
+  mouseMovesCount: number
+  mouseClicksCount: number
+  keyStrokesCount: number
+}
+
 export interface RecordingOutputMetadata {
-  source: 'screen' | 'camera' | 'systemAudio' | 'microphone'
+  source: 'screen' | 'camera' | 'systemAudio' | 'microphone' | 'input'
   path?: string
+
+  // ── Input track only (source === 'input') ───────────────────────────
+  // Whether keystroke capture was actually active (requested AND Input
+  // Monitoring granted) and whether the cursor catalog was built.
+  captureKeyStrokes?: boolean
+  captureCursorShapes?: boolean
+  mouseMovesFilename?: string
+  mouseClicksFilename?: string
+  keyStrokesFilename?: string
+  cursorsInfoFile?: string
+  cursorImagesFolder?: string
+  displayId?: number
+  displayBoundsPoints?: { x: number; y: number; width: number; height: number }
+  session?: InputSessionMetadata
   // True once SCRecordingOutput / AVAssetWriter has actually accepted a sample
   // (per-source; camera reports its writer state, screen reports the
   // SCRecordingOutput didStartRecordingAtFileURL callback).
@@ -146,8 +259,22 @@ export interface RecordingOutputMetadata {
   height?: number
   sampleRate?: number
   channelCount?: number
-  // Codec actually used (screen track only): 'hevc' on Apple Silicon, 'h264' on Intel.
-  codec?: 'hevc' | 'h264' | string
+  // Codec actually used (screen track only). One of `hevc` / `h264`.
+  codec?: string
+  // The coerced screen-recording settings the writer actually used. Present
+  // only on the screen track.
+  videoCodec?: VideoCodec
+  videoQuality?: VideoQuality
+  container?: ContainerFormat
+  resolutionMode?: ResolutionMode
+  frameRate?: number
+  bitsPerPixel?: number
+  pixelFormat?: string
+  colorPrimaries?: string
+  colorTransfer?: string
+  colorMatrix?: string
+  averageBitRate?: number
+  maxKeyFrameInterval?: number
   // Mirrors which output file the source landed in. Present for systemAudio
   // and microphone, where the audio is muxed into the screen .mov rather
   // than written to its own file.

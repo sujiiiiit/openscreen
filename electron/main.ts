@@ -1,4 +1,19 @@
-import { app, BrowserWindow, nativeTheme, net, protocol, screen, session, shell } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  Menu,
+  nativeImage,
+  nativeTheme,
+  net,
+  protocol,
+  screen,
+  session,
+  shell,
+  Tray,
+  type MenuItemConstructorOptions,
+  type NativeImage,
+} from 'electron'
 import addon from '@openscreen/mac-addon'
 import * as path from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -17,11 +32,22 @@ import {
 import {
   finishPickerMode,
   flushActiveRecording,
+  getLatestRecordingDir,
   isRecordingActive,
   registerRecorderHandlers,
   reservePickerStart,
   startRecording,
 } from './ipc/recorder'
+import {
+  projectsRoot,
+  registerProjectsHandlers,
+  setActiveProjectFromFolder,
+} from './ipc/projects'
+import {
+  disposeExportPendingPayload,
+  getExportSourceEditorWindow,
+  registerExportHandlers,
+} from './ipc/export'
 import {
   clearLockedRegionOverlay,
   disposeWindowPicker,
@@ -42,8 +68,14 @@ let recorderBarWin: BrowserWindow | null = null
 let recordingControlsWin: BrowserWindow | null = null
 let cameraWin: BrowserWindow | null = null
 let permissionWin: BrowserWindow | null = null
+let recordingSettingsWin: BrowserWindow | null = null
+let exportWin: BrowserWindow | null = null
 let activeCameraDeviceId: string | null = null
+const editorWins = new Set<BrowserWindow>()
+let lastFocusedEditorWin: BrowserWindow | null = null
+let tray: Tray | null = null
 const fixedWindowSizeEnforcers = new WeakMap<BrowserWindow, () => void>()
+const zoomLockedWindows = new WeakSet<BrowserWindow>()
 const DEV_URL = 'http://localhost:3535'
 const OUT_DIR = path.resolve(__dirname, '..', 'out')
 type AlwaysOnTopLevel = NonNullable<Parameters<BrowserWindow['setAlwaysOnTop']>[1]>
@@ -63,17 +95,36 @@ const SHARED_WEB_PREFERENCES = {
   nodeIntegration: false,
   sandbox: true,
 } as const
-const CSP = [
+const CSP_BASE = [
   "default-src 'self' app:",
   "script-src 'self' app:",
   "style-src 'self' app: 'unsafe-inline'",
-  "img-src 'self' app: data:",
+  "img-src 'self' app: file: data: blob:",
+  "media-src 'self' app: file: blob:",
   "font-src 'self' app: data:",
   "connect-src 'self' app:",
   "object-src 'none'",
   "base-uri 'self'",
   "frame-ancestors 'none'",
 ].join('; ')
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
+if (!hasSingleInstanceLock) {
+  app.quit()
+}
+
+// Relaxed CSP applied ONLY to the export window. Mediabunny's UrlSource
+// uses `fetch(file://…)` under the hood to stream-decode local recording
+// files (both video frame slices and audio). Every other window stays on
+// the tighter CSP_BASE so this loosening doesn't widen the attack surface
+// of the rest of the app. The renderer is still sandboxed + contextIsolated
+// + nodeIntegration:false, and `file:` was already reachable via media-src
+// for the editor's <video> elements — connect-src just lets Mediabunny's
+// JS fetch the same URLs.
+const CSP_EXPORT = CSP_BASE.replace(
+  "connect-src 'self' app:",
+  "connect-src 'self' app: file:",
+)
 
 if (!isDev) {
   protocol.registerSchemesAsPrivileged([
@@ -136,54 +187,274 @@ function hardenWebContents(win: BrowserWindow): void {
   })
 }
 
-function createMainWindow(): void {
-  if (!hasRequiredPermissions()) {
-    createPermissionWindow()
-    return
+function lockWindowZoom(win: BrowserWindow): void {
+  if (zoomLockedWindows.has(win)) return
+  zoomLockedWindows.add(win)
+
+  const contents = win.webContents
+  const resetZoom = () => {
+    if (contents.isDestroyed()) return
+    contents.setZoomLevel(0)
+    contents.setZoomFactor(1)
   }
 
-  if (mainWin && !mainWin.isDestroyed()) {
-    mainWin.show()
-    mainWin.focus()
+  resetZoom()
+  void contents.setVisualZoomLevelLimits(1, 1).catch(() => {})
+  contents.on('did-finish-load', resetZoom)
+  contents.on('zoom-changed', (event) => {
+    event.preventDefault()
+    resetZoom()
+  })
+  contents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || (!input.control && !input.meta)) return
+    const key = input.key.toLowerCase()
+    const isZoomShortcut =
+      key === '+' ||
+      key === '=' ||
+      key === '-' ||
+      key === '_' ||
+      key === '0' ||
+      input.code === 'NumpadAdd' ||
+      input.code === 'NumpadSubtract' ||
+      input.code === 'Numpad0'
+
+    if (isZoomShortcut) {
+      event.preventDefault()
+      resetZoom()
+    }
+  })
+}
+
+interface CreateMainWindowOptions {
+  forceNew?: boolean
+  projectPath?: string | null
+}
+
+function liveEditorWindows(): BrowserWindow[] {
+  const live: BrowserWindow[] = []
+  for (const win of editorWins) {
+    if (win.isDestroyed()) {
+      editorWins.delete(win)
+      continue
+    }
+    live.push(win)
+  }
+  return live
+}
+
+function hasEditorWindow(): boolean {
+  return liveEditorWindows().length > 0
+}
+
+function getCurrentEditorWindow(): BrowserWindow | null {
+  if (
+    lastFocusedEditorWin &&
+    !lastFocusedEditorWin.isDestroyed() &&
+    editorWins.has(lastFocusedEditorWin)
+  ) {
+    return lastFocusedEditorWin
+  }
+  if (mainWin && !mainWin.isDestroyed()) return mainWin
+  const live = liveEditorWindows()
+  lastFocusedEditorWin = live[live.length - 1] ?? null
+  mainWin = lastFocusedEditorWin
+  return mainWin
+}
+
+function rememberEditorWindow(win: BrowserWindow): void {
+  editorWins.add(win)
+  mainWin = win
+  lastFocusedEditorWin = win
+  win.on('focus', () => {
+    mainWin = win
+    lastFocusedEditorWin = win
+  })
+  win.on('closed', () => {
+    editorWins.delete(win)
+    if (mainWin === win || lastFocusedEditorWin === win) {
+      const live = liveEditorWindows()
+      lastFocusedEditorWin = live[live.length - 1] ?? null
+      mainWin = lastFocusedEditorWin
+    }
+  })
+}
+
+function editorProjectQuery(projectPath: string | null | undefined): string {
+  return projectPath ? `?projectPath=${encodeURIComponent(projectPath)}` : ''
+}
+
+function editorWindowTitle(projectName: string | null | undefined): string {
+  const name = projectName?.trim()
+  return name ? `${name}-openscreen` : 'openscreen'
+}
+
+function editorWindowTitleFromPath(projectPath: string | null | undefined): string {
+  return editorWindowTitle(projectPath ? path.basename(projectPath) : null)
+}
+
+function loadEditorRoute(win: BrowserWindow, projectPath?: string | null): void {
+  const query = editorProjectQuery(projectPath)
+  if (isDev) {
+    void win.loadURL(`${DEV_URL}/${query}`)
     return
+  }
+  void win.loadURL(`app://./index.html${query}`)
+}
+
+function installEditorContextMenu(win: BrowserWindow): void {
+  win.webContents.on('context-menu', (_event, params) => {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) return
+
+    Menu.buildFromTemplate([
+      {
+        label: 'Refresh Page',
+        accelerator: 'CommandOrControl+R',
+        click: () => {
+          if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+            win.webContents.reload()
+          }
+        },
+      },
+    ]).popup({
+      window: win,
+      x: params.x,
+      y: params.y,
+    })
+  })
+}
+
+function createMainWindow(options: CreateMainWindowOptions = {}): BrowserWindow | null {
+  if (!hasRequiredPermissions()) {
+    createPermissionWindow()
+    return null
+  }
+
+  const existing = getCurrentEditorWindow()
+  if (!options.forceNew && existing) {
+    if (options.projectPath) loadEditorRoute(existing, options.projectPath)
+    focusWindow(existing)
+    return existing
   }
 
   const isMac = process.platform === 'darwin'
-  mainWin = new BrowserWindow({
+  const win = new BrowserWindow({
     width: 1280,
     height: 800,
     show: false,
+    title: editorWindowTitleFromPath(options.projectPath),
     backgroundColor: '#000000',
-    webPreferences: SHARED_WEB_PREFERENCES,
+    // webSecurity is relaxed on the editor window only so <video> tags can
+    // play local recording assets via file:// URLs. The renderer keeps
+    // sandbox/contextIsolation/nodeIntegration locked down, so even with
+    // same-origin relaxed it cannot reach Node APIs. Other windows (recorder
+    // bar, controls, camera preview, permission gate) keep the default
+    // hardened SHARED_WEB_PREFERENCES.
+    webPreferences: { ...SHARED_WEB_PREFERENCES, webSecurity: false },
     // Custom titlebar: macOS keeps native traffic lights (hidden chrome,
     // repositioned to align with the 40px React header), Windows/Linux drop
     // the frame entirely and render min/maximize/close buttons in React.
     ...(isMac
-      ? { titleBarStyle: 'hidden' as const, trafficLightPosition: { x: 14, y: 14 } }
+      ? {
+          titleBarStyle: 'hidden' as const,
+          trafficLightPosition: { x: 14, y: 14 },
+        }
       : { frame: false }),
   })
-  watchMainWindowState(mainWin)
+  rememberEditorWindow(win)
+  watchMainWindowState(win)
+  installEditorContextMenu(win)
 
-  mainWin.once('ready-to-show', () => {
+  win.once('ready-to-show', () => {
     if (hasRequiredPermissions()) {
-      mainWin?.show()
+      win.show()
     }
   })
-  mainWin.on('closed', () => { mainWin = null })
-  hardenWebContents(mainWin)
+  hardenWebContents(win)
 
   if (isDev) {
-    void mainWin.loadURL(DEV_URL)
-    mainWin.webContents.openDevTools({ mode: 'detach' })
+    loadEditorRoute(win, options.projectPath)
+    win.webContents.openDevTools({ mode: 'detach' })
   } else {
-    void mainWin.loadURL('app://./index.html')
+    loadEditorRoute(win, options.projectPath)
+  }
+
+  return win
+}
+
+function hideEditorWindow(win?: BrowserWindow | null): void {
+  const target = win && !win.isDestroyed() ? win : getCurrentEditorWindow()
+  if (target && !target.isDestroyed()) target.hide()
+}
+
+function hideAllEditorWindows(): void {
+  for (const editor of liveEditorWindows()) {
+    editor.hide()
   }
 }
 
-function hideMainWindow(): void {
-  if (mainWin && !mainWin.isDestroyed()) {
-    mainWin.hide()
+function dialogParentWindow(preferred?: BrowserWindow | null): BrowserWindow | null {
+  if (preferred && !preferred.isDestroyed()) return preferred
+  const focused = BrowserWindow.getFocusedWindow()
+  if (focused && !focused.isDestroyed()) return focused
+  return recorderBarWin && !recorderBarWin.isDestroyed() ? recorderBarWin : null
+}
+
+async function pickAndOpenProjectInEditor(
+  parentWindow?: BrowserWindow | null,
+): Promise<void> {
+  const parent = dialogParentWindow(parentWindow)
+  const dialogOptions: Electron.OpenDialogOptions = {
+    title: 'Open project',
+    defaultPath: projectsRoot(),
+    properties: ['openDirectory'],
+    buttonLabel: 'Open',
   }
+  const result = parent
+    ? await dialog.showOpenDialog(parent, dialogOptions)
+    : await dialog.showOpenDialog(dialogOptions)
+  if (result.canceled || result.filePaths.length === 0) return
+
+  const folder = result.filePaths[0]
+  const opened = await setActiveProjectFromFolder(folder)
+  if (!opened) {
+    const message: Electron.MessageBoxOptions = {
+      type: 'error',
+      message: 'That folder is not an OpenScreen project.',
+      detail:
+        'A project folder must contain a recording.json manifest. Pick the folder created when you stopped a recording.',
+      buttons: ['OK'],
+    }
+    if (parent) {
+      await dialog.showMessageBox(parent, message)
+    } else {
+      await dialog.showMessageBox(message)
+    }
+    return
+  }
+
+  // Switching into the editor mirrors the post-recording transition:
+  // tear down the recorder bar (and camera preview) and open an editor
+  // route pinned to the selected project folder.
+  const openInNewWindow = hasEditorWindow()
+  closeRecorderBarWindow()
+  createMainWindow({ projectPath: folder, forceNew: openInNewWindow })
+}
+
+async function openRecordedProjectInEditor(
+  folder: string | null,
+  openInNewWindow: boolean,
+): Promise<void> {
+  if (folder) {
+    const opened = await setActiveProjectFromFolder(folder)
+    if (!opened) {
+      console.warn('[main] recorded project could not be loaded', { folder })
+      showRecorderWindow({ preserveEditors: true })
+      return
+    }
+  }
+
+  closeRecorderBarWindow()
+  createMainWindow({ projectPath: folder, forceNew: openInNewWindow })
 }
 
 function hideRecorderBarWindow(): void {
@@ -199,7 +470,7 @@ function hideCameraWindow(): void {
 function closeRecorderBarWindow(): void {
   const win = recorderBarWin
   // Drop the module ref synchronously — the 'closed' listener also nulls it
-  // and closes the camera window, but a follow-up showRecorderWindowOnly
+  // and closes the camera window, but a follow-up showRecorderWindow
   // call must not see a stale, closing reference.
   recorderBarWin = null
   if (win && !win.isDestroyed()) {
@@ -263,7 +534,7 @@ function createCameraWindow(deviceId: string): void {
     x,
     y,
     ...windowConfigs.cameraWin,
-    webPreferences: SHARED_WEB_PREFERENCES,
+    webPreferences: { ...SHARED_WEB_PREFERENCES, devTools: false },
   })
   cameraWin = win
 
@@ -309,10 +580,6 @@ function createCameraWindow(deviceId: string): void {
     }
   })
 
-  if (isDev) {
-    win.webContents.openDevTools({ mode: 'detach' })
-  }
-
   loadAppRoute(win, '/camera/')
 }
 
@@ -331,6 +598,16 @@ function focusWindow(win: BrowserWindow): void {
   win.show()
   win.focus()
   win.moveTop()
+}
+
+function focusRecordingSurface(): boolean {
+  if (!isRecordingActive()) return false
+  if (recordingControlsWin && !recordingControlsWin.isDestroyed()) {
+    focusWindow(recordingControlsWin)
+  } else {
+    showRecordingControlsWindow()
+  }
+  return true
 }
 
 function applyWindowWorkspacePin(
@@ -461,6 +738,8 @@ function enforceFixedWindowSize(win: BrowserWindow, width: number, height: numbe
 }
 
 function loadAppRoute(win: BrowserWindow, route: string): void {
+  lockWindowZoom(win)
+
   if (isDev) {
     void win.loadURL(`${DEV_URL}${route}`)
     return
@@ -473,7 +752,7 @@ function loadAppRoute(win: BrowserWindow, route: string): void {
 }
 
 function createPermissionWindow(): void {
-  hideMainWindow()
+  hideAllEditorWindows()
   hideRecorderBarWindow()
 
   if (permissionWin && !permissionWin.isDestroyed()) {
@@ -540,6 +819,113 @@ function closePermissionWindow(): void {
   stopPermissionPolling()
 }
 
+function createExportWindow(): void {
+  if (exportWin && !exportWin.isDestroyed()) {
+    if (exportWin.isMinimized()) exportWin.restore()
+    exportWin.show()
+    exportWin.focus()
+    return
+  }
+
+  const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize
+  const winW = windowConfigs.exportWin.width ?? 480
+  const winH = windowConfigs.exportWin.height ?? 560
+  const x = Math.round((screenW - winW) / 2)
+  const y = Math.round((screenH - winH) / 2)
+
+  exportWin = new BrowserWindow({
+    x,
+    y,
+    ...windowConfigs.exportWin,
+    // Same relaxation as the editor: <video> elements need to load the
+    // project's recording assets from file:// URLs cross-origin (the page
+    // itself is served from app:// in prod, http://localhost:3535 in dev).
+    // Without webSecurity:false the load fails with a SecurityError and
+    // any later canvas.drawImage(video, …) would taint the canvas, killing
+    // Mediabunny's `new VideoFrame(canvas, …)` call. Sandbox /
+    // contextIsolation / nodeIntegration stay locked down via
+    // SHARED_WEB_PREFERENCES.
+    webPreferences: { ...SHARED_WEB_PREFERENCES, webSecurity: false },
+  })
+  if (process.platform === 'darwin') {
+    exportWin.setWindowButtonVisibility(false)
+  }
+  hardenWebContents(exportWin)
+  // Intentionally NOT calling keepWindowOnEveryWorkspace — the export
+  // window behaves like a normal app window: minimisable, ordinary z-order,
+  // doesn't float over the user's other apps during a long encode.
+
+  exportWin.once('ready-to-show', () => {
+    if (exportWin) focusWindow(exportWin)
+  })
+  exportWin.on('closed', () => {
+    exportWin = null
+    const editor = getExportSourceEditorWindow()
+    disposeExportPendingPayload()
+    // Editor window must always come back when the export window goes away,
+    // even on an unexpected close (OS quit, devtools), so the user is never
+    // stranded without a visible window.
+    showEditorWindow(editor)
+  })
+
+  loadAppRoute(exportWin, '/export/')
+}
+
+function closeExportWindow(): void {
+  if (exportWin && !exportWin.isDestroyed()) {
+    exportWin.close()
+  }
+  exportWin = null
+}
+
+function showEditorWindow(win?: BrowserWindow | null): void {
+  const target = win && !win.isDestroyed() ? win : getCurrentEditorWindow()
+  const editor = target && !target.isDestroyed() ? target : null
+  if (!editor) return
+  if (editor.isMinimized()) editor.restore()
+  focusWindow(editor)
+}
+
+function createRecordingSettingsWindow(): void {
+  if (recordingSettingsWin && !recordingSettingsWin.isDestroyed()) {
+    if (recordingSettingsWin.isMinimized()) recordingSettingsWin.restore()
+    recordingSettingsWin.show()
+    recordingSettingsWin.focus()
+    return
+  }
+
+  // Center over the workspace, slightly above the recorder bar so the
+  // settings panel feels anchored to its trigger.
+  const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize
+  const winW = windowConfigs.recordingSettingsWin.width ?? 480
+  const winH = windowConfigs.recordingSettingsWin.height ?? 640
+  const x = Math.round((screenW - winW) / 2)
+  const y = Math.round((screenH - winH) / 2)
+
+  recordingSettingsWin = new BrowserWindow({
+    x,
+    y,
+    ...windowConfigs.recordingSettingsWin,
+    webPreferences: SHARED_WEB_PREFERENCES,
+  })
+  if (process.platform === 'darwin') {
+    recordingSettingsWin.setWindowButtonVisibility(false)
+  }
+  hardenWebContents(recordingSettingsWin)
+  // Keep on top across Spaces; recording-quality is a transient utility window
+  // and shouldn't get lost behind the recorder bar / picker.
+  keepWindowOnEveryWorkspace(recordingSettingsWin, { level: 'modal-panel' })
+
+  recordingSettingsWin.once('ready-to-show', () => {
+    if (recordingSettingsWin) focusWindow(recordingSettingsWin)
+  })
+  recordingSettingsWin.on('closed', () => {
+    recordingSettingsWin = null
+  })
+
+  loadAppRoute(recordingSettingsWin, '/recording-settings/')
+}
+
 function showPermissionGate(reason: string): void {
   const snapshot = refreshPermissions(reason, true)
   if (isDev) {
@@ -553,9 +939,9 @@ function showPermissionGate(reason: string): void {
 
   if (snapshot.allGranted) {
     closePermissionWindow()
-    showRecorderWindowOnly()
+    showRecorderWindow({ preserveEditors: false })
   } else {
-    hideMainWindow()
+    hideAllEditorWindows()
     hideRecorderBarWindow()
     hideCameraWindow()
     hideNonPermissionWindows()
@@ -563,8 +949,13 @@ function showPermissionGate(reason: string): void {
   }
 }
 
-function showRecorderWindowOnly(): void {
-  hideMainWindow()
+function showRecorderWindow({
+  preserveEditors = true,
+}: {
+  preserveEditors?: boolean
+} = {}): void {
+  if (focusRecordingSurface()) return
+  if (!preserveEditors) hideAllEditorWindows()
   createRecorderBarWindow()
 }
 
@@ -654,7 +1045,7 @@ function createRecorderBarWindow(): void {
     x,
     y,
     ...windowConfigs.recorderBarWin,
-    webPreferences: SHARED_WEB_PREFERENCES,
+    webPreferences: { ...SHARED_WEB_PREFERENCES, devTools: false },
   })
 
   keepRecorderBarOnTop(recorderBarWin)
@@ -674,99 +1065,287 @@ function createRecorderBarWindow(): void {
   loadAppRoute(recorderBarWin, '/recorder/')
 }
 
-app.whenReady().then(() => {
-  nativeTheme.themeSource = 'dark'
+function openProjectFromCommand(): void {
+  if (!hasRequiredPermissions()) {
+    createPermissionWindow()
+    return
+  }
+  if (focusRecordingSurface()) return
+  void pickAndOpenProjectInEditor()
+}
 
-  if (!isDev) {
-    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-      callback({
-        responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [CSP] },
-      })
-    })
+function newRecordingMenuItem(): MenuItemConstructorOptions {
+  return {
+    label: 'New Recording',
+    accelerator: 'CommandOrControl+Shift+N',
+    click: () => showRecorderWindow({ preserveEditors: true }),
+  }
+}
 
-    protocol.handle('app', async (req) => {
-      const filePath = resolveAppFile(req.url)
-      if (!filePath) return new Response('Bad Request', { status: 400 })
-      return net.fetch(pathToFileURL(filePath).toString())
+function openProjectMenuItem(): MenuItemConstructorOptions {
+  return {
+    label: 'Open Project',
+    accelerator: 'CommandOrControl+O',
+    click: openProjectFromCommand,
+  }
+}
+
+function buildTrayMenu(): Menu {
+  return Menu.buildFromTemplate([
+    newRecordingMenuItem(),
+    openProjectMenuItem(),
+    { type: 'separator' },
+    { role: 'quit' },
+  ])
+}
+
+function showTrayMenu(): void {
+  tray?.popUpContextMenu(buildTrayMenu())
+}
+
+function trayIconImage(): NativeImage | null {
+  const appPath = app.getAppPath()
+  const candidates = [
+    path.join(appPath, 'app', 'favicon.ico'),
+    path.join(appPath, 'out', 'favicon.ico'),
+    path.join(OUT_DIR, 'favicon.ico'),
+  ]
+
+  for (const candidate of candidates) {
+    const image = nativeImage.createFromPath(candidate)
+    if (image.isEmpty()) continue
+    const resized = image.resize({
+      width: process.platform === 'darwin' ? 18 : 16,
+      height: process.platform === 'darwin' ? 18 : 16,
     })
+    if (process.platform === 'darwin') {
+      resized.setTemplateImage(true)
+    }
+    return resized
+  }
+  return null
+}
+
+function refreshTrayMenu(): void {
+  tray?.setContextMenu(buildTrayMenu())
+}
+
+function installTrayMenu(): void {
+  if (tray) {
+    refreshTrayMenu()
+    return
+  }
+  const image = trayIconImage()
+  if (!image) {
+    if (isDev) console.warn('[main] no tray icon available')
+    return
   }
 
-  registerMacAddonHandlers({ getRecorderWindow: () => recorderBarWin })
-  registerWindowControlHandlers(() => mainWin)
-  registerPermissionHandlers({
-    openPermissionWindow: createPermissionWindow,
-    closePermissionWindow,
-    ensureRecorderBarWindow: showRecorderWindowOnly,
-    getPermissionWindow: () => permissionWin,
-  })
-  registerRecorderHandlers({
-    getRecorderWindow: () => recorderBarWin,
-    getControlsWindow: () => recordingControlsWin,
-    onCameraPreviewChanged: (deviceId) => {
-      if (deviceId) {
-        showCameraWindow(deviceId)
-      } else {
-        hideCameraWindow()
-      }
-    },
-    startPicker: startWindowPicker,
-    cancelPicker: cancelWindowPicker,
-    onStatusChanged: (status, snapshot) => {
-      if (status === 'recording' || status === 'paused') {
-        hideRecorderBarWindow()
-        showRecordingControlsWindow()
-      } else if (status === 'idle') {
-        clearLockedRegionOverlay()
-        hideRecordingControlsWindow()
-        // A non-null lastResult marks a successful stop (discard / cancel paths
-        // null it out via resetDiscardedRecording). On success, tear the
-        // recorder + camera windows down and surface the main window so the
-        // user lands on their recordings instead of another empty bar.
-        if (snapshot.lastResult) {
-          closeRecorderBarWindow()
-          createMainWindow()
-        } else {
-          showRecorderWindowOnly()
-        }
-      }
-      // 'starting' and 'stopping' are transitional — leave window state as-is
-      // so we don't blink the bar in and out of existence.
-    },
-  })
-  registerWindowPickerHandlers({
-    webPreferences: SHARED_WEB_PREFERENCES,
-    loadAppRoute,
-    showRecorderWindow: showRecorderWindowOnly,
-    onPickerFinished: finishPickerMode,
-    reservePickerStart,
-    startRecordingForTarget: async (target) => {
-      await startRecording(target)
-    },
-  })
-  showPermissionGate('startup')
+  tray = new Tray(image)
+  tray.setToolTip('openscreen')
+  tray.on('click', showTrayMenu)
+  tray.on('right-click', showTrayMenu)
+  refreshTrayMenu()
+}
 
-  app.on('activate', () => {
-    const snapshot = refreshPermissions('app:activate', true)
-    if (!snapshot.allGranted) {
-      createPermissionWindow()
+function installAppMenu(): void {
+  const fileMenu: MenuItemConstructorOptions = {
+    label: 'File',
+    submenu: [
+      newRecordingMenuItem(),
+      openProjectMenuItem(),
+      { type: 'separator' },
+      process.platform === 'darwin' ? { role: 'close' } : { role: 'quit' },
+    ],
+  }
+  const windowMenu: MenuItemConstructorOptions = {
+    label: 'Window',
+    submenu: [
+      { role: 'minimize' },
+      ...(process.platform === 'darwin'
+        ? ([{ role: 'zoom' }, { type: 'separator' }, { role: 'front' }] as MenuItemConstructorOptions[])
+        : []),
+    ],
+  }
+  const template: MenuItemConstructorOptions[] =
+    process.platform === 'darwin'
+      ? [
+          {
+            label: app.name,
+            submenu: [
+              { role: 'about' },
+              { type: 'separator' },
+              { role: 'services' },
+              { type: 'separator' },
+              { role: 'hide' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+              { role: 'quit' },
+            ],
+          },
+          fileMenu,
+          windowMenu,
+        ]
+      : [fileMenu, windowMenu]
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
+function installDockMenu(): void {
+  if (process.platform !== 'darwin') return
+  app.dock?.setMenu(
+    Menu.buildFromTemplate([
+      newRecordingMenuItem(),
+      openProjectMenuItem(),
+    ]),
+  )
+}
+
+function installNativeCommandSurfaces(): void {
+  installAppMenu()
+  installDockMenu()
+  installTrayMenu()
+}
+
+function showPrimarySurfaceFromAppActivation(): void {
+  if (!hasRequiredPermissions()) {
+    createPermissionWindow()
+    return
+  }
+
+  // Dock/taskbar/app activation is a bring-forward gesture. It must be
+  // side-effect free for project windows: no route reloads, no recorder
+  // launch, and no editor hiding when an editor already exists.
+  const editor = getCurrentEditorWindow()
+  if (editor && !editor.isDestroyed()) {
+    showEditorWindow(editor)
+    return
+  }
+  if (focusRecordingSurface()) return
+  if (recorderBarWin && !recorderBarWin.isDestroyed()) {
+    focusWindow(recorderBarWin)
+    return
+  }
+  showRecorderWindow({ preserveEditors: true })
+}
+
+if (hasSingleInstanceLock) {
+  app.on('second-instance', () => {
+    if (app.isReady()) {
+      showPrimarySurfaceFromAppActivation()
       return
     }
-    // Dock activation should re-surface whatever window the user was already
-    // looking at — it's a "bring app forward" gesture, not a "reset the UI"
-    // gesture. A live main window (post-recording) wins; otherwise the
-    // recorder bar if it's still alive; otherwise cold-start the recorder bar.
-    if (mainWin && !mainWin.isDestroyed()) {
-      if (!mainWin.isVisible()) mainWin.show()
-      mainWin.focus()
-      return
-    }
-    if (recorderBarWin && !recorderBarWin.isDestroyed()) {
-      focusWindow(recorderBarWin)
-      return
-    }
-    showRecorderWindowOnly()
+    void app.whenReady().then(showPrimarySurfaceFromAppActivation)
   })
-})
+
+  app.whenReady().then(() => {
+    nativeTheme.themeSource = 'dark'
+
+    if (!isDev) {
+      session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+        // Per-window CSP: only the export window gets the file:-permitted
+        // policy; everything else stays on the base CSP. `webContentsId` is
+        // present on requests originating from a renderer; protocol-handler
+        // requests that happen before any renderer attaches simply hit the
+        // base policy.
+        const fromExport =
+          typeof details.webContentsId === 'number' &&
+          exportWin !== null &&
+          !exportWin.isDestroyed() &&
+          exportWin.webContents.id === details.webContentsId
+        const csp = fromExport ? CSP_EXPORT : CSP_BASE
+        callback({
+          responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [csp] },
+        })
+      })
+
+      protocol.handle('app', async (req) => {
+        const filePath = resolveAppFile(req.url)
+        if (!filePath) return new Response('Bad Request', { status: 400 })
+        return net.fetch(pathToFileURL(filePath).toString())
+      })
+    }
+
+    registerMacAddonHandlers({ getRecorderWindow: () => recorderBarWin })
+    registerWindowControlHandlers(getCurrentEditorWindow)
+    registerPermissionHandlers({
+      openPermissionWindow: createPermissionWindow,
+      closePermissionWindow,
+      ensureRecorderBarWindow: () => showRecorderWindow({ preserveEditors: false }),
+      getPermissionWindow: () => permissionWin,
+    })
+    registerRecorderHandlers({
+      getRecorderWindow: () => recorderBarWin,
+      getControlsWindow: () => recordingControlsWin,
+      onCameraPreviewChanged: (deviceId) => {
+        if (deviceId) {
+          showCameraWindow(deviceId)
+        } else {
+          hideCameraWindow()
+        }
+      },
+      startPicker: startWindowPicker,
+      cancelPicker: cancelWindowPicker,
+      openRecordingSettingsWindow: createRecordingSettingsWindow,
+      openProjectFromDialog: () => {
+        void pickAndOpenProjectInEditor(recorderBarWin)
+      },
+      onStatusChanged: (status, snapshot) => {
+        if (status === 'recording' || status === 'paused') {
+          hideRecorderBarWindow()
+          showRecordingControlsWindow()
+        } else if (status === 'idle') {
+          clearLockedRegionOverlay()
+          hideRecordingControlsWindow()
+          // A non-null lastResult marks a successful stop (discard / cancel paths
+          // null it out via resetDiscardedRecording). On success, tear the
+          // recorder + camera windows down and surface the recorded project.
+          if (snapshot.lastResult) {
+            // If another editor window already exists (for example the user
+            // opened a project, returned to the recorder, then captured again),
+            // keep that editor intact and open the fresh recording in its own
+            // project-pinned editor window.
+            const openInNewWindow = hasEditorWindow()
+            void openRecordedProjectInEditor(snapshot.outputDir, openInNewWindow)
+          } else {
+            showRecorderWindow({ preserveEditors: true })
+          }
+        }
+        // 'starting' and 'stopping' are transitional — leave window state as-is
+        // so we don't blink the bar in and out of existence.
+      },
+    })
+    registerProjectsHandlers({
+      getMainWindow: getCurrentEditorWindow,
+      getLatestRecordingDir,
+    })
+    registerWindowPickerHandlers({
+      webPreferences: SHARED_WEB_PREFERENCES,
+      loadAppRoute,
+      showRecorderWindow: () => showRecorderWindow({ preserveEditors: true }),
+      onPickerFinished: finishPickerMode,
+      reservePickerStart,
+      startRecordingForTarget: async (target) => {
+        await startRecording(target)
+      },
+    })
+    registerExportHandlers({
+      getExportWindow: () => exportWin,
+      getEditorWindow: getCurrentEditorWindow,
+      openExportWindow: createExportWindow,
+      closeExportWindow,
+      hideEditorWindow,
+      showEditorWindow,
+    })
+    installNativeCommandSurfaces()
+    showPermissionGate('startup')
+
+    app.on('activate', () => {
+      showPrimarySurfaceFromAppActivation()
+    })
+  })
+}
 
 // Two-phase quit: when a recording is active, prevent the immediate exit,
 // drive the recorder to a clean stop (so AVAssetWriter writes its moov atom
@@ -778,6 +1357,8 @@ app.on('before-quit', (event) => {
     disposeWindowPicker()
     stopNativeCameraPreview()
     disposeMacAddon()
+    tray?.destroy()
+    tray = null
     return
   }
   event.preventDefault()

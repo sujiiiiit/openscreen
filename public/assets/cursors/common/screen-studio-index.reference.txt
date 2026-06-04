@@ -1,0 +1,15 @@
+export const commonCursors = {
+  "custom-e72cb45156415a88caffcd4aba7905fd7b107f48": "figma-pointer",
+  "custom-94d183b2b18f909749199da7e8c75bf9d9a68f5d": "figma-pointer",
+};
+
+export type CommonCursorId = keyof typeof commonCursors;
+
+export function getIsCommonCursorId(id: string): id is CommonCursorId {
+  return id in commonCursors;
+}
+
+export function getCommonCursorUrl(id: CommonCursorId) {
+  const fileName = commonCursors[id];
+  return `screen-studio-asset://cursors/common/png/${fileName}.png`;
+}
