@@ -12,6 +12,13 @@ export function hasZoomModifier(event: WheelEvent | KeyboardEvent) {
   return event.metaKey || event.ctrlKey
 }
 
+/** The modifier that adds/removes nodes instead of replacing the selection. */
+export function hasAdditiveSelectionModifier(
+  event: Pick<MouseEvent, "shiftKey" | "metaKey" | "ctrlKey">
+) {
+  return event.shiftKey || event.metaKey || event.ctrlKey
+}
+
 function snapScreenValue(value: number) {
   const pixelRatio =
     typeof window === "undefined"

@@ -9,6 +9,7 @@ import {
   useState,
   type ComponentProps,
 } from "react"
+import dynamic from "next/dynamic"
 import Konva from "konva"
 import { Group, Layer, Rect, Stage } from "react-konva"
 
@@ -82,6 +83,18 @@ import {
   createRadialZoomBlurRenderer,
   type RadialZoomBlurRenderer,
 } from "@/lib/motion-blur/radial-zoom-blur"
+import { isPixiCanvasEnabled } from "@/components/editor/canvas/pixi/config"
+
+// During the Konva → Pixi migration the Pixi canvas mounts in place of the
+// Konva <Stage> when the runtime flag is on (see ./pixi/config). Loaded with
+// ssr:false because PixiJS initializes against the browser canvas/GPU.
+const PixiCanvasDynamic = dynamic(
+  () =>
+    import("@/components/editor/canvas/pixi/pixi-canvas").then(
+      (m) => m.PixiCanvas
+    ),
+  { ssr: false }
+)
 
 const SELECTION_TOOLBAR_GAP = 18
 const SELECTION_TOOLBAR_VIEWPORT_MARGIN = 12
@@ -246,6 +259,9 @@ export default function EditorWorkspace() {
   } = useEditorCanvasTimeline()
   const { artboard } = useEditorCanvasArtboard()
   const { viewportSize, viewTransform, isPreviewMode } = useEditorCanvasView()
+  // When enabled, the PixiJS canvas replaces the Konva <Stage> (read once; a
+  // reload applies a flag change). Migration scaffolding — removed at cutover.
+  const pixiEnabled = useMemo(() => isPixiCanvasEnabled(), [])
   const {
     fitArtboardToViewport,
     deleteVideo,
@@ -1659,7 +1675,9 @@ export default function EditorWorkspace() {
           : `relative h-full w-full overflow-hidden bg-editor-workspace ${cursorClassName}`
       }
     >
-      {viewportSize.width > 0 && viewportSize.height > 0 ? (
+      {pixiEnabled ? (
+        <PixiCanvasDynamic />
+      ) : viewportSize.width > 0 && viewportSize.height > 0 ? (
         <>
           {!isPreviewMode && (
             <div
