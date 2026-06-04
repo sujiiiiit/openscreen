@@ -14,6 +14,7 @@ import {
   useEditorCanvasTimelineActions,
   useEditorCanvasView,
 } from "../provider"
+import { sampleZoomCameraAtTime } from "../zoom-scene"
 import { CanvasScene } from "./scene"
 import { VideoController } from "./video-controller"
 import { ViewportController } from "./viewport-controller"
@@ -45,12 +46,15 @@ export function PixiCanvas() {
   const { viewTransform, isPreviewMode } = useEditorCanvasView()
   const { setViewTransform, setViewportSize } = useEditorCanvasActions()
   const { videos } = useEditorCanvasMedia()
-  const { primaryAudioVideoId } = useEditorCanvasTimeline()
+  const { primaryAudioVideoId, zoomClips, timelineTime } =
+    useEditorCanvasTimeline()
   const {
     registerTimelineVideoElement,
     registerTimelineCanvasNode,
     onTimelineVideoSeeked,
     registerTimelineVideoFps,
+    subscribeTimelineTicks,
+    subscribeHoverTime,
   } = useEditorCanvasTimelineActions()
 
   const appRef = useRef<Application | null>(null)
@@ -104,6 +108,14 @@ export function PixiCanvas() {
   useEffect(() => {
     primaryAudioRef.current = primaryAudioVideoId
   }, [primaryAudioVideoId])
+  const zoomClipsRef = useRef(zoomClips)
+  const committedTimeRef = useRef(timelineTime)
+  useEffect(() => {
+    zoomClipsRef.current = zoomClips
+  }, [zoomClips])
+  useEffect(() => {
+    committedTimeRef.current = timelineTime
+  }, [timelineTime])
   useEffect(() => {
     transportRef.current = {
       registerElement: registerTimelineVideoElement,
@@ -217,6 +229,14 @@ export function PixiCanvas() {
       videoController.setPrimaryAudio(primaryAudioRef.current)
       videoController.syncVideos(videosRef.current)
 
+      scene.applyZoomCamera(
+        sampleZoomCameraAtTime(
+          zoomClipsRef.current,
+          artboardSizeRef.current,
+          committedTimeRef.current
+        )
+      )
+
       themeObserver = new MutationObserver(() => {
         sceneRef.current?.setColors(resolveCanvasPalette(getIsDark()))
       })
@@ -282,6 +302,37 @@ export function PixiCanvas() {
   useEffect(() => {
     videoControllerRef.current?.setPrimaryAudio(primaryAudioVideoId)
   }, [primaryAudioVideoId])
+
+  // Composition zoom-clip camera: sample at the live playback tick / paused hover
+  // / committed time and apply to the scene's content + background cameras.
+  useEffect(() => {
+    const applyAt = (time: number) => {
+      const camera = sampleZoomCameraAtTime(
+        zoomClipsRef.current,
+        artboardSizeRef.current,
+        time
+      )
+      sceneRef.current?.applyZoomCamera(camera)
+    }
+    const unsubscribeTick = subscribeTimelineTicks((time) => applyAt(time))
+    const unsubscribeHover = subscribeHoverTime((time) =>
+      applyAt(time ?? committedTimeRef.current)
+    )
+    return () => {
+      unsubscribeTick()
+      unsubscribeHover()
+    }
+  }, [subscribeTimelineTicks, subscribeHoverTime])
+
+  useEffect(() => {
+    sceneRef.current?.applyZoomCamera(
+      sampleZoomCameraAtTime(
+        zoomClips,
+        { width: artboard.width, height: artboard.height },
+        timelineTime
+      )
+    )
+  }, [zoomClips, timelineTime, artboard.width, artboard.height])
 
   return (
     <>

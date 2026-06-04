@@ -1,4 +1,4 @@
-import Konva from "konva"
+import type Konva from "konva"
 
 import {
   ZOOM_BLUR_MOTION_GAIN,

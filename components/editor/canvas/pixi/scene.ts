@@ -21,6 +21,11 @@ import type {
 
 import { getVideoCoverCrop, type VideoCoverCrop } from "../video-cover-crop"
 import {
+  IDENTITY_ZOOM_CAMERA,
+  zoomCamerasEqual,
+  type ZoomCamera,
+} from "../zoom-scene"
+import {
   blurredWallpaperPadding,
   computeCoverCrop,
   getNoiseTexture,
@@ -133,6 +138,8 @@ export class CanvasScene {
 
   /** One view per mounted video node, keyed by video id. */
   private readonly nodeViews = new Map<string, VideoNodeView>()
+  /** Last applied composition zoom-clip camera (skips redundant re-applies). */
+  private lastZoomCamera: ZoomCamera = IDENTITY_ZOOM_CAMERA
 
   private rafId: number | null = null
   private destroyed = false
@@ -206,6 +213,21 @@ export class CanvasScene {
     this.updateBackdrop()
     this.redrawGrid()
     this.redrawBorder()
+    this.requestRender()
+  }
+
+  /**
+   * Apply the composition zoom-clip camera (Screen-Studio-style) to the content
+   * + background cameras. Identity (scale 1 / offset 0) resets them. The
+   * radial-blur postprocess is deferred to phase 2; only the transform migrates.
+   */
+  applyZoomCamera(camera: ZoomCamera) {
+    if (zoomCamerasEqual(this.lastZoomCamera, camera)) return
+    this.lastZoomCamera = camera
+    this.backgroundCamera.scale.set(camera.scale)
+    this.backgroundCamera.position.set(camera.offsetX, camera.offsetY)
+    this.contentCamera.scale.set(camera.scale)
+    this.contentCamera.position.set(camera.offsetX, camera.offsetY)
     this.requestRender()
   }
 
