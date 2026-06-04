@@ -337,9 +337,9 @@ export default function ExportPage() {
       </footer>
 
       {/*
-        Off-screen render surface. The export pipeline attaches its vanilla
-        Konva stage here. We hide it visually but keep it in the document
-        so the <video> elements + canvas composite work normally.
+        Off-screen render surface. The export pipeline attaches its offscreen
+        PixiJS application canvas here. We hide it visually but keep it in the
+        document so the <video> elements + canvas composite work normally.
       */}
       <div
         ref={offscreenRef}

@@ -268,13 +268,18 @@ export function PixiCanvas() {
 
     let themeObserver: MutationObserver | null = null
     let resizeObserver: ResizeObserver | null = null
+    let resizeRafId: number | null = null
 
     const init = async () => {
       await app.init({
         preference: "webgpu", // WebGL2 fallback is automatic when WebGPU is absent.
         antialias: true,
         resolution: Math.min(window.devicePixelRatio || 1, 2),
-        autoDensity: true,
+        // autoDensity stays OFF: we size the bitmap ourselves and let CSS stretch
+        // the canvas to fill the host (below). An animated container resize (the
+        // sidebar width spring) then tracks smoothly via CSS instead of gapping or
+        // distorting while the per-frame bitmap resize catches up.
+        autoDensity: false,
         backgroundAlpha: 0,
         autoStart: false,
         powerPreference: "high-performance",
@@ -298,7 +303,12 @@ export function PixiCanvas() {
       app.renderer.resize(size.width, size.height)
       viewportSizeRef.current = size
 
+      // Fill the host via CSS so the canvas always covers the workspace while an
+      // animated layout change (sidebar spring) is mid-flight; the bitmap is
+      // resized crisply on the next frame by the ResizeObserver below.
       app.canvas.style.display = "block"
+      app.canvas.style.width = "100%"
+      app.canvas.style.height = "100%"
       host.appendChild(app.canvas)
 
       const scene = new CanvasScene(
@@ -408,13 +418,29 @@ export function PixiCanvas() {
         attributeFilter: ["class"],
       })
 
-      resizeObserver = new ResizeObserver(() => {
-        if (!appRef.current || !controllerRef.current) return
+      // Coalesce ResizeObserver bursts (an animated sidebar resizes the host on
+      // every spring frame) to one resize per frame, and skip no-op fires —
+      // reallocating the GPU drawing buffer is the expensive part.
+      const applyResize = () => {
+        resizeRafId = null
+        const currentApp = appRef.current
+        const controller = controllerRef.current
+        if (!currentApp || !controller) return
         const next = measure()
+        if (
+          next.width === viewportSizeRef.current.width &&
+          next.height === viewportSizeRef.current.height
+        ) {
+          return
+        }
         viewportSizeRef.current = next
-        appRef.current.renderer.resize(next.width, next.height)
+        currentApp.renderer.resize(next.width, next.height)
         setViewportSizeRef.current(next)
-        controllerRef.current.handleResize()
+        controller.handleResize()
+      }
+      resizeObserver = new ResizeObserver(() => {
+        if (resizeRafId !== null) return
+        resizeRafId = requestAnimationFrame(applyResize)
       })
       resizeObserver.observe(host)
     }
@@ -425,6 +451,7 @@ export function PixiCanvas() {
       disposed = true
       themeObserver?.disconnect()
       resizeObserver?.disconnect()
+      if (resizeRafId !== null) cancelAnimationFrame(resizeRafId)
       controllerRef.current?.detach()
       transformControllerRef.current?.detach()
       cursorControllerRef.current?.destroy()
