@@ -4,8 +4,8 @@ import * as React from "react"
 import { Menu as MenuPrimitive } from "@base-ui/react/menu"
 import { cn } from "@/lib/utils"
 import { HugeiconsIcon } from "@hugeicons/react"
-import { ArrowRight01Icon, Tick02Icon } from "@hugeicons/core-free-icons"
-import { NO_DRAG } from "@/lib/window-drag"
+import { ArrowRight01Icon } from "@hugeicons/core-free-icons"
+import { Tick2Icon } from "@/components/ui/icons"
 
 // ─── Shared ────────────────────────────────────────────────────────────────
 
@@ -135,7 +135,9 @@ function DropdownMenuContent({
   style,
   ...props
 }: DropdownMenuContentProps) {
-  const positionerClassName = zIndex ? "isolate outline-none" : "isolate z-50 outline-none"
+  const positionerClassName = zIndex
+    ? "isolate outline-none"
+    : "isolate z-50 outline-none"
 
   return (
     <MenuPrimitive.Portal>
@@ -159,10 +161,7 @@ function DropdownMenuContent({
             "[&:has([data-slot=dropdown-menu-sub-trigger],[data-slot=dropdown-menu-radio-item],[data-slot=dropdown-menu-checkbox-item])_[data-slot=dropdown-menu-item]_[data-slot=dropdown-menu-item-subtext]]:mr-9",
             className
           )}
-          // Menus pop OVER the titlebar drag region — without NO_DRAG,
-          // mousedown on a menu item gets swallowed by the OS window-drag
-          // handler and the click never fires.
-          style={{ ...NO_DRAG, ...style }}
+          style={style}
           {...props}
         />
       </MenuPrimitive.Positioner>
@@ -247,7 +246,13 @@ function DropdownMenuItem({
       )}
       {...props}
     >
-      <ItemContent icon={icon} text={text} subtext={subtext} shortcut={shortcut} badge={badge}>
+      <ItemContent
+        icon={icon}
+        text={text}
+        subtext={subtext}
+        shortcut={shortcut}
+        badge={badge}
+      >
         {children}
       </ItemContent>
     </MenuPrimitive.Item>
@@ -280,10 +285,20 @@ function DropdownMenuSubTrigger({
       )}
       {...props}
     >
-      <ItemContent icon={icon} text={text} subtext={subtext} shortcut={shortcut} badge={badge}>
+      <ItemContent
+        icon={icon}
+        text={text}
+        subtext={subtext}
+        shortcut={shortcut}
+        badge={badge}
+      >
         {children}
       </ItemContent>
-      <HugeiconsIcon icon={ArrowRight01Icon} strokeWidth={2} className="text-muted-foreground ml-auto shrink-0 size-4" />
+      <HugeiconsIcon
+        icon={ArrowRight01Icon}
+        strokeWidth={2}
+        className="text-muted-foreground ml-auto size-4 shrink-0"
+      />
     </MenuPrimitive.SubmenuTrigger>
   )
 }
@@ -297,7 +312,7 @@ function CheckIndicator({ slot }: { slot: string }) {
       data-slot={slot}
     >
       <MenuPrimitive.CheckboxItemIndicator>
-        <HugeiconsIcon icon={Tick02Icon} />
+        <Tick2Icon />
       </MenuPrimitive.CheckboxItemIndicator>
     </span>
   )
@@ -310,7 +325,7 @@ function RadioIndicator({ slot }: { slot: string }) {
       data-slot={slot}
     >
       <MenuPrimitive.RadioItemIndicator>
-        <HugeiconsIcon icon={Tick02Icon} />
+        <Tick2Icon />
       </MenuPrimitive.RadioItemIndicator>
     </span>
   )
@@ -339,7 +354,13 @@ function DropdownMenuCheckboxItem({
       closeOnClick={false}
       {...props}
     >
-      <ItemContent icon={icon} text={text} subtext={subtext} shortcut={shortcut} badge={badge}>
+      <ItemContent
+        icon={icon}
+        text={text}
+        subtext={subtext}
+        shortcut={shortcut}
+        badge={badge}
+      >
         {children}
       </ItemContent>
       <CheckIndicator slot="dropdown-menu-checkbox-item-indicator" />
@@ -368,7 +389,13 @@ function DropdownMenuRadioItem({
       closeOnClick={true}
       {...props}
     >
-      <ItemContent icon={icon} text={text} subtext={subtext} shortcut={shortcut} badge={badge}>
+      <ItemContent
+        icon={icon}
+        text={text}
+        subtext={subtext}
+        shortcut={shortcut}
+        badge={badge}
+      >
         {children}
       </ItemContent>
       <RadioIndicator slot="dropdown-menu-radio-item-indicator" />

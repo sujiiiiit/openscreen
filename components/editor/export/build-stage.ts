@@ -54,6 +54,7 @@ import {
   applyZoomBlur,
   createZoomBlurFilter,
 } from "@/components/editor/canvas/pixi/zoom-blur"
+import { rendererPreferenceChain } from "@/components/editor/canvas/pixi/renderer-preference"
 import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
 import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
 
@@ -445,7 +446,10 @@ async function createExportApp(
   container: HTMLDivElement
 ): Promise<Application> {
   let lastError: unknown = null
-  for (const preference of ["webgpu", "webgl"] as const) {
+  // Skip the WebGPU attempt entirely when its global constants are missing —
+  // init would succeed but per-frame video-texture draws in run-export.ts would
+  // throw `GPUTextureUsage is not defined`, which the init try/catch can't see.
+  for (const preference of rendererPreferenceChain()) {
     const app = new Application()
     try {
       await app.init({

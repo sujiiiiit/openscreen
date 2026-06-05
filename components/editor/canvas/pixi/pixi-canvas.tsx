@@ -26,6 +26,7 @@ import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
 import { sampleZoomCameraAtTime } from "../zoom-scene"
 import { CursorController, type CursorState } from "./cursor-controller"
 import { canvasNodeFromVideo } from "./node-model"
+import { preferredRendererBackend } from "./renderer-preference"
 import { CanvasScene } from "./scene"
 import { TransformController } from "./transform-controller"
 import { VideoController } from "./video-controller"
@@ -316,10 +317,13 @@ export function PixiCanvas() {
       await app.init({
         width: initialSize.width,
         height: initialSize.height,
-        // Keep the interactive preview on WebGPU. During layout-driven resizes
-        // we paint immediately after resize so old swapchain pixels are not
-        // presented in the newly sized canvas.
-        preference: "webgpu",
+        // Prefer WebGPU for the interactive preview. During layout-driven
+        // resizes we paint immediately after resize so old swapchain pixels are
+        // not presented in the newly sized canvas. `preferredRendererBackend`
+        // downgrades to WebGL2 in environments that expose `navigator.gpu` but
+        // not the `GPUTextureUsage` globals PixiJS needs (those throw at the
+        // first texture upload, after init has already succeeded).
+        preference: preferredRendererBackend(),
         antialias: true,
         resolution: rendererResolution,
         // Keep the backing store and CSS box in the same coordinate system.

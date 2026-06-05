@@ -1278,6 +1278,23 @@ Result:
 
 - Workspace behavior, video rendering, transformer behavior, grid drawing, and state management can now be read and changed independently without changing runtime behavior.
 
+### WebGPU Renderer Fallback
+
+Problem:
+
+- The preview was initialized with a hard-coded `preference: "webgpu"` and the export tried `["webgpu", "webgl"]` in an init `try/catch` loop. Both crashed with `ReferenceError: GPUTextureUsage is not defined` (thrown from `app.render()` in `scene.ts`) in environments that expose `navigator.gpu` but **not** the WebGPU global constant namespaces (`GPUTextureUsage`, `GPUShaderStage`) that PixiJS's GPU backend reads directly when uploading textures.
+- The failure is *post-init*: an adapter is acquired, `app.init()` succeeds, and an empty-stage render (and the export's 1px readback probe) pass — the crash only fires on the **first real video-texture upload**. So neither the preview's `paint()` try/catch nor the export's init-loop fallback could recover; the editor showed a dead canvas and the export silently broke mid-encode.
+
+Decision:
+
+- `pixi/renderer-preference.ts` exposes `preferredRendererBackend()` — returns `"webgpu"` only when both `GPUTextureUsage` and `GPUShaderStage` exist on `globalThis`, otherwise `"webgl"`. Presence of those globals is an exact predictor of whether the WebGPU texture path will throw, so this is a static check rather than a runtime probe.
+- The preview (`pixi-canvas.tsx`) passes `preferredRendererBackend()` as its `preference`. The export (`build-stage.ts`) iterates `rendererPreferenceChain()`, which drops `"webgpu"` from the fallback list when the globals are absent — never handing PixiJS a preference that would crash after init.
+- When the globals *are* present we still defer to PixiJS's own adapter detection (it falls back to WebGL on its own if no GPU adapter is available).
+
+Result:
+
+- One shared module gates WebGPU for both preview and export; affected environments transparently run on WebGL2 instead of crashing. The `app.render()` try/catch in `scene.ts:paint()` remains a guard for transient per-frame upload races, not for missing-globals failures (which are now prevented up front).
+
 ## References
 
 - Konva zoom relative to pointer: https://konvajs.org/docs/sandbox/Zooming_Relative_To_Pointer.html
@@ -1330,7 +1347,7 @@ The editor canvas — **preview and export** — is **PixiJS v8** (`components/e
 
 ### Architecture (imperative controllers, no @pixi/react)
 
-React owns state + UI; PixiJS lives in imperative controllers that talk to the existing `EditorCanvasProvider` through a thin bridge in `pixi-canvas.tsx`. PixiJS's own event system is **off** (`eventFeatures` all false) — all input is DOM listeners on the host. Rendering is **on-demand**: `app.init({ autoStart:false })`, every scene mutation calls `requestRender()` (one rAF), and a continuous loop runs only during playback (`beginPlayback`/`endPlayback`). The interactive preview stays **WebGPU-first** to match the target Pixi renderer path; resize safety comes from painting immediately after renderer resize rather than falling back to WebGL. Colors go through `resolveCanvasPalette` (PixiJS can't parse `oklch`). The artboard's white "paper" drop shadow stays a DOM `<div>`. Video sprites are `renderable` when timeline-visible and at least one frame has successfully uploaded; `videoEl.readyState >= 2` only gates new `VideoSource.update()` uploads, so rapid seeks keep the last good texture visible instead of blanking. `app.render()` is wrapped in try/catch as a final upload-race guard. The provider-facing Pixi node handle maps Konva-style `batchDraw()` to `scene.renderNodeNow(id)`, which paints immediately after seek/rVFC callbacks; this keeps hover/seek redraw semantics aligned with the old Konva transport while avoiding WebGPU uploads from undecoded frames.
+React owns state + UI; PixiJS lives in imperative controllers that talk to the existing `EditorCanvasProvider` through a thin bridge in `pixi-canvas.tsx`. PixiJS's own event system is **off** (`eventFeatures` all false) — all input is DOM listeners on the host. Rendering is **on-demand**: `app.init({ autoStart:false })`, every scene mutation calls `requestRender()` (one rAF), and a continuous loop runs only during playback (`beginPlayback`/`endPlayback`). The interactive preview is **WebGPU-first** to match the target Pixi renderer path, but `preferredRendererBackend()` (`pixi/renderer-preference.ts`) downgrades the `preference` to WebGL2 in environments that expose `navigator.gpu` yet lack the `GPUTextureUsage` / `GPUShaderStage` globals PixiJS reads at texture-upload time (see *WebGPU Renderer Fallback* under Problems). Resize safety comes from painting immediately after renderer resize rather than falling back to WebGL. Colors go through `resolveCanvasPalette` (PixiJS can't parse `oklch`). The artboard's white "paper" drop shadow stays a DOM `<div>`. Video sprites are `renderable` when timeline-visible and at least one frame has successfully uploaded; `videoEl.readyState >= 2` only gates new `VideoSource.update()` uploads, so rapid seeks keep the last good texture visible instead of blanking. `app.render()` is wrapped in try/catch as a final upload-race guard. The provider-facing Pixi node handle maps Konva-style `batchDraw()` to `scene.renderNodeNow(id)`, which paints immediately after seek/rVFC callbacks; this keeps hover/seek redraw semantics aligned with the old Konva transport while avoiding WebGPU uploads from undecoded frames.
 
 During hover, `pixi-canvas.tsx` only applies the uncommitted hover time to editor-side overlays such as the cursor overlay and manual Zoom camera. The media frame itself is still driven by the provider's registered `HTMLVideoElement` seek pipeline, just like the old Konva canvas: `CanvasVideoNode` used `image={videoElement}` and `layer.draw()`, while Pixi uses a `VideoSource` texture and `scene.renderNodeNow(id)` to upload and render the same live element after `seeked` / rVFC.
 
@@ -1386,7 +1403,7 @@ Konva is fully removed: `editor-workspace.tsx` is a thin Pixi shell; the Konva c
 
 ### Export (migrated)
 
-`build-stage.ts` + `run-export.ts` render through an **offscreen Pixi `Application`** (WebGPU→WebGL2 with a 1px readback probe), reusing the shared `video-appearance.ts` + `background.ts` + `planExportFrames`. `app.canvas` feeds Mediabunny's `CanvasSource` directly — the per-layer composite blit is gone. Sources are `close()`d early so the muxer can plan ahead. The export reuses the shared `cursor-sprite.ts` + `zoom-blur.ts`, so it renders the **cursor** and **radial zoom blur** in parity with the preview, and now applies wallpaper **blur** too (the old Konva export skipped it). The bitrate ladder, frame plan, audio, and abort handling are unchanged.
+`build-stage.ts` + `run-export.ts` render through an **offscreen Pixi `Application`** (WebGPU→WebGL2 with a 1px readback probe), reusing the shared `video-appearance.ts` + `background.ts` + `planExportFrames`. The init loop iterates `rendererPreferenceChain()` (`pixi/renderer-preference.ts`), which **omits the WebGPU attempt entirely** when its globals are missing — init would otherwise succeed and the failure would surface only as `GPUTextureUsage is not defined` on the first per-frame video-texture draw, which the init `try/catch` (and the empty-stage readback probe) can't see. `app.canvas` feeds Mediabunny's `CanvasSource` directly — the per-layer composite blit is gone. Sources are `close()`d early so the muxer can plan ahead. The export reuses the shared `cursor-sprite.ts` + `zoom-blur.ts`, so it renders the **cursor** and **radial zoom blur** in parity with the preview, and now applies wallpaper **blur** too (the old Konva export skipped it). The bitrate ladder, frame plan, audio, and abort handling are unchanged.
 
 ### Known limitations / follow-ups
 
