@@ -21,6 +21,7 @@ import {
   useEditorCanvasView,
 } from "../provider"
 import { buildCursorTrack, projectFolderFromObjectUrl } from "../cursor-scene"
+import { registerSceneSnapshotProvider } from "../scene-snapshot"
 import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
 import { sampleZoomCameraAtTime } from "../zoom-scene"
 import { CursorController, type CursorState } from "./cursor-controller"
@@ -316,6 +317,7 @@ export function PixiCanvas() {
 
     let themeObserver: MutationObserver | null = null
     let resizeObserver: ResizeObserver | null = null
+    let unregisterSnapshotProvider: (() => void) | null = null
     let resizeRafId: number | null = null
     let resumeWarmupRafId: number | null = null
     let resumeWarmupFrames = 0
@@ -451,6 +453,12 @@ export function PixiCanvas() {
       sceneRef.current = scene
       controllerRef.current = controller
 
+      // Expose one-shot artboard rasterization (Zoom tab focus preview).
+      unregisterSnapshotProvider = registerSceneSnapshotProvider(
+        (targetWidth) =>
+          sceneRef.current?.captureCompositeSnapshot(targetWidth) ?? null
+      )
+
       // Push our measured size to the provider (it may re-fit), then apply the
       // provider's current view so the artboard lands correctly on first paint.
       const initialViewTransform = setViewportSizeRef.current(size)
@@ -554,6 +562,7 @@ export function PixiCanvas() {
 
     return () => {
       disposed = true
+      unregisterSnapshotProvider?.()
       themeObserver?.disconnect()
       resizeObserver?.disconnect()
       if (scheduleResize) window.removeEventListener("resize", scheduleResize)

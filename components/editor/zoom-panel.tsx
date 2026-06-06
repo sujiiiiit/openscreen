@@ -1,21 +1,18 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
-import { HugeiconsIcon } from "@hugeicons/react"
-import { RefreshIcon } from "@hugeicons/core-free-icons"
+import { useEffect, useRef, useState } from "react"
 
 import {
   useEditorCanvasArtboard,
-  useEditorCanvasMedia,
   useEditorCanvasTimeline,
   useEditorCanvasTimelineActions,
 } from "@/components/editor/canvas/provider"
+import { captureSceneSnapshot } from "@/components/editor/canvas/scene-snapshot"
 import { getZoomVisibleWindow } from "@/components/editor/canvas/zoom-scene"
 import { Button } from "@/components/ui/button"
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
 import {
-  ZOOM_FOCUS_DEFAULT,
   ZOOM_RADIAL_BLUR_DEFAULT,
   ZOOM_SCALE_DEFAULT,
   ZOOM_SCALE_MAX,
@@ -25,10 +22,11 @@ import {
   clampZoomFocus,
 } from "@/lib/zoom-clips"
 import { cn } from "@/lib/utils"
-import type { CanvasVideoItem, CanvasZoomClip } from "@/types/editor-canvas"
+import type { CanvasZoomClip } from "@/types/editor-canvas"
 
 function AdjustmentRow({
   label,
+  description,
   value,
   min,
   max,
@@ -39,6 +37,7 @@ function AdjustmentRow({
   resetDisabled,
 }: {
   label: string
+  description: string
   value: number
   min: number
   max: number
@@ -50,11 +49,14 @@ function AdjustmentRow({
 }) {
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-between gap-3">
-        <h4 className="text-xs font-semibold select-none">{label}</h4>
-        <span className="text-[11px] font-medium text-muted-foreground tabular-nums">
-          {formatValue(value)}
-        </span>
+      <div className="space-y-1 select-none">
+        <div className="flex items-center justify-between gap-3">
+          <h4 className="text-xs font-semibold">{label}</h4>
+          <span className="text-[11px] font-medium text-muted-foreground tabular-nums">
+            {formatValue(value)}
+          </span>
+        </div>
+        <p className="text-xs text-muted-foreground">{description}</p>
       </div>
       <div className="flex items-center gap-3">
         <Slider
@@ -84,56 +86,49 @@ function AdjustmentRow({
   )
 }
 
-function ZoomPreviewVideo({
-  video,
-  sourceTime,
-  artboardWidth,
-  artboardHeight,
-}: {
-  video: CanvasVideoItem
-  sourceTime: number
-  artboardWidth: number
-  artboardHeight: number
-}) {
-  const ref = useRef<HTMLVideoElement | null>(null)
+// Snapshot width for the focus preview. The preview box is sidebar-sized, so
+// rasterizing the full 3000px+ artboard would only waste readback time; the
+// scene capture never upscales past the artboard's own width.
+const ZOOM_PREVIEW_SNAPSHOT_WIDTH = 1280
+
+/**
+ * Temp image of the composed artboard — background, padding, video nodes with
+ * their appearance (corners / border / shadow), and the cursor overlay — so
+ * the focus preview shows exactly what the zoom will magnify. Captured from
+ * the live PixiJS scene (`captureSceneSnapshot`, a synchronous GPU extract of
+ * the unzoomed composition) each time a Zoom clip is selected. Video content
+ * shows the current playhead frame; appearance is always current.
+ */
+function useSceneSnapshotUrl(clipId: string): string | null {
+  const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null)
+  // Tracks the live object URL so a replacement or unmount can revoke it —
+  // the blob is a temp image that must not outlive the preview.
+  const snapshotUrlRef = useRef<string | null>(null)
 
   useEffect(() => {
-    const node = ref.current
-    if (!node) return
-    node.pause()
-    const seek = () => {
-      try {
-        node.currentTime = Math.max(0, sourceTime)
-      } catch {
-        // File-backed media can briefly reject early seeks before metadata.
-      }
+    let cancelled = false
+    const canvas = captureSceneSnapshot(ZOOM_PREVIEW_SNAPSHOT_WIDTH)
+    if (!canvas) return
+    canvas.toBlob((blob) => {
+      if (cancelled || !blob) return
+      const next = URL.createObjectURL(blob)
+      if (snapshotUrlRef.current) URL.revokeObjectURL(snapshotUrlRef.current)
+      snapshotUrlRef.current = next
+      setSnapshotUrl(next)
+    }, "image/png")
+    return () => {
+      cancelled = true
     }
-    if (node.readyState >= 1) {
-      seek()
-      return
-    }
-    node.addEventListener("loadedmetadata", seek, { once: true })
-    return () => node.removeEventListener("loadedmetadata", seek)
-  }, [sourceTime, video.objectUrl])
+  }, [clipId])
 
-  return (
-    <video
-      ref={ref}
-      src={video.objectUrl}
-      muted
-      playsInline
-      preload="metadata"
-      className="absolute bg-black object-cover"
-      style={{
-        left: `${(video.x / artboardWidth) * 100}%`,
-        top: `${(video.y / artboardHeight) * 100}%`,
-        width: `${(video.width / artboardWidth) * 100}%`,
-        height: `${(video.height / artboardHeight) * 100}%`,
-        transform: `rotate(${video.rotation}deg)`,
-        transformOrigin: "0 0",
-      }}
-    />
-  )
+  useEffect(() => {
+    return () => {
+      if (snapshotUrlRef.current) URL.revokeObjectURL(snapshotUrlRef.current)
+      snapshotUrlRef.current = null
+    }
+  }, [])
+
+  return snapshotUrl
 }
 
 function ZoomFocusPreview({
@@ -145,30 +140,8 @@ function ZoomFocusPreview({
 }) {
   const previewRef = useRef<HTMLDivElement | null>(null)
   const { artboard } = useEditorCanvasArtboard()
-  const { videos } = useEditorCanvasMedia()
-  const { timelineClips } = useEditorCanvasTimeline()
   const [isDragging, setIsDragging] = useState(false)
-
-  const activeVideos = useMemo(
-    () =>
-      timelineClips.flatMap((timelineClip) => {
-        if (clip.start < timelineClip.start || clip.start >= timelineClip.end) {
-          return []
-        }
-        const video = videos.find(
-          (candidate) => candidate.id === timelineClip.videoId
-        )
-        if (!video) return []
-        return [
-          {
-            video,
-            sourceTime:
-              timelineClip.sourceIn + (clip.start - timelineClip.start),
-          },
-        ]
-      }),
-    [clip.start, timelineClips, videos]
-  )
+  const snapshotUrl = useSceneSnapshotUrl(clip.id)
 
   const targetFocus = clampZoomFocus(clip.focus)
   const visibleWindow = getZoomVisibleWindow(targetFocus, clip.scale, artboard)
@@ -189,7 +162,7 @@ function ZoomFocusPreview({
     <div
       ref={previewRef}
       className={cn(
-        "relative w-full overflow-hidden rounded-lg border border-border/60 bg-black shadow-inner",
+        "relative w-full overflow-hidden border border-border/60 bg-black shadow-inner",
         isDragging && "cursor-grabbing"
       )}
       style={{ aspectRatio: `${artboard.width} / ${artboard.height}` }}
@@ -209,15 +182,17 @@ function ZoomFocusPreview({
       onPointerCancel={() => setIsDragging(false)}
     >
       <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,0.08),rgba(255,255,255,0.02))]" />
-      {activeVideos.map(({ video, sourceTime }) => (
-        <ZoomPreviewVideo
-          key={video.id}
-          video={video}
-          sourceTime={sourceTime}
-          artboardWidth={artboard.width}
-          artboardHeight={artboard.height}
+      {snapshotUrl ? (
+        // temp object URL; next/image can't optimize blob: sources. The
+        // snapshot has the artboard's aspect ratio — same as this box.
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={snapshotUrl}
+          alt=""
+          draggable={false}
+          className="absolute inset-0 size-full"
         />
-      ))}
+      ) : null}
       <div
         className="pointer-events-none absolute border border-white/70 bg-white/5 shadow-[0_0_0_999px_rgba(0,0,0,0.18)]"
         style={{
@@ -277,70 +252,61 @@ export function ZoomPanel() {
         </p>
       </header>
 
-      <ZoomFocusPreview
-        clip={selectedClip}
-        onFocusChange={(focus) => updateZoomClip(selectedClip.id, { focus })}
-      />
+      <div className="flex w-full flex-col gap-9">
+        <div className="space-y-2">
+          <ZoomFocusPreview
+            clip={selectedClip}
+            onFocusChange={(focus) =>
+              updateZoomClip(selectedClip.id, { focus })
+            }
+          />
+          <p className="text-xs text-muted-foreground select-none">
+            Drag the dot to set the point the zoom centers on.
+          </p>
+        </div>
 
-      <div className="flex items-center justify-between gap-2">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() =>
-            updateZoomClip(selectedClip.id, { focus: ZOOM_FOCUS_DEFAULT })
+        <AdjustmentRow
+          label="Scale"
+          description="How far the view zooms in."
+          value={scalePct}
+          min={100}
+          max={ZOOM_SCALE_MAX * 100}
+          step={5}
+          formatValue={(value) => `${Math.round(value)}%`}
+          onValueChange={(value) => {
+            const scale = value / 100
+            updateZoomClip(selectedClip.id, { scale })
+          }}
+          onReset={() =>
+            updateZoomClip(selectedClip.id, {
+              scale: ZOOM_SCALE_DEFAULT,
+            })
           }
-          disabled={
-            selectedClip.focus.x === ZOOM_FOCUS_DEFAULT.x &&
-            selectedClip.focus.y === ZOOM_FOCUS_DEFAULT.y
+          resetDisabled={selectedClip.scale === ZOOM_SCALE_DEFAULT}
+        />
+
+        <AdjustmentRow
+          label="Strength"
+          description="Radial motion blur while the zoom is moving."
+          value={blurPct}
+          min={0}
+          max={100}
+          step={1}
+          formatValue={(value) => `${Math.round(value)}%`}
+          onValueChange={(value) =>
+            updateZoomClip(selectedClip.id, { radialBlur: value / 100 })
           }
-        >
-          <HugeiconsIcon icon={RefreshIcon} size={14} color="currentColor" />
-          Center
-        </Button>
-      </div>
+          onReset={() =>
+            updateZoomClip(selectedClip.id, {
+              radialBlur: ZOOM_RADIAL_BLUR_DEFAULT,
+            })
+          }
+          resetDisabled={selectedClip.radialBlur === ZOOM_RADIAL_BLUR_DEFAULT}
+        />
 
-      <AdjustmentRow
-        label="Scale"
-        value={scalePct}
-        min={100}
-        max={ZOOM_SCALE_MAX * 100}
-        step={5}
-        formatValue={(value) => `${Math.round(value)}%`}
-        onValueChange={(value) => {
-          const scale = value / 100
-          updateZoomClip(selectedClip.id, { scale })
-        }}
-        onReset={() =>
-          updateZoomClip(selectedClip.id, {
-            scale: ZOOM_SCALE_DEFAULT,
-          })
-        }
-        resetDisabled={selectedClip.scale === ZOOM_SCALE_DEFAULT}
-      />
-
-      <AdjustmentRow
-        label="Strength"
-        value={blurPct}
-        min={0}
-        max={100}
-        step={1}
-        formatValue={(value) => `${Math.round(value)}%`}
-        onValueChange={(value) =>
-          updateZoomClip(selectedClip.id, { radialBlur: value / 100 })
-        }
-        onReset={() =>
-          updateZoomClip(selectedClip.id, {
-            radialBlur: ZOOM_RADIAL_BLUR_DEFAULT,
-          })
-        }
-        resetDisabled={selectedClip.radialBlur === ZOOM_RADIAL_BLUR_DEFAULT}
-      />
-
-      <div className="space-y-3 border-t border-border/60 pt-4">
-        <h4 className="text-xs font-semibold select-none">Transition</h4>
         <AdjustmentRow
           label="Duration"
+          description="How long the zoom-in and zoom-out ramps take."
           value={selectedClip.transition.durationMs}
           min={ZOOM_TRANSITION_DURATION_MS_MIN}
           max={ZOOM_TRANSITION_DURATION_MS_MAX}

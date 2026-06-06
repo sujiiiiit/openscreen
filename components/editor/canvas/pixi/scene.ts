@@ -282,6 +282,51 @@ export class CanvasScene {
     }
   }
 
+  /**
+   * Synchronously rasterize the artboard composition — background fill/grain,
+   * video nodes (with their appearance: corners, border, shadow), and the
+   * cursor overlay — to a canvas no wider than `targetWidth`. Editor chrome
+   * is excluded: the pixel grid is hidden and the zoom-clip camera + radial
+   * blur are neutralized for the duration of the extract, so the snapshot is
+   * always the unzoomed scene even when the playhead sits inside a Zoom clip.
+   * All temporary mutations are restored before returning (extract renders to
+   * an offscreen texture, so nothing flashes on screen). Video textures show
+   * the current playhead frame. Returns null after destroy / on a degenerate
+   * artboard.
+   */
+  captureCompositeSnapshot(targetWidth: number): HTMLCanvasElement | null {
+    if (this.destroyed) return null
+    const { width, height } = this.artboardSize
+    if (width <= 0 || height <= 0 || targetWidth <= 0) return null
+
+    const camera = this.lastZoomCamera
+    const gridWasVisible = this.gridGfx.visible
+    this.backgroundCamera.scale.set(1)
+    this.backgroundCamera.position.set(0, 0)
+    this.contentCamera.scale.set(1)
+    this.contentCamera.position.set(0, 0)
+    if (this.zoomBlurOn) this.composite.filters = []
+    this.gridGfx.visible = false
+    try {
+      return this.app.renderer.extract.canvas({
+        target: this.composite,
+        frame: new Rectangle(0, 0, width, height),
+        // Never upscale — the preview consumer is sidebar-sized.
+        resolution: Math.min(1, targetWidth / width),
+      }) as HTMLCanvasElement
+    } finally {
+      this.backgroundCamera.scale.set(camera.scale)
+      this.backgroundCamera.position.set(camera.offsetX, camera.offsetY)
+      this.contentCamera.scale.set(camera.scale)
+      this.contentCamera.position.set(camera.offsetX, camera.offsetY)
+      if (this.zoomBlurOn) this.composite.filters = [this.zoomBlur]
+      this.gridGfx.visible = gridWasVisible
+      // The restored values are identical, but the mutations dirtied the
+      // transforms — schedule one frame so Pixi settles deterministically.
+      this.requestRender()
+    }
+  }
+
   // ── selection / hover overlays (screen space) ───────────────────────────────
 
   private redrawOverlays() {

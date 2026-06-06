@@ -11,6 +11,7 @@ import {
   type ReactNode,
 } from "react"
 import type { PixiNodeHandle } from "./pixi/video-controller"
+import { getAutoplayOnOpenEnabled } from "@/components/editor/canvas/autoplay-preference"
 
 import {
   type ArtboardPresetId,
@@ -450,7 +451,7 @@ function createCanvasId() {
 // Per-role appearance defaults. Camera defaults to a fully-rounded squircle
 // at maximum smoothing, which visually matches the prior elliptical sceneFunc
 // without needing a separate `cropShape` field. Screen and media start at
-// radius 0 with `cornerSmoothing = 0.6` (the macOS look) so users get an
+// radius 0 with `cornerSmoothing = 1` (maximum smoothing) so users get an
 // already-correct curve the moment they nudge the radius slider.
 function createVideoAppearanceDefaults(
   role: CanvasVideoRole,
@@ -488,7 +489,7 @@ function createVideoAppearanceDefaults(
 
   return {
     cornerRadius: 0,
-    cornerSmoothing: 0.6,
+    cornerSmoothing: 1,
     ...borderDefaults,
   }
 }
@@ -2194,9 +2195,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         // now that there's a decodable frame and the timeline has a real
         // duration. `playTimeline` clears the flag, so additional elements
         // registering later just keep in sync (they read the live playing
-        // state above) instead of restarting playback.
+        // state above) instead of restarting playback. The titlebar
+        // "Autoplay" preference is read here — at fire time, not arm time —
+        // so a toggle always applies to the very next open.
         if (
           autoplayPendingRef.current &&
+          getAutoplayOnOpenEnabled() &&
           !isTimelinePlayingRef.current &&
           timelineDurationRef.current > 0 &&
           !(typeof document !== "undefined" && document.hidden)

@@ -1,5 +1,6 @@
 "use client"
 
+import { useEffect, useRef, useState } from "react"
 import { HugeiconsIcon } from "@hugeicons/react"
 import {
   ArrowDown01Icon,
@@ -32,11 +33,16 @@ import type {
   CanvasVideoItem,
 } from "@/types/editor-canvas"
 
-const SMOOTHING_DEFAULT_PERCENT = 60
+const SMOOTHING_DEFAULT_PERCENT = 100
 const RADIUS_SLIDER_MAX = 250
 const BORDER_WIDTH_MAX = 64
 const BORDER_OFFSET_RANGE = 64
 const BORDER_DEFAULT_COLOR = "#000000"
+// The native color picker fires `input` events continuously while dragging;
+// committing every one into the canvas provider re-renders the scene (and
+// spams history/autosave) at pointer rate. The pill previews instantly from
+// local state and the real commit trails the drag by this delay.
+const BORDER_COLOR_COMMIT_DEBOUNCE_MS = 150
 const BORDER_ALIGNMENT_OPTIONS: Array<
   SelectionPillOption<CanvasBorderAlignment>
 > = [
@@ -255,6 +261,17 @@ function VideoFileGrid({
 
 function BorderControls({ video }: { video: CanvasVideoItem }) {
   const { updateVideoAppearance } = useEditorCanvasActions()
+  // Hidden color input opened by the pill Button; kept positioned behind the
+  // pill so the native color popup anchors to the control, not the viewport.
+  const colorInputRef = useRef<HTMLInputElement>(null)
+  // Debounced color commit: `draftColor` drives the pill + input while the
+  // user drags inside the OS picker; the provider update fires only after the
+  // drag pauses. (BorderControls is keyed by video id upstream, so a video
+  // switch remounts this component — the unmount effect flushes any pending
+  // color so the last picked value can't be dropped.)
+  const [draftColor, setDraftColor] = useState<string | null>(null)
+  const colorCommitTimerRef = useRef<number | null>(null)
+  const pendingColorRef = useRef<string | null>(null)
 
   const borderWidth = Math.max(
     0,
@@ -265,6 +282,9 @@ function BorderControls({ video }: { video: CanvasVideoItem }) {
     Math.min(BORDER_OFFSET_RANGE, Math.round(video.borderOffset))
   )
   const borderColor = video.borderColor || BORDER_DEFAULT_COLOR
+  // What the pill shows: the in-flight draft while dragging in the OS
+  // picker, otherwise the committed value.
+  const displayColor = draftColor ?? borderColor
   const borderDisabled = borderWidth <= 0
 
   const setBorderWidth = (next: number) => {
@@ -277,6 +297,39 @@ function BorderControls({ video }: { video: CanvasVideoItem }) {
     if (next === video.borderColor) return
     updateVideoAppearance(video.id, { borderColor: next })
   }
+
+  // Kept in a ref so the unmount flush below always commits through the
+  // latest closure (fresh `video.borderColor` comparison) without re-running
+  // the effect. Updated in an effect, not during render (react-hooks/refs).
+  const setBorderColorRef = useRef(setBorderColor)
+  useEffect(() => {
+    setBorderColorRef.current = setBorderColor
+  })
+
+  const handleColorInput = (next: string) => {
+    setDraftColor(next)
+    pendingColorRef.current = next
+    if (colorCommitTimerRef.current !== null) {
+      window.clearTimeout(colorCommitTimerRef.current)
+    }
+    colorCommitTimerRef.current = window.setTimeout(() => {
+      colorCommitTimerRef.current = null
+      pendingColorRef.current = null
+      setDraftColor(null)
+      setBorderColorRef.current(next)
+    }, BORDER_COLOR_COMMIT_DEBOUNCE_MS)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (colorCommitTimerRef.current !== null) {
+        window.clearTimeout(colorCommitTimerRef.current)
+      }
+      if (pendingColorRef.current !== null) {
+        setBorderColorRef.current(pendingColorRef.current)
+      }
+    }
+  }, [])
 
   const setBorderOffset = (next: number) => {
     const clamped = Math.max(
@@ -312,30 +365,39 @@ function BorderControls({ video }: { video: CanvasVideoItem }) {
             borderDisabled && "opacity-50"
           )}
         >
-          Color
+          Border color
         </h4>
-        <div className="flex items-center gap-2">
-          <label
-            className={cn(
-              "relative inline-flex size-6 cursor-pointer items-center justify-center overflow-hidden rounded-md border border-border ring-offset-background transition-shadow focus-within:ring-2 focus-within:ring-ring/40 hover:ring-2 hover:ring-ring/40",
-              borderDisabled && "pointer-events-none opacity-50"
-            )}
-            style={{ backgroundColor: borderColor }}
-            title={borderColor}
+        {/* Pill-shaped Button trigger: circular swatch + hex readout. The
+            color input is visually hidden behind the pill (so the native
+            popup anchors next to it) and is opened via the Button click. */}
+        <span className="relative inline-flex">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={borderDisabled}
+            onClick={() => colorInputRef.current?.click()}
+            title={displayColor}
+            className="gap-2 rounded-full pl-1.5 font-mono text-xs text-muted-foreground uppercase tabular-nums"
           >
-            <input
-              type="color"
-              value={borderColor}
-              onChange={(event) => setBorderColor(event.target.value)}
-              disabled={borderDisabled}
-              className="absolute inset-0 size-full cursor-pointer opacity-0"
-              aria-label="Border color"
+            <span
+              aria-hidden
+              className="size-5 shrink-0 rounded-full border border-border"
+              style={{ backgroundColor: displayColor }}
             />
-          </label>
-          <span className="font-mono text-xs text-muted-foreground uppercase tabular-nums select-none">
-            {borderColor.replace(/^#/, "").toUpperCase()}
-          </span>
-        </div>
+            {displayColor.toUpperCase()}
+          </Button>
+          <input
+            ref={colorInputRef}
+            type="color"
+            value={displayColor}
+            onChange={(event) => handleColorInput(event.target.value)}
+            disabled={borderDisabled}
+            tabIndex={-1}
+            aria-hidden
+            className="pointer-events-none absolute inset-0 -z-10 size-full opacity-0"
+          />
+        </span>
       </div>
       {/* Rarely-touched controls live in a collapsed-by-default accordion so
           the common adjustments above stay compact. Built on the unstyled

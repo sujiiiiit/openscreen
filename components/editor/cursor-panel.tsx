@@ -376,7 +376,7 @@ export function CursorPanel() {
       </header>
 
       <div className="flex w-full flex-col gap-9">
-        <div className="w-full space-y-2">
+        <div className="w-full space-y-4">
           <div className="flex items-center">
             <h4 className="text-xs font-semibold transition-opacity select-none">
               Cursor style
