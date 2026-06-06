@@ -1,9 +1,20 @@
 "use client"
 
 import { HugeiconsIcon } from "@hugeicons/react"
-import { ArrowLeft01Icon, FileEmpty02Icon } from "@hugeicons/core-free-icons"
+import {
+  ArrowDown01Icon,
+  ArrowLeft01Icon,
+  FileEmpty02Icon,
+} from "@hugeicons/core-free-icons"
 import { Squircle } from "@squircle-js/react"
 
+import {
+  Accordion,
+  AccordionHeader,
+  AccordionItem,
+  AccordionPanel,
+  AccordionTrigger,
+} from "@/components/animate-ui/primitives/base/accordion"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { Slider } from "@/components/ui/slider"
 import { Tabs, TabsContent, TabsContents } from "@/components/ui/tabs"
@@ -12,6 +23,10 @@ import {
   useEditorCanvasActions,
   useEditorCanvasMedia,
 } from "@/components/editor/canvas/provider"
+import {
+  SelectionPills,
+  type SelectionPillOption,
+} from "@/components/editor/selection-pills"
 import type {
   CanvasBorderAlignment,
   CanvasVideoItem,
@@ -22,10 +37,9 @@ const RADIUS_SLIDER_MAX = 250
 const BORDER_WIDTH_MAX = 64
 const BORDER_OFFSET_RANGE = 64
 const BORDER_DEFAULT_COLOR = "#000000"
-const BORDER_ALIGNMENT_OPTIONS: Array<{
-  value: CanvasBorderAlignment
-  label: string
-}> = [
+const BORDER_ALIGNMENT_OPTIONS: Array<
+  SelectionPillOption<CanvasBorderAlignment>
+> = [
   { value: "inside", label: "Inside" },
   { value: "center", label: "Center" },
   { value: "outside", label: "Outside" },
@@ -61,6 +75,7 @@ function formatFileSize(bytes: number): string {
 
 type AdjustmentRowProps = {
   label: string
+  description: string
   value: number
   onValueChange: (value: number) => void
   onReset?: () => void
@@ -74,6 +89,7 @@ type AdjustmentRowProps = {
 
 function AdjustmentRow({
   label,
+  description,
   value,
   onValueChange,
   onReset,
@@ -87,14 +103,15 @@ function AdjustmentRow({
   const isResetDisabled = resetDisabled ?? value === min
   return (
     <div className="w-full space-y-2">
-      <h4
+      <div
         className={cn(
-          "text-xs font-semibold transition-opacity select-none",
+          "space-y-1 transition-opacity select-none",
           disabled && "opacity-50"
         )}
       >
-        {label}
-      </h4>
+        <h4 className="text-xs font-semibold">{label}</h4>
+        <p className="text-xs text-muted-foreground">{description}</p>
+      </div>
       <div className="flex w-full items-center gap-3">
         <Slider
           size="sm"
@@ -153,7 +170,7 @@ function VideoFileCard({
         type="button"
         onClick={() => onActivate(video.id)}
         title={video.fileName}
-        className="group/card relative flex w-full items-center gap-3 px-3 py-3 text-left outline-none transition-transform duration-100 active:scale-[0.97] focus-visible:ring-2 focus-visible:ring-ring/40"
+        className="group/card relative flex w-full items-center gap-3 px-3 py-3 text-left transition-transform duration-100 outline-none focus-visible:ring-2 focus-visible:ring-ring/40 active:scale-[0.97]"
       >
         {/* File body — drops to opacity 0.95 on hover/focus so the card
             visibly reacts without dimming the action affordance below. */}
@@ -162,7 +179,7 @@ function VideoFileCard({
             <HugeiconsIcon icon={FileEmpty02Icon} className="size-6" />
           </span>
           <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-            <span className="truncate text-sm font-semibold leading-tight">
+            <span className="truncate text-sm leading-tight font-semibold">
               {video.fileName}
             </span>
             <span className="text-xs text-muted-foreground">
@@ -236,11 +253,13 @@ function VideoFileGrid({
   )
 }
 
-
 function BorderControls({ video }: { video: CanvasVideoItem }) {
   const { updateVideoAppearance } = useEditorCanvasActions()
 
-  const borderWidth = Math.max(0, Math.min(BORDER_WIDTH_MAX, Math.round(video.borderWidth)))
+  const borderWidth = Math.max(
+    0,
+    Math.min(BORDER_WIDTH_MAX, Math.round(video.borderWidth))
+  )
   const borderOffset = Math.max(
     -BORDER_OFFSET_RANGE,
     Math.min(BORDER_OFFSET_RANGE, Math.round(video.borderOffset))
@@ -274,12 +293,10 @@ function BorderControls({ video }: { video: CanvasVideoItem }) {
   }
 
   return (
-    <div className="flex w-full flex-col gap-5">
-      <h4 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase select-none">
-        Border
-      </h4>
+    <div className="flex w-full flex-col gap-9">
       <AdjustmentRow
-        label="Width"
+        label="Border"
+        description="Thickness of the border around the video."
         value={borderWidth}
         onValueChange={setBorderWidth}
         onReset={() => setBorderWidth(0)}
@@ -300,7 +317,7 @@ function BorderControls({ video }: { video: CanvasVideoItem }) {
         <div className="flex items-center gap-2">
           <label
             className={cn(
-              "relative inline-flex size-6 cursor-pointer items-center justify-center overflow-hidden rounded-md border border-border ring-offset-background transition-shadow hover:ring-2 hover:ring-ring/40 focus-within:ring-2 focus-within:ring-ring/40",
+              "relative inline-flex size-6 cursor-pointer items-center justify-center overflow-hidden rounded-md border border-border ring-offset-background transition-shadow focus-within:ring-2 focus-within:ring-ring/40 hover:ring-2 hover:ring-ring/40",
               borderDisabled && "pointer-events-none opacity-50"
             )}
             style={{ backgroundColor: borderColor }}
@@ -320,58 +337,76 @@ function BorderControls({ video }: { video: CanvasVideoItem }) {
           </span>
         </div>
       </div>
-      <div className="flex w-full flex-col gap-2">
-        <h4
-          className={cn(
-            "text-xs font-semibold transition-opacity select-none",
-            borderDisabled && "opacity-50"
-          )}
-        >
-          Alignment
-        </h4>
-        <div
-          role="radiogroup"
-          aria-label="Border alignment"
-          className={cn(
-            "inline-flex w-full overflow-hidden rounded-md border border-border bg-muted/40 p-0.5",
-            borderDisabled && "pointer-events-none opacity-50"
-          )}
-        >
-          {BORDER_ALIGNMENT_OPTIONS.map((option) => {
-            const checked = video.borderAlignment === option.value
-            return (
-              <button
-                key={option.value}
-                type="button"
-                role="radio"
-                aria-checked={checked}
-                onClick={() => setBorderAlignment(option.value)}
+      {/* Rarely-touched controls live in a collapsed-by-default accordion so
+          the common adjustments above stay compact. Built on the unstyled
+          animate-ui Base accordion primitive (Motion height/opacity/mask
+          animation), styled minimally so it reads like the sibling rows. */}
+      <Accordion>
+        <AccordionItem value="advanced">
+          <AccordionHeader className="flex">
+            <AccordionTrigger className="group/advanced-trigger flex flex-1 items-center justify-between gap-2 outline-none select-none focus-visible:ring-2 focus-visible:ring-ring/40">
+              {/* Buttons only allow phrasing content — block spans, not h4/p,
+                  for the same title + helper-description stack the sibling
+                  rows use. */}
+              <span className="space-y-1 text-left">
+                <span className="block text-xs font-semibold">
+                  Advanced settings
+                </span>
+                <span className="block text-xs font-normal text-muted-foreground">
+                  Fine-tune the border offset and alignment.
+                </span>
+              </span>
+              <HugeiconsIcon
+                icon={ArrowDown01Icon}
+                strokeWidth={2}
+                className="size-4 shrink-0 text-muted-foreground transition-transform duration-300 group-aria-expanded/advanced-trigger:-rotate-180"
+              />
+            </AccordionTrigger>
+          </AccordionHeader>
+          <AccordionPanel>
+            <div className="flex flex-col gap-9 py-9">
+              <div className="flex w-full flex-col gap-6">
+                <div
+                  className={cn(
+                    "space-y-1 transition-opacity select-none",
+                    borderDisabled && "opacity-50"
+                  )}
+                >
+                  <h4 className="text-xs font-semibold">Alignment</h4>
+                  <p className="text-xs text-muted-foreground">
+                    Where the border sits relative to the video edge.
+                  </p>
+                </div>
+                <SelectionPills
+                  ariaLabel="Border alignment"
+                  disabled={borderDisabled}
+                  options={BORDER_ALIGNMENT_OPTIONS}
+                  size="md"
+                  value={video.borderAlignment}
+                  onValueChange={setBorderAlignment}
+                />
+              </div>
+              <AdjustmentRow
+                label="Offset"
+                description={
+                  borderDisabled
+                    ? "Moves the border in or out — set a width first."
+                    : "Moves the border in or out from the video edge."
+                }
+                value={borderOffset}
+                onValueChange={setBorderOffset}
+                onReset={() => setBorderOffset(0)}
+                min={-BORDER_OFFSET_RANGE}
+                max={BORDER_OFFSET_RANGE}
                 disabled={borderDisabled}
-                className={cn(
-                  "flex-1 rounded-sm px-2 py-1 text-xs font-medium transition-colors outline-none select-none focus-visible:ring-2 focus-visible:ring-ring/40",
-                  checked
-                    ? "bg-background text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                )}
-              >
-                {option.label}
-              </button>
-            )
-          })}
-        </div>
-      </div>
-      <AdjustmentRow
-        label="Offset"
-        value={borderOffset}
-        onValueChange={setBorderOffset}
-        onReset={() => setBorderOffset(0)}
-        min={-BORDER_OFFSET_RANGE}
-        max={BORDER_OFFSET_RANGE}
-        disabled={borderDisabled}
-        showValueTooltip
-        formatValue={(v) => `${Math.round(v)}px`}
-        resetDisabled={borderOffset === 0}
-      />
+                showValueTooltip
+                formatValue={(v) => `${Math.round(v)}px`}
+                resetDisabled={borderOffset === 0}
+              />
+            </div>
+          </AccordionPanel>
+        </AccordionItem>
+      </Accordion>
     </div>
   )
 }
@@ -392,7 +427,10 @@ function VideoAppearanceControls({ video }: { video: CanvasVideoItem }) {
       Math.floor(Math.min(video.width, video.height) / 2)
     )
   )
-  const radius = Math.max(0, Math.min(radiusMax, Math.round(video.cornerRadius)))
+  const radius = Math.max(
+    0,
+    Math.min(radiusMax, Math.round(video.cornerRadius))
+  )
   const smoothingPercent = Math.round(
     Math.max(0, Math.min(1, video.cornerSmoothing)) * 100
   )
@@ -411,13 +449,11 @@ function VideoAppearanceControls({ video }: { video: CanvasVideoItem }) {
   }
 
   return (
-    <div className="flex w-full flex-col gap-8">
-      <div className="flex w-full flex-col gap-5">
-        <h4 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase select-none">
-          Corners
-        </h4>
+    <div className="flex w-full flex-col gap-9">
+      <div className="flex w-full flex-col gap-9">
         <AdjustmentRow
           label="Radius"
+          description="Rounds the video's corners."
           value={radius}
           onValueChange={setRadius}
           onReset={() => setRadius(0)}
@@ -429,6 +465,7 @@ function VideoAppearanceControls({ video }: { video: CanvasVideoItem }) {
         />
         <AdjustmentRow
           label="Smoothing"
+          description="Softens the corner curve into a squircle shape."
           value={smoothingPercent}
           onValueChange={setSmoothingPercent}
           onReset={() => setSmoothingPercent(SMOOTHING_DEFAULT_PERCENT)}
@@ -498,7 +535,7 @@ export function VideoPanel() {
                     // visually replaces the "Video" title in the same slot;
                     // strip the default button height + horizontal padding so
                     // it aligns with the description underneath.
-                    className="h-auto p-0! text-sm font-semibold text-foreground px-0 py-0 -translate-x-6"
+                    className="h-auto -translate-x-5 p-0! px-0 py-0 text-sm font-semibold text-foreground"
                   >
                     <HugeiconsIcon
                       icon={ArrowLeft01Icon}

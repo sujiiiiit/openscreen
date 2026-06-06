@@ -176,7 +176,7 @@ export function BackgroundPanel() {
             <WallpaperGrid />
           </TabsContent>
 
-          <TabsContent value="color">
+          <TabsContent value="color" className="pb-6">
             <ColorGrid />
           </TabsContent>
         </TabsContents>

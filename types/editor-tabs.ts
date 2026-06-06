@@ -1,12 +1,15 @@
 import type { ReactNode } from "react"
 
-export type TabId =
-  | "background"
-  | "cursor"
-  | "zoom"
-  | "video"
-  | "subtitle"
-  | "audio"
+export const TAB_IDS = [
+  "background",
+  "cursor",
+  "zoom",
+  "video",
+  "subtitle",
+  "audio",
+] as const
+
+export type TabId = (typeof TAB_IDS)[number]
 
 export type TabItem = {
   id: TabId
