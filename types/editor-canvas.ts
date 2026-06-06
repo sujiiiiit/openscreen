@@ -159,25 +159,6 @@ export type CanvasVideoItem = {
   borderOffset: number
   /** Where the stroke sits relative to its (already offset) centerline. */
   borderAlignment: CanvasBorderAlignment
-  /**
-   * Drop-shadow color as a CSS string. Alpha is baked into the color (rgba)
-   * — there is no separate `shadowOpacity` field. The shadow pass is skipped
-   * entirely when the parsed alpha is 0 or when every spatial field
-   * (`blur`, `offsetX`, `offsetY`, `spread`) is 0.
-   */
-  shadowColor: string
-  /** Gaussian blur radius in artboard px. `0` is a sharp cast (no falloff). */
-  shadowBlur: number
-  /** Horizontal shadow displacement in artboard px. Signed; positive = right. */
-  shadowOffsetX: number
-  /** Vertical shadow displacement in artboard px. Signed; positive = down. */
-  shadowOffsetY: number
-  /**
-   * Silhouette spread in artboard px (Figma "spread"). Positive grows the
-   * shadow caster outward before blur; negative shrinks it. The corner
-   * radius shifts by the same delta so the shadow stays squircle-aligned.
-   */
-  shadowSpread: number
 }
 
 export type CanvasVideoAppearancePatch = Partial<
@@ -189,11 +170,6 @@ export type CanvasVideoAppearancePatch = Partial<
     | "borderColor"
     | "borderOffset"
     | "borderAlignment"
-    | "shadowColor"
-    | "shadowBlur"
-    | "shadowOffsetX"
-    | "shadowOffsetY"
-    | "shadowSpread"
   >
 >
 

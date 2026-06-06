@@ -35,6 +35,7 @@ const PADDING_MAX = 500
 
 type AdjustmentRowProps = {
   label: string
+  description: string
   value: number
   onValueChange: (value: number) => void
   onReset: () => void
@@ -47,6 +48,7 @@ type AdjustmentRowProps = {
 
 function AdjustmentRow({
   label,
+  description,
   value,
   onValueChange,
   onReset,
@@ -58,14 +60,15 @@ function AdjustmentRow({
 }: AdjustmentRowProps) {
   return (
     <div className="w-full space-y-2">
-      <h4
+      <div
         className={cn(
-          "text-xs font-semibold transition-opacity select-none",
+          "space-y-1 transition-opacity select-none",
           disabled && "opacity-50"
         )}
       >
-        {label}
-      </h4>
+        <h4 className="text-xs font-semibold">{label}</h4>
+        <p className="text-xs text-muted-foreground">{description}</p>
+      </div>
       <div className="flex w-full items-center gap-3">
         <Slider
           size="sm"
@@ -144,7 +147,7 @@ export function BackgroundPanel() {
   }
 
   return (
-    <section className="flex w-full flex-col gap-4 pb-6">
+    <section className="flex w-full flex-col gap-6 pb-6">
       <header className="space-y-2">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold select-none">Background</h3>
@@ -178,9 +181,14 @@ export function BackgroundPanel() {
           </TabsContent>
         </TabsContents>
       </Tabs>
-      <div className="flex flex-col gap-5">
+      <div className="flex flex-col gap-9">
         <AdjustmentRow
           label="Padding"
+          description={
+            hasScreenVideo
+              ? "Space around the recording, revealing the background."
+              : "Space around the recording — needs a screen recording."
+          }
           value={paddingStrength}
           onValueChange={applyPadding}
           onReset={() => applyPadding(PADDING_DEFAULT)}
@@ -192,6 +200,11 @@ export function BackgroundPanel() {
         />
         <AdjustmentRow
           label="Background blur"
+          description={
+            isWallpaperActive
+              ? "Blurs the wallpaper behind the recording."
+              : "Blurs the wallpaper — pick a wallpaper first."
+          }
           value={blurStrength}
           onValueChange={applyBlur}
           onReset={() => applyBlur(BACKGROUND_BLUR_DEFAULT)}
@@ -203,6 +216,7 @@ export function BackgroundPanel() {
         />
         <AdjustmentRow
           label="Grain"
+          description="Subtle film-noise texture over the background."
           value={grainStrength}
           onValueChange={applyGrain}
           onReset={() => applyGrain(GRAIN_DEFAULT)}

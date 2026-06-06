@@ -456,7 +456,6 @@ const STAGE_PHRASES: Record<ExportStage, readonly string[]> = {
     "Encoding frames",
     "Composing",
     "Painting frames",
-    "Wiring shadows",
     "Buffering encoder",
     "Tuning bitrate",
     "Squeezing bytes",

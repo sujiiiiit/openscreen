@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useRef } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { Application } from "pixi.js"
 
 import { getPreviewFillTransform } from "@/lib/editor-canvas"
@@ -38,6 +38,37 @@ function getIsDark() {
   )
 }
 
+const RESUME_WARMUP_FRAMES = 6
+
+type WebGpuDeviceLossInfo = {
+  reason?: string
+  message?: string
+}
+
+type MaybeWebGpuRenderer = {
+  gpu?: {
+    device?: {
+      lost?: Promise<WebGpuDeviceLossInfo>
+    }
+  }
+}
+
+function getWebGpuDeviceLostPromise(
+  app: Application
+): Promise<WebGpuDeviceLossInfo> | null {
+  return (
+    (app.renderer as unknown as MaybeWebGpuRenderer).gpu?.device?.lost ?? null
+  )
+}
+
+function destroyPixiApplication(app: Application | null) {
+  if (!app) return
+  app.destroy(
+    { removeView: true, releaseGlobalResources: true },
+    { children: true }
+  )
+}
+
 /**
  * The PixiJS canvas host. Owns the `Application` lifecycle and bridges the
  * imperative scene/controllers to openscreen's `EditorCanvasProvider`:
@@ -53,6 +84,7 @@ function getIsDark() {
 export function PixiCanvas() {
   const hostRef = useRef<HTMLDivElement>(null)
   const backdropRef = useRef<HTMLDivElement>(null)
+  const [canvasEpoch, setCanvasEpoch] = useState(0)
 
   const { artboard } = useEditorCanvasArtboard()
   const { viewTransform, viewportSize, isPreviewMode } = useEditorCanvasView()
@@ -238,7 +270,7 @@ export function PixiCanvas() {
     registerTimelineVideoFps,
   ])
 
-  // ── PixiJS lifecycle (mount once) ──────────────────────────────────────────
+  // ── PixiJS lifecycle ──────────────────────────────────────────────────────
   useEffect(() => {
     const host = hostRef.current
     if (!host) return
@@ -285,8 +317,40 @@ export function PixiCanvas() {
     let themeObserver: MutationObserver | null = null
     let resizeObserver: ResizeObserver | null = null
     let resizeRafId: number | null = null
+    let resumeWarmupRafId: number | null = null
+    let resumeWarmupFrames = 0
+    let rendererCanvas: HTMLCanvasElement | null = null
+    let handleWebGlContextLost: ((event: Event) => void) | null = null
+    let handleWebGlContextRestored: (() => void) | null = null
     let rendererResolution = getRendererResolution()
     let scheduleResize: (() => void) | null = null
+
+    const cancelResumeWarmup = () => {
+      if (resumeWarmupRafId !== null) {
+        cancelAnimationFrame(resumeWarmupRafId)
+        resumeWarmupRafId = null
+      }
+      resumeWarmupFrames = 0
+    }
+
+    const runResumeWarmup = () => {
+      resumeWarmupRafId = null
+      if (disposed) return
+      sceneRef.current?.renderNow()
+      resumeWarmupFrames -= 1
+      if (resumeWarmupFrames > 0) {
+        resumeWarmupRafId = requestAnimationFrame(runResumeWarmup)
+      }
+    }
+
+    const scheduleResumeWarmup = () => {
+      if (disposed || document.visibilityState === "hidden") return
+      sceneRef.current?.renderNow()
+      resumeWarmupFrames = RESUME_WARMUP_FRAMES
+      if (resumeWarmupRafId === null) {
+        resumeWarmupRafId = requestAnimationFrame(runResumeWarmup)
+      }
+    }
 
     const init = async () => {
       const initialSize = measure()
@@ -321,7 +385,7 @@ export function PixiCanvas() {
 
       // The effect cleanup may have run while init() awaited.
       if (disposed) {
-        app.destroy({ removeView: true }, { children: true })
+        destroyPixiApplication(app)
         return
       }
 
@@ -331,6 +395,41 @@ export function PixiCanvas() {
       viewportSizeRef.current = size
 
       host.appendChild(app.canvas)
+
+      rendererCanvas = app.canvas
+      handleWebGlContextLost = (event: Event) => {
+        event.preventDefault()
+        console.warn("[PixiCanvas] WebGL context lost; waiting for restore")
+      }
+      handleWebGlContextRestored = () => {
+        console.warn("[PixiCanvas] WebGL context restored; repainting scene")
+        scheduleResumeWarmup()
+      }
+      rendererCanvas.addEventListener(
+        "webglcontextlost",
+        handleWebGlContextLost
+      )
+      rendererCanvas.addEventListener(
+        "webglcontextrestored",
+        handleWebGlContextRestored
+      )
+
+      const deviceLostPromise = getWebGpuDeviceLostPromise(app)
+      if (deviceLostPromise) {
+        void deviceLostPromise.then((info) => {
+          if (disposed || info.reason === "destroyed") return
+          console.warn("[PixiCanvas] WebGPU device lost; remounting renderer", {
+            reason: info.reason,
+            message: info.message,
+          })
+          setCanvasEpoch((epoch) => epoch + 1)
+        })
+      }
+
+      document.addEventListener("visibilitychange", scheduleResumeWarmup)
+      document.addEventListener("resume", scheduleResumeWarmup)
+      window.addEventListener("focus", scheduleResumeWarmup)
+      window.addEventListener("pageshow", scheduleResumeWarmup)
 
       const scene = new CanvasScene(
         app,
@@ -459,12 +558,29 @@ export function PixiCanvas() {
       resizeObserver?.disconnect()
       if (scheduleResize) window.removeEventListener("resize", scheduleResize)
       if (resizeRafId !== null) cancelAnimationFrame(resizeRafId)
+      cancelResumeWarmup()
+      if (rendererCanvas && handleWebGlContextLost) {
+        rendererCanvas.removeEventListener(
+          "webglcontextlost",
+          handleWebGlContextLost
+        )
+      }
+      if (rendererCanvas && handleWebGlContextRestored) {
+        rendererCanvas.removeEventListener(
+          "webglcontextrestored",
+          handleWebGlContextRestored
+        )
+      }
+      document.removeEventListener("visibilitychange", scheduleResumeWarmup)
+      document.removeEventListener("resume", scheduleResumeWarmup)
+      window.removeEventListener("focus", scheduleResumeWarmup)
+      window.removeEventListener("pageshow", scheduleResumeWarmup)
       controllerRef.current?.detach()
       selectionControllerRef.current?.detach()
       cursorControllerRef.current?.destroy()
       videoControllerRef.current?.destroy()
       sceneRef.current?.destroy()
-      appRef.current?.destroy({ removeView: true }, { children: true })
+      destroyPixiApplication(appRef.current)
       appRef.current = null
       sceneRef.current = null
       controllerRef.current = null
@@ -472,9 +588,10 @@ export function PixiCanvas() {
       selectionControllerRef.current = null
       cursorControllerRef.current = null
     }
-    // Mount once. Live values are read through refs above.
+    // Live values are read through refs above; `canvasEpoch` only bumps after
+    // a real GPU-device loss so the Pixi Application can be recreated cleanly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [canvasEpoch])
 
   // ── React state → scene/controller ─────────────────────────────────────────
   useEffect(() => {

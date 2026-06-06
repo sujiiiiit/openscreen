@@ -463,11 +463,6 @@ function createVideoAppearanceDefaults(
   | "borderColor"
   | "borderOffset"
   | "borderAlignment"
-  | "shadowColor"
-  | "shadowBlur"
-  | "shadowOffsetX"
-  | "shadowOffsetY"
-  | "shadowSpread"
 > {
   const borderDefaults: Pick<
     CanvasVideoItem,
@@ -479,24 +474,6 @@ function createVideoAppearanceDefaults(
     borderAlignment: "inside",
   }
 
-  // Shadow is rgba so the user can tune alpha alongside the color picker.
-  // All spatial fields start at 0 so the shadow pass short-circuits until
-  // the user moves a slider — no visible shadow on creation.
-  const shadowDefaults: Pick<
-    CanvasVideoItem,
-    | "shadowColor"
-    | "shadowBlur"
-    | "shadowOffsetX"
-    | "shadowOffsetY"
-    | "shadowSpread"
-  > = {
-    shadowColor: "rgba(0, 0, 0, 0.25)",
-    shadowBlur: 0,
-    shadowOffsetX: 0,
-    shadowOffsetY: 0,
-    shadowSpread: 0,
-  }
-
   if (role === "camera") {
     const radius = Math.max(
       0,
@@ -506,7 +483,6 @@ function createVideoAppearanceDefaults(
       cornerRadius: radius,
       cornerSmoothing: 1,
       ...borderDefaults,
-      ...shadowDefaults,
     }
   }
 
@@ -514,7 +490,6 @@ function createVideoAppearanceDefaults(
     cornerRadius: 0,
     cornerSmoothing: 0.6,
     ...borderDefaults,
-    ...shadowDefaults,
   }
 }
 
@@ -2080,10 +2055,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     syncTimelineMediaPlayback,
   ])
 
-  // If the page is hidden or fullscreen preview loses focus, pause through the
-  // same committed-time path as the Pause button. This prevents rAF throttling
-  // or browser media suspension from leaving the cursor clock ahead of/behind
-  // the actual video frame when the app becomes visible again.
+  // If the page is hidden or the editor window loses focus, pause through the
+  // same committed-time path as the Pause button. Space switches and occlusion
+  // can throttle the renderer before `document.hidden` changes, so blur is the
+  // broader safety net. This prevents rAF throttling or browser media
+  // suspension from leaving the cursor clock ahead of/behind the actual video
+  // frame when the app becomes visible again.
   useEffect(() => {
     if (typeof document === "undefined" || typeof window === "undefined") {
       return
@@ -2108,16 +2085,16 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    const pauseBlurredPreview = () => {
-      if (!isPreviewModeRef.current || !isTimelinePlayingRef.current) return
+    const pauseBlurredPlayback = () => {
+      if (!isTimelinePlayingRef.current) return
       pauseTimeline()
     }
 
     document.addEventListener("visibilitychange", pauseHiddenPlayback)
-    window.addEventListener("blur", pauseBlurredPreview)
+    window.addEventListener("blur", pauseBlurredPlayback)
     return () => {
       document.removeEventListener("visibilitychange", pauseHiddenPlayback)
-      window.removeEventListener("blur", pauseBlurredPreview)
+      window.removeEventListener("blur", pauseBlurredPlayback)
     }
   }, [
     cancelInFlightHoverSeeks,
@@ -3173,7 +3150,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     []
   )
 
-  // Appearance updates (radius, smoothing, border, shadow). Bail out early
+  // Appearance updates (radius, smoothing, border). Bail out early
   // when every patched field already matches so the same slider value dragged
   // at its current position never triggers a downstream redraw.
   const updateVideoAppearance = useCallback(
@@ -3191,12 +3168,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
             nextVideo.borderWidth === video.borderWidth &&
             nextVideo.borderColor === video.borderColor &&
             nextVideo.borderOffset === video.borderOffset &&
-            nextVideo.borderAlignment === video.borderAlignment &&
-            nextVideo.shadowColor === video.shadowColor &&
-            nextVideo.shadowBlur === video.shadowBlur &&
-            nextVideo.shadowOffsetX === video.shadowOffsetX &&
-            nextVideo.shadowOffsetY === video.shadowOffsetY &&
-            nextVideo.shadowSpread === video.shadowSpread
+            nextVideo.borderAlignment === video.borderAlignment
           ) {
             return video
           }

@@ -27,11 +27,6 @@ function video(partial: Partial<CanvasVideoItem> & { id: string }) {
     borderColor: "#000000",
     borderOffset: 0,
     borderAlignment: "inside",
-    shadowColor: "rgba(0, 0, 0, 0.25)",
-    shadowBlur: 0,
-    shadowOffsetX: 0,
-    shadowOffsetY: 0,
-    shadowSpread: 0,
     ...rest,
   } satisfies CanvasVideoItem
 }

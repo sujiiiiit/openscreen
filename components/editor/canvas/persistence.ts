@@ -118,11 +118,6 @@ export function serializeVideo(
     borderColor: video.borderColor,
     borderOffset: video.borderOffset,
     borderAlignment: video.borderAlignment,
-    shadowColor: video.shadowColor,
-    shadowBlur: video.shadowBlur,
-    shadowOffsetX: video.shadowOffsetX,
-    shadowOffsetY: video.shadowOffsetY,
-    shadowSpread: video.shadowSpread,
   }
 }
 
@@ -247,11 +242,6 @@ export function projectVideoToCanvasVideo(
     borderColor: video.borderColor,
     borderOffset: video.borderOffset,
     borderAlignment: video.borderAlignment,
-    shadowColor: video.shadowColor,
-    shadowBlur: video.shadowBlur,
-    shadowOffsetX: video.shadowOffsetX,
-    shadowOffsetY: video.shadowOffsetY,
-    shadowSpread: video.shadowSpread,
   }
 }
 

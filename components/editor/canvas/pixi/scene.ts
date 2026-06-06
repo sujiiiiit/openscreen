@@ -1,7 +1,6 @@
 import "pixi.js/advanced-blend-modes"
 import {
   type Application,
-  BlurFilter,
   Container,
   Graphics,
   Rectangle,
@@ -46,7 +45,7 @@ import { applyZoomBlur, createZoomBlurFilter } from "./zoom-blur"
 
 /**
  * A mounted video node. Sub-tree (bottom → top):
- *   wrapper → [ shadowGfx, content(→sprite, masked by squircleMask), squircleMask, borderGfx ]
+ *   wrapper → [ content(→sprite, masked by squircleMask), squircleMask, borderGfx ]
  */
 type VideoNodeView = {
   wrapper: Container
@@ -54,8 +53,6 @@ type VideoNodeView = {
   sprite: Sprite
   squircleMask: Graphics
   borderGfx: Graphics
-  shadowGfx: Graphics
-  blurFilter: BlurFilter
   source: VideoSource
   texture: Texture
   videoEl: HTMLVideoElement
@@ -476,13 +473,10 @@ export class CanvasScene {
     content.mask = squircleMask
     const borderGfx = new Graphics()
     borderGfx.eventMode = "none"
-    const shadowGfx = new Graphics()
-    shadowGfx.eventMode = "none"
-    const blurFilter = new BlurFilter({ strength: 0 })
 
     const wrapper = new Container({ label: `node:${id}` })
-    // shadow (below) → masked content → mask (in display list, not drawn) → border.
-    wrapper.addChild(shadowGfx, content, squircleMask, borderGfx)
+    // masked content → mask (in display list, not drawn) → border.
+    wrapper.addChild(content, squircleMask, borderGfx)
     this.nodesLayer.addChild(wrapper)
 
     const view: VideoNodeView = {
@@ -491,8 +485,6 @@ export class CanvasScene {
       sprite,
       squircleMask,
       borderGfx,
-      shadowGfx,
-      blurFilter,
       source,
       texture,
       videoEl,
@@ -587,7 +579,7 @@ export class CanvasScene {
     texture.update()
   }
 
-  /** Update a node's size-independent appearance (corner/border/shadow) + redraw. */
+  /** Update a node's size-independent appearance (corner/border) + redraw. */
   setNodeAppearance(id: string, appearance: NodeAppearance) {
     const view = this.nodeViews.get(id)
     if (!view) return
@@ -600,8 +592,6 @@ export class CanvasScene {
     applyVideoAppearance({
       squircleMask: view.squircleMask,
       borderGfx: view.borderGfx,
-      shadowGfx: view.shadowGfx,
-      shadowBlur: view.blurFilter,
       width: view.width,
       height: view.height,
       appearance: view.appearance,

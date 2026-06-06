@@ -128,11 +128,6 @@ export interface ProjectVideo {
   borderColor: string
   borderOffset: number
   borderAlignment: ProjectBorderAlignment
-  shadowColor: string
-  shadowBlur: number
-  shadowOffsetX: number
-  shadowOffsetY: number
-  shadowSpread: number
 }
 
 export interface ProjectTimelineClip {
@@ -408,7 +403,6 @@ function parseVideo(value: unknown): ProjectVideo | null {
   const fileName = value["fileName"]
   const role = value["role"]
   const borderColor = value["borderColor"]
-  const shadowColor = value["shadowColor"]
   const borderAlignment = value["borderAlignment"]
 
   if (typeof id !== "string" || !id) return null
@@ -420,7 +414,6 @@ function parseVideo(value: unknown): ProjectVideo | null {
     return null
   }
   if (typeof borderColor !== "string") return null
-  if (typeof shadowColor !== "string") return null
   if (
     typeof borderAlignment !== "string" ||
     !BORDER_ALIGNMENTS.includes(borderAlignment as ProjectBorderAlignment)
@@ -440,10 +433,6 @@ function parseVideo(value: unknown): ProjectVideo | null {
     "cornerSmoothing",
     "borderWidth",
     "borderOffset",
-    "shadowBlur",
-    "shadowOffsetX",
-    "shadowOffsetY",
-    "shadowSpread",
   ] as const
   for (const field of numericFields) {
     if (!isFiniteNumber(value[field])) return null
@@ -480,11 +469,6 @@ function parseVideo(value: unknown): ProjectVideo | null {
     borderColor,
     borderOffset: value["borderOffset"] as number,
     borderAlignment: borderAlignment as ProjectBorderAlignment,
-    shadowColor,
-    shadowBlur: value["shadowBlur"] as number,
-    shadowOffsetX: value["shadowOffsetX"] as number,
-    shadowOffsetY: value["shadowOffsetY"] as number,
-    shadowSpread: value["shadowSpread"] as number,
   }
 }
 

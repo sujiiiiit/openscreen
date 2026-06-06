@@ -1,7 +1,6 @@
 import "pixi.js/advanced-blend-modes"
 import {
   Application,
-  BlurFilter,
   Container,
   Graphics,
   Rectangle,
@@ -286,11 +285,6 @@ function appearanceOf(video: ProjectVideo): NodeAppearance {
     borderColor: video.borderColor,
     borderOffset: video.borderOffset,
     borderAlignment: video.borderAlignment,
-    shadowColor: video.shadowColor,
-    shadowBlur: video.shadowBlur,
-    shadowOffsetX: video.shadowOffsetX,
-    shadowOffsetY: video.shadowOffsetY,
-    shadowSpread: video.shadowSpread,
   }
 }
 
@@ -332,11 +326,9 @@ function buildExportVideoNode(
   const squircleMask = new Graphics()
   content.mask = squircleMask
   const borderGfx = new Graphics()
-  const shadowGfx = new Graphics()
-  const blurFilter = new BlurFilter({ strength: 0 })
 
   const wrapper = new Container()
-  wrapper.addChild(shadowGfx, content, squircleMask, borderGfx)
+  wrapper.addChild(content, squircleMask, borderGfx)
   wrapper.pivot.set(video.width / 2, video.height / 2)
   wrapper.rotation = video.rotation
   wrapper.position.set(video.x + video.width / 2, video.y + video.height / 2)
@@ -346,8 +338,6 @@ function buildExportVideoNode(
   applyVideoAppearance({
     squircleMask,
     borderGfx,
-    shadowGfx,
-    shadowBlur: blurFilter,
     width: video.width,
     height: video.height,
     appearance: appearanceOf(video),

@@ -16,7 +16,14 @@ const ZOOM_BLUR_STRENGTH_CAP = 0.1
 const ZOOM_BLUR_INNER_RADIUS_FRACTION = 0.02
 
 export function createZoomBlurFilter(): ZoomBlurFilter {
-  return new ZoomBlurFilter()
+  const filter = new ZoomBlurFilter()
+  // Pixi filters default to `antialias: "off"`, which renders the filter input
+  // into a non-multisampled texture. The zoom blur wraps the whole artboard
+  // composite — including the squircle-masked videos — so without this the
+  // rounded corners turn jagged the moment a zoom clip ramps. "inherit" keeps
+  // the MSAA of the render target (the renderer inits with `antialias: true`).
+  filter.antialias = "inherit"
+  return filter
 }
 
 /**

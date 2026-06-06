@@ -272,11 +272,6 @@ export interface ProjectVideo {
   borderColor: string
   borderOffset: number
   borderAlignment: ProjectBorderAlignment
-  shadowColor: string
-  shadowBlur: number
-  shadowOffsetX: number
-  shadowOffsetY: number
-  shadowSpread: number
 }
 
 export interface ProjectTimelineClip {
