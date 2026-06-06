@@ -1,9 +1,5 @@
 import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
-import type {
-  CursorMotionRotationMode,
-  CursorSetId,
-  CursorSmoothingMode,
-} from "@/types/editor-canvas"
+import type { CursorSetId, CursorSmoothingMode } from "@/types/editor-canvas"
 
 import { CursorSprite } from "./cursor-sprite"
 import type { CanvasScene } from "./scene"
@@ -36,7 +32,6 @@ export type CursorState = {
   clickPressScale: number
   alwaysUsePointer: boolean
   motionRotation: number
-  motionRotationMode: CursorMotionRotationMode
   motionBlur: number
 }
 
@@ -100,7 +95,6 @@ export class CursorController {
         cursorSet: state.cursorSetId,
         alwaysUsePointer: state.alwaysUsePointer,
         motionRotation: state.motionRotation,
-        motionRotationMode: state.motionRotationMode,
         smoothingMode: state.smoothingMode,
         referenceSize: state.referenceSize,
       },

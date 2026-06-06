@@ -10,17 +10,16 @@ import { useSidebarTabsContext } from "@/components/editor/sidebar/tabs-provider
 import { ARTBOARD_SELECTION_ID } from "@/types/editor-canvas"
 
 /**
- * Routes every canvas/timeline selection of a video to the sidebar's "Video"
- * tab and opens the sidebar if it's collapsed. Mounted as a sibling effect —
- * no DOM output — so it does not couple the sidebar UI to the canvas state.
- *
- * Artboard selections are skipped on purpose: the workspace click handler
- * already routes those to the Background tab, and the bridge would otherwise
- * race and override it back to Video.
+ * Routes every canvas/timeline selection to its sidebar tab and opens the
+ * sidebar if it's collapsed: a video selection → "Video", the artboard
+ * selection (`ARTBOARD_SELECTION_ID`, set by clicking the empty artboard /
+ * padding margin on the canvas) → "Background", a zoom-clip selection →
+ * "Zoom". Mounted as a sibling effect — no DOM output — so it does not couple
+ * the sidebar UI to the canvas state.
  *
  * Deselection (selectedItemId → null) intentionally does NOT change the tab
  * back; the user keeps the panel they were last working in. This matches the
- * agreed UX: "selection on canvas triggers Video tab; deselect leaves tab as-is".
+ * agreed UX: "selection on canvas triggers its tab; deselect leaves tab as-is".
  */
 export function SidebarSelectionBridge() {
   const { selectedItemId } = useEditorCanvasMedia()
@@ -49,16 +48,17 @@ export function SidebarSelectionBridge() {
     lastSelectedRef.current = selectedItemId
 
     if (selectedItemId === null) return
-    if (selectedItemId === ARTBOARD_SELECTION_ID) return
     if (selectedItemId === previous) return
 
-    if (activeTabRef.current === "video") {
-      // Same tab — `selectTab("video")` would close the sidebar; call `open()`
-      // instead to ensure the panel is visible without toggling state.
+    const targetTab =
+      selectedItemId === ARTBOARD_SELECTION_ID ? "background" : "video"
+    if (activeTabRef.current === targetTab) {
+      // Same tab — `selectTab(targetTab)` would close the sidebar; call
+      // `open()` instead to ensure the panel is visible without toggling state.
       openRef.current()
       return
     }
-    selectTabRef.current("video")
+    selectTabRef.current(targetTab)
   }, [selectedItemId])
 
   useEffect(() => {

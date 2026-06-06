@@ -17,7 +17,6 @@ import {
   CURSOR_CLICK_PRESS_SCALE_MIN,
   CURSOR_MOTION_BLUR_DEFAULT,
   CURSOR_MOTION_ROTATION_DEFAULT,
-  CURSOR_MOTION_ROTATION_MODE_DEFAULT,
   CURSOR_POINTER_CURSOR_ID,
   CURSOR_SET_DEFAULT,
   CURSOR_SMOOTHING_MODE_DEFAULT,
@@ -37,7 +36,6 @@ import {
   useEditorCanvasMedia,
 } from "@/components/editor/canvas/provider"
 import type {
-  CursorMotionRotationMode,
   CursorSmoothingMode,
 } from "@/types/editor-canvas"
 
@@ -61,42 +59,9 @@ const CLICK_DOWNSCALE_DEFAULT_PCT = Math.round(
 // Motion blur is a single 0–100% intensity; the blur velocity is derived from
 // cursor speed (see cursor-scene.ts `computeCursorBlur`).
 const BLUR_DEFAULT_PCT = Math.round(CURSOR_MOTION_BLUR_DEFAULT * 100)
-// Motion rotation is exposed as one checkpoint slider:
-// 0 = none, 100 = full side lean, 200 = full direction rotation. The persisted
-// state stays split into mode + amount so old projects keep round-tripping.
-const MOTION_ROTATION_DEFAULT_PCT = Math.round(
-  CURSOR_MOTION_ROTATION_DEFAULT * 100
-)
-const MOTION_SLIDER_NONE_VALUE = 0
-const MOTION_SLIDER_SIDE_LEAN_VALUE = 100
-const MOTION_SLIDER_ROTATION_VALUE = 200
-const MOTION_SLIDER_SNAP_RADIUS = 5
-const MOTION_SLIDER_THUMB_WIDTH_PX = 16
-const MOTION_SLIDER_LABELS: Record<
-  "none" | CursorMotionRotationMode,
-  string
-> = {
-  none: "None",
-  "side-lean": "Side lean",
-  rotation: "Rotation",
-}
-const MOTION_SLIDER_CHECKPOINTS: Array<{
-  key: "none" | CursorMotionRotationMode
-  value: number
-}> = [
-  { key: "none", value: MOTION_SLIDER_NONE_VALUE },
-  { key: "side-lean", value: MOTION_SLIDER_SIDE_LEAN_VALUE },
-  { key: "rotation", value: MOTION_SLIDER_ROTATION_VALUE },
-]
-const motionSliderCheckpointPosition = (value: number) => {
-  const pct = (value / MOTION_SLIDER_ROTATION_VALUE) * 100
-  const offset =
-    MOTION_SLIDER_THUMB_WIDTH_PX / 2 -
-    (value / MOTION_SLIDER_ROTATION_VALUE) * MOTION_SLIDER_THUMB_WIDTH_PX
-  return offset < 0
-    ? `calc(${pct}% - ${Math.abs(offset)}px)`
-    : `calc(${pct}% + ${offset}px)`
-}
+// Side lean is one plain 0–100% intensity slider (the direction-follow
+// "rotation" mode was removed — side lean is the only cursor motion behavior).
+const SIDE_LEAN_DEFAULT_PCT = Math.round(CURSOR_MOTION_ROTATION_DEFAULT * 100)
 const SMOOTHING_LABELS: Record<CursorSmoothingMode, string> = {
   rapid: "Rapid",
   quick: "Quick",
@@ -161,63 +126,6 @@ const CURSOR_STYLE_OPTIONS = [...cursorSetIds]
 function clampUnit(value: number): number {
   if (!Number.isFinite(value)) return 0
   return Math.min(1, Math.max(0, value))
-}
-
-function motionSliderValueFromSettings(
-  amount: number,
-  mode: CursorMotionRotationMode
-): number {
-  const clampedAmount = clampUnit(amount)
-  if (clampedAmount <= 0) return MOTION_SLIDER_NONE_VALUE
-  const amountPct = clampedAmount * 100
-  return mode === "rotation"
-    ? MOTION_SLIDER_SIDE_LEAN_VALUE + amountPct
-    : amountPct
-}
-
-function motionSettingsFromSliderValue(value: number): {
-  amount: number
-  mode: CursorMotionRotationMode
-} {
-  const clamped = Math.min(
-    MOTION_SLIDER_ROTATION_VALUE,
-    Math.max(MOTION_SLIDER_NONE_VALUE, Number.isFinite(value) ? value : 0)
-  )
-  if (clamped <= MOTION_SLIDER_SIDE_LEAN_VALUE) {
-    return { amount: clamped / 100, mode: "side-lean" }
-  }
-  return {
-    amount: (clamped - MOTION_SLIDER_SIDE_LEAN_VALUE) / 100,
-    mode: "rotation",
-  }
-}
-
-function snapMotionSliderValue(value: number): number {
-  const clamped = Math.min(
-    MOTION_SLIDER_ROTATION_VALUE,
-    Math.max(MOTION_SLIDER_NONE_VALUE, Number.isFinite(value) ? value : 0)
-  )
-  const nearest = MOTION_SLIDER_CHECKPOINTS.reduce(
-    (closest, checkpoint) =>
-      Math.abs(checkpoint.value - clamped) < Math.abs(closest - clamped)
-        ? checkpoint.value
-        : closest,
-    MOTION_SLIDER_NONE_VALUE
-  )
-  return Math.abs(nearest - clamped) <= MOTION_SLIDER_SNAP_RADIUS
-    ? nearest
-    : clamped
-}
-
-function motionSliderLabelForValue(value: number): string {
-  const { amount, mode } = motionSettingsFromSliderValue(value)
-  if (amount <= 0) return MOTION_SLIDER_LABELS.none
-  return `${MOTION_SLIDER_LABELS[mode]} ${Math.round(amount * 100)}%`
-}
-
-function activeMotionCheckpoint(value: number): "none" | CursorMotionRotationMode {
-  const { amount, mode } = motionSettingsFromSliderValue(value)
-  return amount <= 0 ? "none" : mode
 }
 
 const SELECTION_PILL_BUTTON_CLASS =
@@ -466,7 +374,6 @@ export function CursorPanel() {
     setCursorClickPressScale,
     setCursorAlwaysUsePointer,
     setCursorMotionRotation,
-    setCursorMotionRotationMode,
     setCursorMotionBlur,
   } = useEditorCanvasActions()
   const customRenderingSwitchId = useId()
@@ -495,30 +402,10 @@ export function CursorPanel() {
   const applyBlurPct = (pct: number) => {
     setCursorMotionBlur(pct / 100)
   }
-  const motionRotationAmount = clampUnit(artboard.cursorMotionRotation)
-  const motionRotationMode = artboard.cursorMotionRotationMode
-  const motionSliderValue = motionSliderValueFromSettings(
-    motionRotationAmount,
-    motionRotationMode
-  )
-  const isMotionRotationDefault =
-    Math.round(motionSliderValue) === MOTION_ROTATION_DEFAULT_PCT &&
-    motionRotationMode === CURSOR_MOTION_ROTATION_MODE_DEFAULT
-  const applyMotionSliderValue = (value: number, snap = false) => {
-    const settings = motionSettingsFromSliderValue(
-      snap ? snapMotionSliderValue(value) : value
-    )
-    if (settings.mode !== motionRotationMode) {
-      setCursorMotionRotationMode(settings.mode)
-    }
-    if (Math.abs(settings.amount - motionRotationAmount) > 0.0001) {
-      setCursorMotionRotation(settings.amount)
-    }
-  }
-  const motionCheckpoint = activeMotionCheckpoint(motionSliderValue)
-  const resetMotionRotation = () => {
-    setCursorMotionRotation(CURSOR_MOTION_ROTATION_DEFAULT)
-    setCursorMotionRotationMode(CURSOR_MOTION_ROTATION_MODE_DEFAULT)
+  const sideLeanPct = Math.round(clampUnit(artboard.cursorMotionRotation) * 100)
+  const isSideLeanDefault = sideLeanPct === SIDE_LEAN_DEFAULT_PCT
+  const applySideLeanPct = (pct: number) => {
+    setCursorMotionRotation(Math.min(100, Math.max(0, pct)) / 100)
   }
   const smoothingMode = artboard.cursorSmoothingMode
   const isSmoothingDefault = smoothingMode === CURSOR_SMOOTHING_MODE_DEFAULT
@@ -707,89 +594,30 @@ export function CursorPanel() {
               cursorControlsDisabled && "opacity-50"
             )}
           >
-            Motion
+            Side lean
           </h4>
         </div>
-        <div className="flex w-full items-start gap-3">
-          <div className="min-w-0 flex-1 space-y-1.5">
-            <div className="relative pt-6 pb-1.5">
-              <div
-                className="pointer-events-none absolute inset-x-0 top-[1.5625rem] z-0 h-0"
-                aria-hidden="true"
-              >
-                {MOTION_SLIDER_CHECKPOINTS.map((checkpoint) => (
-                  <span
-                    key={checkpoint.key}
-                    className={cn(
-                      "absolute top-0 size-2 -translate-x-1/2 -translate-y-1/2 rounded-full ring-2 ring-background transition-colors",
-                      motionCheckpoint === checkpoint.key
-                        ? "bg-primary-active"
-                        : "bg-muted-foreground"
-                    )}
-                    style={{
-                      left: motionSliderCheckpointPosition(checkpoint.value),
-                    }}
-                  />
-                ))}
-              </div>
-              <Slider
-                size="sm"
-                value={[motionSliderValue]}
-                onValueChange={(values) =>
-                  applyMotionSliderValue(
-                    Array.isArray(values) ? values[0] : values
-                  )
-                }
-                onValueCommitted={(values) =>
-                  applyMotionSliderValue(
-                    Array.isArray(values) ? values[0] : values,
-                    true
-                  )
-                }
-                min={MOTION_SLIDER_NONE_VALUE}
-                max={MOTION_SLIDER_ROTATION_VALUE}
-                step={1}
-                disabled={cursorControlsDisabled}
-                showValueTooltip
-                formatValue={motionSliderLabelForValue}
-                aria-label="Cursor motion"
-                className="relative z-10 flex-1"
-              />
-            </div>
-            <div
-              className={cn(
-                "relative h-3 text-[10px] leading-none font-medium select-none",
-                cursorControlsDisabled && "opacity-50"
-              )}
-            >
-              {MOTION_SLIDER_CHECKPOINTS.map((checkpoint, index) => (
-                <span
-                  key={checkpoint.key}
-                  className={cn(
-                    "absolute top-0 transition-colors",
-                    index === 0 && "-translate-x-0",
-                    index === 1 && "-translate-x-1/2",
-                    index === 2 && "-translate-x-full",
-                    motionCheckpoint === checkpoint.key
-                      ? "text-primary-active"
-                      : "text-muted-foreground"
-                  )}
-                  style={{
-                    left: motionSliderCheckpointPosition(checkpoint.value),
-                  }}
-                >
-                  {MOTION_SLIDER_LABELS[checkpoint.key]}
-                </span>
-              ))}
-            </div>
-          </div>
+        <div className="flex w-full items-center gap-3">
+          <Slider
+            size="sm"
+            value={[sideLeanPct]}
+            onValueChange={(values) =>
+              applySideLeanPct(Array.isArray(values) ? values[0] : values)
+            }
+            min={0}
+            max={100}
+            disabled={cursorControlsDisabled}
+            showValueTooltip
+            formatValue={(v) => `${Math.round(v)}%`}
+            aria-label="Cursor side lean"
+            className="flex-1"
+          />
           <Button
             type="button"
             variant="link"
             size="sm"
-            className="mt-4"
-            onClick={resetMotionRotation}
-            disabled={cursorControlsDisabled || isMotionRotationDefault}
+            onClick={() => applySideLeanPct(SIDE_LEAN_DEFAULT_PCT)}
+            disabled={cursorControlsDisabled || isSideLeanDefault}
           >
             Reset
           </Button>

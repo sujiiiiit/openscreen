@@ -14,13 +14,9 @@
 import type { ProjectStateV1 } from "@/types/api"
 
 export type HistoryCommitTag =
-  | "transform"
   | "appearance"
-  | "nudge"
-  | "lock"
   | "add"
   | "delete"
-  | "duplicate"
   | "preset"
   | "background"
   | "padding"
@@ -32,7 +28,6 @@ export type HistoryCommitTag =
   | "cursor-click-press-scale"
   | "cursor-always-use-pointer"
   | "cursor-motion-rotation"
-  | "cursor-motion-rotation-mode"
   | "cursor-motion-blur"
   | "cursor-motion-blur-backend"
   | "clip-move"
@@ -71,7 +66,6 @@ export const HISTORY_COALESCE_WINDOW_MS = 2000
 export const ALWAYS_NEW_ENTRY_TAGS: ReadonlySet<HistoryCommitTag> = new Set([
   "add",
   "delete",
-  "duplicate",
   "preset",
 ])
 
@@ -131,7 +125,7 @@ export function applyHistoryCommit(
   // still coalesces within the window, but do not allocate a new entry.
   // Preserve the existing tag when the incoming tag is "unknown" so a benign
   // no-op flush (e.g. the post-`flushAutosaveNow` drain) cannot demote a
-  // meaningful tag like "transform" to "unknown" and break the next
+  // meaningful tag like "appearance" to "unknown" and break the next
   // coalesce check.
   if (
     top &&

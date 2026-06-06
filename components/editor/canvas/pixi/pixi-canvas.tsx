@@ -1,15 +1,14 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef } from "react"
 import { Application } from "pixi.js"
 
 import { getPreviewFillTransform } from "@/lib/editor-canvas"
-import { normalizeAngle } from "@/lib/node-transform"
 import { resolveCanvasPalette } from "@/lib/theme-colors"
+import { ARTBOARD_SELECTION_ID } from "@/types/editor-canvas"
 import type {
   CanvasNode,
   CanvasSize,
-  NodeTransformUpdate,
   ViewTransform,
 } from "@/types/editor-canvas"
 
@@ -28,7 +27,7 @@ import { CursorController, type CursorState } from "./cursor-controller"
 import { canvasNodeFromVideo } from "./node-model"
 import { preferredRendererBackend } from "./renderer-preference"
 import { CanvasScene } from "./scene"
-import { TransformController } from "./transform-controller"
+import { SelectionController } from "./selection-controller"
 import { VideoController } from "./video-controller"
 import { ViewportController } from "./viewport-controller"
 
@@ -57,15 +56,8 @@ export function PixiCanvas() {
 
   const { artboard } = useEditorCanvasArtboard()
   const { viewTransform, viewportSize, isPreviewMode } = useEditorCanvasView()
-  const {
-    setViewTransform,
-    setViewportSize,
-    selectItem,
-    updateVideoTransform,
-    deleteVideo,
-    duplicateVideo,
-    setVideoLocked,
-  } = useEditorCanvasActions()
+  const { setViewTransform, setViewportSize, selectItem } =
+    useEditorCanvasActions()
   const { videos, selectedItemId } = useEditorCanvasMedia()
   const { primaryAudioVideoId, zoomClips, timelineTime, timelineClips } =
     useEditorCanvasTimeline()
@@ -78,15 +70,29 @@ export function PixiCanvas() {
     subscribeHoverTime,
   } = useEditorCanvasTimelineActions()
 
-  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([])
   const nodes = useMemo<CanvasNode[]>(
     () => videos.map(canvasNodeFromVideo),
     [videos]
   )
-  const selectedNodes = useMemo(
-    () => nodes.filter((node) => selectedNodeIds.includes(node.id)),
-    [nodes, selectedNodeIds]
+  // The artboard as a synthetic node so the selection controller and the
+  // scene's hover/selection outlines treat it like any other selectable box.
+  // It sits at the world origin, so its rect is simply (0, 0, w, h).
+  const artboardNode = useMemo<CanvasNode>(
+    () => ({
+      id: ARTBOARD_SELECTION_ID,
+      type: "shape",
+      x: 0,
+      y: 0,
+      width: artboard.width,
+      height: artboard.height,
+      rotation: 0,
+    }),
+    [artboard.width, artboard.height]
   )
+  const selectedNode = useMemo(() => {
+    if (selectedItemId === ARTBOARD_SELECTION_ID) return artboardNode
+    return nodes.find((node) => node.id === selectedItemId) ?? null
+  }, [nodes, selectedItemId, artboardNode])
 
   const screenVideo = useMemo(
     () => videos.find((video) => video.role === "screen") ?? null,
@@ -128,7 +134,6 @@ export function PixiCanvas() {
       clickPressScale: artboard.cursorClickPressScale,
       alwaysUsePointer: artboard.cursorAlwaysUsePointer,
       motionRotation: artboard.cursorMotionRotation,
-      motionRotationMode: artboard.cursorMotionRotationMode,
       motionBlur: artboard.cursorMotionBlur,
     }),
     [screenVideo, screenClips, artboard]
@@ -138,23 +143,17 @@ export function PixiCanvas() {
   const sceneRef = useRef<CanvasScene | null>(null)
   const controllerRef = useRef<ViewportController | null>(null)
   const videoControllerRef = useRef<VideoController | null>(null)
-  const transformControllerRef = useRef<TransformController | null>(null)
+  const selectionControllerRef = useRef<SelectionController | null>(null)
   const cursorControllerRef = useRef<CursorController | null>(null)
   const cursorStateRef = useRef<CursorState>(cursorState)
   const cursorTrackRef = useRef<SmoothedCursorTrack | null>(null)
-  const rotationReadoutRef = useRef<HTMLDivElement>(null)
   const viewportSizeRef = useRef<CanvasSize>({ width: 0, height: 0 })
   const isPreviewModeRef = useRef(isPreviewMode)
 
   const nodesRef = useRef<CanvasNode[]>(nodes)
-  const selectedIdsRef = useRef<string[]>(selectedNodeIds)
-  const nodeActionsRef = useRef({
-    selectItem,
-    updateVideoTransform,
-    deleteVideo,
-    duplicateVideo,
-    setVideoLocked,
-  })
+  const artboardNodeRef = useRef<CanvasNode>(artboardNode)
+  const selectedItemIdRef = useRef<string | null>(selectedItemId)
+  const nodeActionsRef = useRef({ selectItem })
 
   // Latest values read by the imperative layer without re-running the mount effect.
   const artboardSizeRef = useRef<CanvasSize>({
@@ -216,37 +215,14 @@ export function PixiCanvas() {
     nodesRef.current = nodes
   }, [nodes])
   useEffect(() => {
-    selectedIdsRef.current = selectedNodeIds
-  }, [selectedNodeIds])
+    artboardNodeRef.current = artboardNode
+  }, [artboardNode])
   useEffect(() => {
-    nodeActionsRef.current = {
-      selectItem,
-      updateVideoTransform,
-      deleteVideo,
-      duplicateVideo,
-      setVideoLocked,
-    }
-  }, [
-    selectItem,
-    updateVideoTransform,
-    deleteVideo,
-    duplicateVideo,
-    setVideoLocked,
-  ])
-
-  const updateRotationReadout = useCallback((rotation: number | null) => {
-    const readout = rotationReadoutRef.current
-    if (!readout) return
-    if (rotation === null) {
-      readout.style.visibility = "hidden"
-      readout.textContent = ""
-      return
-    }
-    const normalized = normalizeAngle(rotation)
-    const positive = normalized < 0 ? normalized + Math.PI * 2 : normalized
-    readout.textContent = `${Math.round((positive * 180) / Math.PI)}°`
-    readout.style.visibility = "visible"
-  }, [])
+    selectedItemIdRef.current = selectedItemId
+  }, [selectedItemId])
+  useEffect(() => {
+    nodeActionsRef.current = { selectItem }
+  }, [selectItem])
 
   useEffect(() => {
     transportRef.current = {
@@ -414,43 +390,17 @@ export function PixiCanvas() {
         )
       )
 
-      const transformController = new TransformController({
+      const selectionController = new SelectionController({
         scene,
         getViewTransform: () => controller.getViewTransform(),
         getNodes: () => nodesRef.current,
-        getSelectedIds: () => selectedIdsRef.current,
+        getArtboardNode: () => artboardNodeRef.current,
+        getSelectedId: () => selectedItemIdRef.current,
         getIsSpacePressed: () => controller.isSpaceActive(),
-        onSelectionChange: (ids) => {
-          setSelectedNodeIds(ids)
-          nodeActionsRef.current.selectItem(ids.at(-1) ?? null)
-        },
-        onNodeTransformsCommit: (updates: NodeTransformUpdate[]) => {
-          for (const update of updates) {
-            nodeActionsRef.current.updateVideoTransform(update.id, {
-              x: update.transform.x,
-              y: update.transform.y,
-              width: update.transform.width,
-              height: update.transform.height,
-              rotation: update.transform.rotation,
-            })
-          }
-        },
-        onRemoveNode: (id) => nodeActionsRef.current.deleteVideo(id),
-        onDuplicateSelectedNodes: () => {
-          for (const id of selectedIdsRef.current) {
-            nodeActionsRef.current.duplicateVideo(id)
-          }
-        },
-        onSetSelectedNodesLocked: (locked) => {
-          for (const id of selectedIdsRef.current) {
-            nodeActionsRef.current.setVideoLocked(id, locked)
-          }
-        },
-        onTransformingChange: () => {},
-        onRotationPreview: updateRotationReadout,
+        onSelect: (id) => nodeActionsRef.current.selectItem(id),
       })
-      transformController.attach(host)
-      transformControllerRef.current = transformController
+      selectionController.attach(host)
+      selectionControllerRef.current = selectionController
 
       const cursorController = new CursorController(scene)
       cursorController.setState(cursorStateRef.current)
@@ -510,7 +460,7 @@ export function PixiCanvas() {
       if (scheduleResize) window.removeEventListener("resize", scheduleResize)
       if (resizeRafId !== null) cancelAnimationFrame(resizeRafId)
       controllerRef.current?.detach()
-      transformControllerRef.current?.detach()
+      selectionControllerRef.current?.detach()
       cursorControllerRef.current?.destroy()
       videoControllerRef.current?.destroy()
       sceneRef.current?.destroy()
@@ -519,7 +469,7 @@ export function PixiCanvas() {
       sceneRef.current = null
       controllerRef.current = null
       videoControllerRef.current = null
-      transformControllerRef.current = null
+      selectionControllerRef.current = null
       cursorControllerRef.current = null
     }
     // Mount once. Live values are read through refs above.
@@ -605,32 +555,12 @@ export function PixiCanvas() {
     cursorControllerRef.current?.place(timelineTime)
   }, [zoomClips, timelineTime, artboard.width, artboard.height])
 
-  // Bridge the provider's single-selection (sidebar Video-tab "Select" /
-  // deselect / artboard) into the canvas's multi-selection. The provider only
-  // holds one id, so we override our local selection ONLY when its id diverges
-  // from our current set — never when it merely echoes the primary we just
-  // pushed via selectItem() (that would collapse a marquee/Shift group to one).
-  // Deliberate cross-store sync with an equality guard (no cascading renders).
+  // Redraw the selection overlay when the selection or node placement changes
+  // (covers canvas clicks, timeline/panel selection, and settings-driven
+  // relayout — `nodes` rebuilds whenever `videos` changes).
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setSelectedNodeIds((prev) => {
-      if (selectedItemId && prev.includes(selectedItemId)) return prev
-      const nextIds =
-        selectedItemId && videos.some((video) => video.id === selectedItemId)
-          ? [selectedItemId]
-          : []
-      return prev.length === nextIds.length &&
-        prev.every((id, i) => id === nextIds[i])
-        ? prev
-        : nextIds
-    })
-  }, [selectedItemId, videos])
-
-  // Redraw the selection overlay when the selection or node transforms change
-  // (covers programmatic selection + panel edits; live gestures draw directly).
-  useEffect(() => {
-    sceneRef.current?.drawSelectionOverlay(selectedNodes)
-  }, [selectedNodes])
+    sceneRef.current?.drawSelectionOverlay(selectedNode)
+  }, [selectedNode])
 
   // Push cursor state + re-place when paused (settings / geometry changes).
   useEffect(() => {
@@ -687,11 +617,6 @@ export function PixiCanvas() {
           isPreviewMode ? "hidden" : ""
         }`}
         style={{ transformOrigin: "0 0", willChange: "transform", opacity: 0 }}
-      />
-      <div
-        ref={rotationReadoutRef}
-        aria-hidden="true"
-        className="pointer-events-none invisible absolute bottom-4 left-1/2 z-[4] min-w-16 -translate-x-1/2 rounded-full border border-border/70 bg-popover px-3 py-1.5 text-center text-xs font-semibold text-foreground tabular-nums shadow-xl ring-1 ring-border/40"
       />
       <div ref={hostRef} className="absolute inset-0 z-[1] touch-none" />
     </>

@@ -22,7 +22,6 @@ const ARTBOARD: EditorArtboard = {
   cursorSizeMultiplier: 1,
   cursorMotionBlur: 0,
   cursorMotionRotation: 0.35,
-  cursorMotionRotationMode: "side-lean",
   cursorSmoothingMode: "default",
   cursorClickPressScale: 0.88,
   cursorAlwaysUsePointer: false,
@@ -148,17 +147,17 @@ describe("cursor motion rotation persistence", () => {
     expect(parsed!.artboard.cursorMotionRotation).toBe(0.72)
   })
 
-  it("preserves the selected motion rotation mode through a round-trip", () => {
-    const parsed = roundTrip(
-      serializeProjectState(
-        { ...ARTBOARD, cursorMotionRotationMode: "rotation" },
-        [canvasVideo({ id: "a" })],
-        []
-      )
+  it("omits the legacy motion rotation mode from new saves", () => {
+    const snapshot = serializeProjectState(
+      ARTBOARD,
+      [canvasVideo({ id: "a" })],
+      []
     )
 
-    expect(parsed).not.toBeNull()
-    expect(parsed!.artboard.cursorMotionRotationMode).toBe("rotation")
+    // The direction-follow "rotation" mode was removed; side lean is the only
+    // behavior, so new saves drop the field while old files keep parsing (see
+    // the legacy-default test below).
+    expect("cursorMotionRotationMode" in snapshot.artboard).toBe(false)
   })
 
   it("defaults missing and invalid motion rotation mode to side-lean", () => {

@@ -76,8 +76,10 @@ export interface ProjectArtboard {
   // Cursor motion-rotation amount, 0..1 (0 = off). Optional + defaulted by
   // `parseArtboard`, same back-compat rationale as cursorSizeMultiplier.
   cursorMotionRotation?: number
-  // Cursor motion-rotation behavior. Optional + defaulted to 'side-lean' for
-  // old project.json files.
+  // LEGACY (kept for v1 compatibility, ignored by the editor): the
+  // direction-follow "rotation" mode was removed 2026-06-06 — side lean is the
+  // only cursor motion behavior. Old files carrying either value still parse;
+  // new saves omit the field.
   cursorMotionRotationMode?: "side-lean" | "rotation"
   // Cursor path smoothing preset. Optional + defaulted to 'default' for old
   // project.json files.
@@ -303,20 +305,20 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
   // the renderer module can't be imported into the main process).
   const cursorSizeMultiplier = (() => {
     const raw = value["cursorSizeMultiplier"]
-    // Default (absent/invalid) mirrors cursor-scene.ts CURSOR_SIZE_DEFAULT (2.7)
+    // Default (absent/invalid) mirrors cursor-scene.ts CURSOR_SIZE_DEFAULT (2.2)
     // so legacy projects open at the same size as new ones. Clamp to [1, 4]
     // mirrors CURSOR_SIZE_MIN/MAX (hand-synced — renderer module can't import).
-    if (!isFiniteNumber(raw)) return 2.7
+    if (!isFiniteNumber(raw)) return 2.2
     return Math.min(4, Math.max(1, raw))
   })()
 
   // Cursor motion-blur intensity is optional + defaulted (same back-compat
   // rationale). Default (absent/invalid) mirrors cursor-scene.ts
-  // CURSOR_MOTION_BLUR_DEFAULT (0.6); clamp to [0, 1] (hand-synced — the
+  // CURSOR_MOTION_BLUR_DEFAULT (0.2); clamp to [0, 1] (hand-synced — the
   // renderer module can't be imported into the main process).
   const cursorMotionBlur = (() => {
     const raw = value["cursorMotionBlur"]
-    if (!isFiniteNumber(raw)) return 0.6
+    if (!isFiniteNumber(raw)) return 0.2
     return Math.min(1, Math.max(0, raw))
   })()
 

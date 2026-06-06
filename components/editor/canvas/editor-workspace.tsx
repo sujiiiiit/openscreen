@@ -1,11 +1,12 @@
 "use client"
 
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import dynamic from "next/dynamic"
 
 import { PreviewControls } from "@/components/editor/canvas/preview-controls"
 import {
   useEditorCanvasActions,
+  useEditorCanvasMedia,
   useEditorCanvasTimeline,
   useEditorCanvasTimelineActions,
   useEditorCanvasView,
@@ -15,6 +16,8 @@ import {
   hasZoomModifier,
   isEditableTarget,
 } from "@/components/editor/canvas/view-transform-utils"
+import { RENDERER_BACKEND_CHANGE_EVENT } from "@/components/editor/canvas/pixi/renderer-preference"
+import { ARTBOARD_SELECTION_ID } from "@/types/editor-canvas"
 
 // The PixiJS canvas is the editor canvas. Loaded with ssr:false because PixiJS
 // initializes against the browser canvas/GPU.
@@ -28,24 +31,26 @@ const PixiCanvas = dynamic(
 
 /**
  * The editor workspace shell. The canvas itself (viewport, nodes, selection,
- * transform, cursor, zoom, blur) is the PixiJS scene/controllers; this component
- * only owns the outer chrome + the keyboard that isn't already handled by those
+ * cursor, zoom, blur) is the PixiJS scene/controllers; this component only owns
+ * the outer chrome + the keyboard that isn't already handled by those
  * controllers:
  *
  *  - ViewportController: wheel/pinch/drag zoom + pan, zoom/fit/space shortcuts.
- *  - TransformController: select/marquee, move/resize/rotate, delete/duplicate/
- *    lock/nudge/escape.
- *  - Here: undo/redo, timeline frame-step, zoom-clip delete, and (in fullscreen
- *    preview) Space → play/pause; plus preview enter/exit (fullscreen + play).
+ *  - SelectionController: hover + click-to-select.
+ *  - Here: undo/redo, timeline frame-step, zoom-clip delete, selected-video
+ *    delete, and (in fullscreen preview) Space → play/pause; plus preview
+ *    enter/exit (fullscreen + play).
  */
 export default function EditorWorkspace() {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const isPreviewModeRef = useRef(false)
   const prevPreviewModeRef = useRef(false)
   const selectedZoomClipIdRef = useRef<string | null>(null)
+  const selectedItemIdRef = useRef<string | null>(null)
 
   const { isPreviewMode } = useEditorCanvasView()
-  const { exitPreview } = useEditorCanvasActions()
+  const { exitPreview, deleteVideo } = useEditorCanvasActions()
+  const { selectedItemId } = useEditorCanvasMedia()
   const { selectedZoomClipId } = useEditorCanvasTimeline()
   const {
     setTimelineTime,
@@ -63,6 +68,25 @@ export default function EditorWorkspace() {
   useEffect(() => {
     selectedZoomClipIdRef.current = selectedZoomClipId
   }, [selectedZoomClipId])
+  useEffect(() => {
+    selectedItemIdRef.current = selectedItemId
+  }, [selectedItemId])
+
+  // Renderer backend preference (zoom-menu Renderer submenu). Bumping the key
+  // remounts <PixiCanvas>, which tears down the whole Application and re-inits
+  // with the new `preference` — the same mount/unmount path React strict mode
+  // already exercises, so videos and overlays re-register cleanly through the
+  // provider transport.
+  const [rendererEpoch, setRendererEpoch] = useState(0)
+  useEffect(() => {
+    const onRendererChange = () => setRendererEpoch((epoch) => epoch + 1)
+    window.addEventListener(RENDERER_BACKEND_CHANGE_EVENT, onRendererChange)
+    return () =>
+      window.removeEventListener(
+        RENDERER_BACKEND_CHANGE_EVENT,
+        onRendererChange
+      )
+  }, [])
 
   // A dropped fullscreen (Esc / OS gesture) while still in preview means the user
   // wants out of preview.
@@ -128,15 +152,28 @@ export default function EditorWorkspace() {
         return
       }
 
-      // A selected zoom clip is removed independently of node selection (the two
-      // are mutually exclusive). Node deletion is the TransformController's.
+      // Delete/Backspace removes the selected zoom clip or detaches the
+      // selected video (the two selections are mutually exclusive — selecting
+      // one clears the other in the provider).
       if (
-        selectedZoomClipIdRef.current &&
-        (event.code === "Delete" || event.code === "Backspace")
+        (event.code === "Delete" || event.code === "Backspace") &&
+        !hasZoomModifier(event) &&
+        !event.altKey
       ) {
-        event.preventDefault()
-        removeZoomClip(selectedZoomClipIdRef.current)
-        return
+        if (selectedZoomClipIdRef.current) {
+          event.preventDefault()
+          removeZoomClip(selectedZoomClipIdRef.current)
+          return
+        }
+        // The artboard sentinel selection has nothing to delete.
+        if (
+          selectedItemIdRef.current &&
+          selectedItemIdRef.current !== ARTBOARD_SELECTION_ID
+        ) {
+          event.preventDefault()
+          deleteVideo(selectedItemIdRef.current)
+          return
+        }
       }
 
       // Frame-step the timeline playhead (`,` / `.`).
@@ -152,7 +189,14 @@ export default function EditorWorkspace() {
 
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [redo, removeZoomClip, stepTimelineFrame, toggleTimelinePlayback, undo])
+  }, [
+    deleteVideo,
+    redo,
+    removeZoomClip,
+    stepTimelineFrame,
+    toggleTimelinePlayback,
+    undo,
+  ])
 
   return (
     <div
@@ -163,7 +207,7 @@ export default function EditorWorkspace() {
           : "relative h-full w-full overflow-hidden bg-editor-workspace"
       }
     >
-      <PixiCanvas />
+      <PixiCanvas key={rendererEpoch} />
       {isPreviewMode && <PreviewControls />}
     </div>
   )

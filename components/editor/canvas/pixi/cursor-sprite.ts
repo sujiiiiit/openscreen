@@ -2,11 +2,7 @@ import { type Container, Sprite, Texture } from "pixi.js"
 import { MotionBlurFilter } from "pixi-filters/motion-blur"
 
 import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
-import type {
-  CursorMotionRotationMode,
-  CursorSetId,
-  CursorSmoothingMode,
-} from "@/types/editor-canvas"
+import type { CursorSetId, CursorSmoothingMode } from "@/types/editor-canvas"
 
 import {
   computeCursorBlur,
@@ -54,7 +50,6 @@ export type CursorPlaceOptions = {
   cursorSet: CursorSetId
   alwaysUsePointer: boolean
   motionRotation: number
-  motionRotationMode: CursorMotionRotationMode
   smoothingMode: CursorSmoothingMode
   referenceSize: { width: number; height: number }
 }

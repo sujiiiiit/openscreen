@@ -115,7 +115,7 @@ export class ViewportController {
     return this.viewTransform
   }
 
-  /** Single source of truth for Space-to-pan, shared with the TransformController. */
+  /** Single source of truth for Space-to-pan, shared with the SelectionController. */
   isSpaceActive(): boolean {
     return this.isSpacePressed
   }

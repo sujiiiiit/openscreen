@@ -225,8 +225,8 @@ export interface ProjectArtboard {
   // Cursor motion-rotation amount, 0..1 (0 = off). Optional on disk; validator
   // defaults to 0.35 and clamps. See electron/ipc/project-schema.ts.
   cursorMotionRotation?: number
-  // Cursor motion-rotation behavior. Optional on disk; validator defaults to
-  // 'side-lean'. See electron/ipc/project-schema.ts.
+  // LEGACY (ignored by the editor; new saves omit it): the "rotation" mode was
+  // removed — side lean is the only behavior. See electron/ipc/project-schema.ts.
   cursorMotionRotationMode?: "side-lean" | "rotation"
   // Cursor path smoothing preset. Optional on disk; validator defaults to
   // 'default'. See electron/ipc/project-schema.ts.

@@ -12,7 +12,6 @@ export type ArtboardBackground =
   | { type: "wallpaper"; value: string; blurRadius?: number }
   | { type: "color"; value: string }
 
-export type CursorMotionRotationMode = "side-lean" | "rotation"
 export type CursorSmoothingMode = "rapid" | "quick" | "default" | "slow"
 
 export type EditorArtboard = CanvasSize & {
@@ -36,13 +35,12 @@ export type EditorArtboard = CanvasSize & {
   // from cursor speed; this is the single user-facing amount. See cursor-scene.ts
   // CURSOR_MOTION_BLUR_DEFAULT / computeCursorBlur.
   cursorMotionBlur: number
-  // Cursor motion-rotation amount, 0..1 (0 = off). Horizontal cursor velocity
-  // adds a subtle lean, or full 2D motion direction adds a bounded rotation,
-  // around the existing hotspot; shared by preview/export.
+  // Cursor side-lean amount, 0..1 (0 = off). Horizontal cursor velocity adds a
+  // subtle Screen-Studio-style lean around the existing hotspot; shared by
+  // preview/export. (The full direction-follow "rotation" mode was removed
+  // 2026-06-06; the persisted `cursorMotionRotationMode` field is read/ignored
+  // for v1 compatibility.)
   cursorMotionRotation: number
-  // Cursor motion-rotation behavior. Default is the Screen-Studio-style side
-  // lean; rotation follows the 2D travel vector with the same amount slider.
-  cursorMotionRotationMode: CursorMotionRotationMode
   // Cursor path smoothing preset. All modes smooth; Rapid is the lightest and
   // Slow is the softest. Shared by preview and export.
   cursorSmoothingMode: CursorSmoothingMode
@@ -78,30 +76,11 @@ export type ViewTransform = {
 export type NodeType = "video" | "image" | "text" | "shape"
 
 /**
- * Position and uniform scale of media inside a node frame. The node transform is
- * the visible frame; this content transform lets side handles crop/reveal media
- * without stretching the source pixels. (openscreen's video nodes use object-fit
- * cover recomputed from size + intrinsic, so `contentTransform` is usually unset;
- * it exists so the shared node-transform math can support crop/reveal later.)
- */
-export type NodeContentTransform = {
-  /** Media top-left relative to the frame's local top-left, in artboard pixels. */
-  x: number
-  /** Media top-left relative to the frame's local top-left, in artboard pixels. */
-  y: number
-  /** Uniform scale from the media's natural pixels into artboard pixels. */
-  scale: number
-  /** Natural media width, used to clamp crop recovery to real source bounds. */
-  naturalWidth?: number
-  /** Natural media height, used to clamp crop recovery to real source bounds. */
-  naturalHeight?: number
-}
-
-/**
  * A node's placement on the artboard. `(x, y)` is the top-left of the
  * axis-aligned (unrotated) box in artboard coordinates; `rotation` (radians) is
- * applied around the box's center. Resize/rotate math operates purely on this
- * shape — see `lib/node-transform.ts`.
+ * applied around the box's center. Placement is derived from the artboard
+ * settings (`lib/video-placement.ts`); `rotation` is always 0 for new state and
+ * exists so the hit-test/overlay math in `lib/node-transform.ts` stays general.
  */
 export type NodeTransform = {
   x: number
@@ -109,31 +88,18 @@ export type NodeTransform = {
   width: number
   height: number
   rotation: number
-  /** Mirrors the node content across its local x axis while width stays positive. */
-  flipX?: boolean
-  /** Mirrors the node content across its local y axis while height stays positive. */
-  flipY?: boolean
-  /** Optional non-destructive media crop/frame transform. */
-  contentTransform?: NodeContentTransform
 }
 
 /**
- * An editable node on the artboard — the in-memory canvas model the PixiJS scene
- * and the pure transform math operate on. It is a read-side derivation of
+ * A node on the artboard — the in-memory canvas model the PixiJS scene and the
+ * pure hit-test math operate on. It is a read-side derivation of
  * {@link CanvasVideoItem} (see `components/editor/canvas/pixi/node-model.ts`),
  * never persisted directly. Named to avoid clashing with the DOM `Node`.
  */
 export type CanvasNode = {
   id: string
   type: NodeType
-  /** Selectable but protected from transform, reorder, duplicate, and delete commands. */
-  locked?: boolean
 } & NodeTransform
-
-export type NodeTransformUpdate = {
-  id: string
-  transform: NodeTransform
-}
 
 /**
  * Coarse-grained label for the autosave pipeline shown in the titlebar.
@@ -213,10 +179,6 @@ export type CanvasVideoItem = {
    */
   shadowSpread: number
 }
-
-export type CanvasVideoTransformPatch = Partial<
-  Pick<CanvasVideoItem, "x" | "y" | "width" | "height" | "rotation">
->
 
 export type CanvasVideoAppearancePatch = Partial<
   Pick<

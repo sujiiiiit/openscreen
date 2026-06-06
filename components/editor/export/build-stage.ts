@@ -33,14 +33,12 @@ import {
   clampCursorClickPressScale,
   clampCursorMotionBlur,
   clampCursorMotionRotation,
-  clampCursorMotionRotationMode,
   clampCursorSetId,
   clampCursorSize,
   clampCursorSmoothingMode,
   CURSOR_CLICK_PRESS_SCALE_DEFAULT,
   CURSOR_MOTION_BLUR_DEFAULT,
   CURSOR_MOTION_ROTATION_DEFAULT,
-  CURSOR_MOTION_ROTATION_MODE_DEFAULT,
   CURSOR_POINTER_CURSOR_ID,
   CURSOR_SET_DEFAULT,
   CURSOR_SIZE_DEFAULT,
@@ -266,10 +264,6 @@ async function buildExportCursor(
     alwaysUsePointer,
     motionRotation: clampCursorMotionRotation(
       state.artboard.cursorMotionRotation ?? CURSOR_MOTION_ROTATION_DEFAULT
-    ),
-    motionRotationMode: clampCursorMotionRotationMode(
-      state.artboard.cursorMotionRotationMode ??
-        CURSOR_MOTION_ROTATION_MODE_DEFAULT
     ),
     smoothingMode,
     referenceSize: {

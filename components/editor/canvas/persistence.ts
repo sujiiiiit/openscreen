@@ -65,7 +65,9 @@ export function serializeArtboard(artboard: EditorArtboard): ProjectArtboard {
     cursorSizeMultiplier: artboard.cursorSizeMultiplier,
     cursorMotionBlur: artboard.cursorMotionBlur,
     cursorMotionRotation: artboard.cursorMotionRotation,
-    cursorMotionRotationMode: artboard.cursorMotionRotationMode,
+    // `cursorMotionRotationMode` is no longer written: the direction-follow
+    // "rotation" mode was removed (side lean is the only behavior). The field
+    // stays optional in the v1 schema so legacy files keep parsing.
     cursorSmoothingMode: artboard.cursorSmoothingMode,
     cursorClickPressScale: artboard.cursorClickPressScale,
     cursorAlwaysUsePointer: artboard.cursorAlwaysUsePointer,

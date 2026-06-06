@@ -53,7 +53,15 @@ export const ZOOM_RADIAL_BLUR_SHADER: CanvasZoomRadialBlurSettings = {
 // more blur for the same zoom speed. Kept conservative so short/snappy clips —
 // which have high zoom velocity — streak tastefully instead of smearing the
 // whole frame. See sampleZoomCameraAtTime in zoom-scene.
-export const ZOOM_BLUR_MOTION_GAIN = 0.14
+//
+// Retuned 0.14 → 0.05 (2026-06-06): at the old gain a default clip (Strength
+// 0.5, scale 2, 600 ms ramps) peaked at ZoomBlurFilter strength ≈ 0.146 —
+// every pixel smeared ~15 % of its distance to the focus, which averaged
+// dark-mode screen recordings into a near-black frame for the middle of every
+// ramp. 0.05 keeps the streak clearly visible while text-heavy dark content
+// stays legible. See docs/editor-canvas.md → "Zoom Blur Reads As Black On
+// Dark Recordings".
+export const ZOOM_BLUR_MOTION_GAIN = 0.05
 export const ZOOM_FOCUS_DEFAULT: CanvasZoomFocus = { x: 0.5, y: 0.5 }
 export const ZOOM_EASE_PRESET_DEFAULT: CanvasZoomEasePreset = "smooth"
 export const ZOOM_EASE_PRESETS: CanvasZoomEasePreset[] = [
