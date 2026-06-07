@@ -451,6 +451,11 @@
 - (NSDictionary *)manifestDictionary {
   NSTimeInterval startedMs = [_startedAt timeIntervalSince1970] * 1000.0;
   NSMutableDictionary *manifest = [NSMutableDictionary dictionary];
+  // Manifest schema version. Bump when a field changes shape or meaning so
+  // readers can branch instead of guessing from heuristics (the editor
+  // already had to infer old vs new sidecar clock anchors once). Absent in
+  // recordings made before the field existed.
+  manifest[@"version"] = @(1);
   manifest[@"sessionId"] = ToNSString(_options.sessionId);
   manifest[@"startedAtUnixMs"] = @(startedMs);
   manifest[@"hostStartMs"] = @(TimeToMilliseconds(_hostStartTime));

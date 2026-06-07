@@ -86,6 +86,13 @@ export const EditAction: FC<EditActionProps> = ({
   // Configure the grid-snap step
   const gridSize = scaleWidth / scaleSplitCount;
 
+  // Resize handles shrink on narrow actions so the body stays grabbable for
+  // moves, and disappear entirely on hairline actions (which two fixed 10px
+  // handles would otherwise swallow whole, making the action move-impossible —
+  // resize those by zooming the timeline in first).
+  const stretchHandleWidth =
+    transform.width < 16 ? 0 : Math.min(10, Math.max(4, transform.width / 4));
+
   // Marker class names (no styling — consumers can target these via classNames / action.className)
   const markerClasses = [
     `${PREFIX}-action`,
@@ -116,6 +123,15 @@ export const EditAction: FC<EditActionProps> = ({
       const { start, end } = parserTransformToTime({ left, width }, { scaleWidth, scale, startLeft });
       const result = onActionMoving({ action, row, start, end });
       if (result === false) return false;
+      // Adjusted span: the consumer clamped the move (e.g. flush against a
+      // neighbour). Convert back to pixels, render it, and hand the corrected
+      // transform to RowDnd so the drag continues from the clamped position.
+      if (result && typeof result === 'object') {
+        const adjusted = parserTimeToTransform(result, { startLeft, scale, scaleWidth });
+        setTransform(adjusted);
+        handleScaleCount(adjusted.left, adjusted.width);
+        return adjusted;
+      }
     }
     setTransform({ left, width });
     handleScaleCount(left, width);
@@ -148,6 +164,13 @@ export const EditAction: FC<EditActionProps> = ({
       const { start, end } = parserTransformToTime({ left, width }, { scaleWidth, scale, startLeft });
       const result = onActionResizing({ action, row, start, end, dir });
       if (result === false) return false;
+      // Adjusted span: the consumer clamped the resize. Render and apply it.
+      if (result && typeof result === 'object') {
+        const adjusted = parserTimeToTransform(result, { startLeft, scale, scaleWidth });
+        setTransform(adjusted);
+        handleScaleCount(adjusted.left, adjusted.width);
+        return adjusted;
+      }
     }
     setTransform({ left, width });
     handleScaleCount(left, width);
@@ -249,10 +272,16 @@ export const EditAction: FC<EditActionProps> = ({
       >
         {getActionRender && getActionRender(nowAction, nowRow)}
         {flexible && (
-          <div className={`${PREFIX}-action-left-stretch absolute left-0 top-0 h-full w-2.5 overflow-hidden rounded`} />
+          <div
+            className={`${PREFIX}-action-left-stretch absolute left-0 top-0 h-full overflow-hidden rounded`}
+            style={{ width: stretchHandleWidth }}
+          />
         )}
         {flexible && (
-          <div className={`${PREFIX}-action-right-stretch absolute right-0 top-0 h-full w-2.5 overflow-hidden rounded`} />
+          <div
+            className={`${PREFIX}-action-right-stretch absolute right-0 top-0 h-full overflow-hidden rounded`}
+            style={{ width: stretchHandleWidth }}
+          />
         )}
       </div>
     </RowDnd>

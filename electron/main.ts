@@ -61,6 +61,7 @@ import {
 } from './ipc/window-controls'
 import { subscribeActiveSpaceChange } from './mac-spaces'
 import { windowConfigs } from './windowConfigs'
+import { getSavedBounds, rememberWindowBounds } from './window-bounds'
 
 const isDev = !app.isPackaged
 let mainWin: BrowserWindow | null = null
@@ -337,9 +338,14 @@ function createMainWindow(options: CreateMainWindowOptions = {}): BrowserWindow 
   }
 
   const isMac = process.platform === 'darwin'
+  // Restore the user's last editor bounds when they still land on a
+  // connected display; otherwise the OS default placement applies. Multiple
+  // editor windows share the one slot — last move/resize wins.
+  const savedBounds = getSavedBounds('editor')
   const win = new BrowserWindow({
-    width: 1280,
-    height: 800,
+    width: savedBounds?.width ?? 1280,
+    height: savedBounds?.height ?? 800,
+    ...(savedBounds ? { x: savedBounds.x, y: savedBounds.y } : {}),
     show: false,
     title: editorWindowTitleFromPath(options.projectPath),
     backgroundColor: '#000000',
@@ -362,6 +368,7 @@ function createMainWindow(options: CreateMainWindowOptions = {}): BrowserWindow 
   })
   rememberEditorWindow(win)
   watchMainWindowState(win)
+  rememberWindowBounds(win, 'editor', { persistSize: true })
   installEditorContextMenu(win)
 
   win.once('ready-to-show', () => {
@@ -524,19 +531,32 @@ function createCameraWindow(deviceId: string): void {
     return
   }
 
+  // Saved bounds win only when they still touch a connected display; a
+  // disconnected monitor falls back to the bottom-left default placement.
+  // Saved bounds are square by construction (captured from this window,
+  // whose aspect is locked to 1 below).
+  const savedCameraBounds = getSavedBounds('camera')
+  const minCameraSize = windowConfigs.cameraWin.minWidth ?? 140
   const { x: workX, y: workY, height: workH } = screen.getPrimaryDisplay().workArea
   const winH = windowConfigs.cameraWin.height ?? 240
   const margin = 20
-  const x = workX + margin
-  const y = workY + workH - winH - margin
+  const x = savedCameraBounds?.x ?? workX + margin
+  const y = savedCameraBounds?.y ?? workY + workH - winH - margin
 
   const win = new BrowserWindow({
     x,
     y,
     ...windowConfigs.cameraWin,
+    ...(savedCameraBounds
+      ? {
+          width: Math.max(minCameraSize, savedCameraBounds.width),
+          height: Math.max(minCameraSize, savedCameraBounds.height),
+        }
+      : {}),
     webPreferences: { ...SHARED_WEB_PREFERENCES, devTools: false },
   })
   cameraWin = win
+  rememberWindowBounds(win, 'camera', { persistSize: true })
 
   keepWindowOnEveryWorkspace(win, { level: 'screen-saver', relativeLevel: 2 })
   win.setAspectRatio(1)
@@ -827,11 +847,13 @@ function createExportWindow(): void {
     return
   }
 
+  // Position-only restore — the window's size is fixed by windowConfigs.
+  const savedExportBounds = getSavedBounds('export')
   const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize
   const winW = windowConfigs.exportWin.width ?? 480
   const winH = windowConfigs.exportWin.height ?? 560
-  const x = Math.round((screenW - winW) / 2)
-  const y = Math.round((screenH - winH) / 2)
+  const x = savedExportBounds?.x ?? Math.round((screenW - winW) / 2)
+  const y = savedExportBounds?.y ?? Math.round((screenH - winH) / 2)
 
   exportWin = new BrowserWindow({
     x,
@@ -847,6 +869,7 @@ function createExportWindow(): void {
     // SHARED_WEB_PREFERENCES.
     webPreferences: { ...SHARED_WEB_PREFERENCES, webSecurity: false },
   })
+  rememberWindowBounds(exportWin, 'export', { persistSize: false })
   if (process.platform === 'darwin') {
     exportWin.setWindowButtonVisibility(false)
   }
@@ -1037,9 +1060,12 @@ function createRecorderBarWindow(): void {
     return
   }
 
+  // Position-only restore — the bar's size is fixed by windowConfigs (and
+  // re-enforced below), so only x/y come from the saved bounds.
+  const savedBarBounds = getSavedBounds('recorderBar')
   const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize
-  const x = Math.round((screenW - winW) / 2)
-  const y = screenH - winH - 80
+  const x = savedBarBounds?.x ?? Math.round((screenW - winW) / 2)
+  const y = savedBarBounds?.y ?? screenH - winH - 80
 
   recorderBarWin = new BrowserWindow({
     x,
@@ -1047,6 +1073,7 @@ function createRecorderBarWindow(): void {
     ...windowConfigs.recorderBarWin,
     webPreferences: { ...SHARED_WEB_PREFERENCES, devTools: false },
   })
+  rememberWindowBounds(recorderBarWin, 'recorderBar', { persistSize: false })
 
   keepRecorderBarOnTop(recorderBarWin)
   enforceFixedWindowSize(recorderBarWin, winW, winH)

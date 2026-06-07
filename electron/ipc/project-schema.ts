@@ -190,18 +190,6 @@ export interface ProjectStateV1 {
 
 export type ProjectState = ProjectStateV1
 
-export interface ImportAssetPayload {
-  id: string
-  fileName: string
-  bytes: ArrayBuffer
-}
-
-export interface ImportAssetResult {
-  relativePath: string
-  fileUrl: string
-  fileSize: number
-}
-
 export type SaveProjectStateResult =
   | { ok: true; writtenAtUnixMs: number }
   | { ok: false; reason: string }

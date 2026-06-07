@@ -325,18 +325,6 @@ export interface ProjectStateV1 {
   updatedAtUnixMs: number
 }
 
-export interface ImportAssetPayload {
-  id: string
-  fileName: string
-  bytes: ArrayBuffer
-}
-
-export interface ImportAssetResult {
-  relativePath: string
-  fileUrl: string
-  fileSize: number
-}
-
 export type SaveProjectStateResult =
   | { ok: true; writtenAtUnixMs: number }
   | { ok: false; reason: string }
@@ -393,6 +381,9 @@ export interface ExportStartPayload {
   // Filename basename (no extension) used to derive the timestamp portion
   // of the output file. Defaults to the active project name.
   outputBaseName?: string
+  // Absolute project folder — lets the export stage load cursor sidecars
+  // directly instead of re-deriving the folder from a video file URL.
+  projectPath?: string
 }
 
 export interface ExportCodecSupport {
@@ -491,10 +482,6 @@ export interface Api {
       folderPath: string,
       state: ProjectStateV1
     ) => Promise<SaveProjectStateResult>
-    importAsset: (
-      folderPath: string,
-      payload: ImportAssetPayload
-    ) => Promise<ImportAssetResult>
     getCursorData: (folderPath: string) => Promise<CursorTrackData | null>
   }
   windowPicker: {

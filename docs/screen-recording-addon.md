@@ -24,7 +24,7 @@ SCStreamConfig    ─┘                                  (one AVAssetWriter per
 
 ## Settings surface
 
-Exposed through `StartRecordingOptions` (see `packages/mac-addon/index.d.ts`) and stored per-user in `<userData>/recording-quality.json` by the Electron main process. The Recording Quality window (`app/recording-settings/page.tsx`) is the user-facing entry point; the menu item lives in the recorder bar's settings menu, just below "Don't record cursor".
+Exposed through `StartRecordingOptions` (see `packages/mac-addon/index.d.ts`) and stored per-user in `<userData>/recording-quality.json` by the Electron main process. The Settings window (`app/recording-settings/page.tsx`) is the user-facing entry point; the menu item lives in the recorder bar's settings menu, just below "Don't record cursor". Since 2026-06-07 the same window also hosts an **Editor** section (grouped with `SectionTitle` headers "Recording" / "Editor") with two default-size `Switch` rows — "Autoplay on open" and "Remember sidebar tab" — that read/write the editor's `localStorage` preference keys directly (helpers in `components/editor/canvas/autoplay-preference.ts` and `components/editor/sidebar/tab-preference.ts`; no IPC — all windows share the same origin's `localStorage`, and the editor picks up tab-persist toggles via the cross-window `storage` event). See `docs/editor-canvas.md` for those features.
 
 | Option | Type | Default | Effect |
 |---|---|---|---|
@@ -164,7 +164,8 @@ Minimum support is macOS 13.0 for screen capture, built-in / default camera capt
 2. Renderer invokes `recorder:openRecordingSettings` → main process opens the Recording Quality `BrowserWindow` (configured via `windowConfigs.recordingSettingsWin`, loaded from `/recording-settings/`). The window is transparent: macOS uses `vibrancy: 'under-window'` with `titleBarStyle: 'hidden'`; Windows / Linux use `transparent: true` (Windows also requests `backgroundMaterial: 'acrylic'`). The page must render **no opaque background** so the native vibrancy / acrylic shows through. The root element sets `data-window="recording-settings"` and stays `bg-transparent`; the `html:has([data-window="recording-settings"])` selector in `app/globals.css` clears the default body background. Mirror this pattern when adding new transparent windows.
 3. The page calls `recorder:getRecordingSettings` on mount to hydrate.
 4. Every form change calls `recorder:setRecordingSettings(patch)`. The main process validates the merged settings, persists them to `<userData>/recording-quality.json`, broadcasts the new state via `recorder:changed`, and **returns the canonical resolved settings** so the form reflects any value coercion immediately.
-5. On `startRecording`, the resolved settings flow into `StartRecordingOptions` (`videoCodec`, `videoQuality`, `container`, `resolutionMode`, `frameRate`). The native side validates once more and writes the final values into the manifest under `outputs[].videoCodec` etc.
+5. The Editor section bypasses this IPC loop entirely: its two switches write `localStorage` synchronously (shared across all windows of the origin), so there is nothing to hydrate from main and no coercion step.
+6. On `startRecording`, the resolved settings flow into `StartRecordingOptions` (`videoCodec`, `videoQuality`, `container`, `resolutionMode`, `frameRate`). The native side validates once more and writes the final values into the manifest under `outputs[].videoCodec` etc.
 
 ## Verification
 
@@ -191,7 +192,12 @@ Expected tags for every recording (the pipeline is single-path SDR):
 |---|---|---|---|
 | 8 | BT.709 | BT.709 | BT.709 |
 
-The recording's `recording.json` manifest, or `<basename>-recording.json` when a basename is supplied, also records every resolved setting under `outputs[]`.
+The recording's `recording.json` manifest, or `<basename>-recording.json` when a basename is supplied, also records every resolved setting under `outputs[]`, and carries a root **`version: 1`** schema field (`RecorderSession.mm` → `manifestDictionary`; optional `version?: number` on the TS `RecordingManifest`). Recordings made before the field shipped have no `version` — readers must treat absence as the original/unversioned shape and must never *require* the field. Bump it when a manifest field changes shape or meaning so readers can branch on the version instead of inferring from heuristics (the editor already had to guess old-vs-new sidecar clock anchors once).
+
+```bash
+# A fresh recording's manifest carries the schema version.
+head -3 ~/Documents/openscreen/<session>/recording.json   # expect "version": 1
+```
 
 For the input path, inspect the sidecars in the recording folder:
 
@@ -234,4 +240,4 @@ ls <session>/cursors/ | wc -l   # 38 system cursors on a normal session
 - `electron/preload.ts` — `getRecordingSettings` / `setRecordingSettings` / `openRecordingSettings` bridge.
 - `types/api.d.ts` — renderer-facing mirror of `RecordingQualitySettings`.
 - `electron/main.ts` + `electron/windowConfigs.ts` — `createRecordingSettingsWindow` + `recordingSettingsWin` window config.
-- `app/recording-settings/page.tsx` — Recording Quality window.
+- `app/recording-settings/page.tsx` — Settings window (Recording quality section + Editor preferences section).

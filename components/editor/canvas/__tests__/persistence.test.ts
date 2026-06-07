@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  fingerprintProjectState,
   projectZoomClipToCanvasClip,
   serializeProjectState,
   serializeVideo,
@@ -672,6 +673,60 @@ describe("zoom clips persistence", () => {
       id: "z",
       start: 1,
       end: 2,
+    })
+  })
+})
+
+describe("fingerprintProjectState zoomClips normalization", () => {
+  const base = serializeProjectState(ARTBOARD, [canvasVideo({ id: "a" })], [])
+
+  it("hashes absent and empty zoomClips identically", () => {
+    expect(
+      fingerprintProjectState({ ...base, zoomClips: undefined })
+    ).toBe(fingerprintProjectState({ ...base, zoomClips: [] }))
+  })
+
+  it("changes when a zoom clip exists", () => {
+    expect(
+      fingerprintProjectState({
+        ...base,
+        zoomClips: [{ id: "z", start: 1, end: 2 }],
+      })
+    ).not.toBe(fingerprintProjectState({ ...base, zoomClips: [] }))
+  })
+
+  it("ignores updatedAtUnixMs", () => {
+    expect(fingerprintProjectState({ ...base, updatedAtUnixMs: 1 })).toBe(
+      fingerprintProjectState({ ...base, updatedAtUnixMs: 2 })
+    )
+  })
+})
+
+// The import UI/pipeline was removed (recordings are the only video source),
+// but old project.json files written while it existed must keep loading.
+describe("parseProjectState imported-video tolerance", () => {
+  it("still parses videos with an imported source", () => {
+    const parsed = roundTrip(
+      serializeProjectState(
+        ARTBOARD,
+        [
+          canvasVideo({
+            id: "legacy-import",
+            source: {
+              kind: "imported",
+              relativePath: "assets/videos/legacy-import/clip.mp4",
+              fileSize: 42,
+            },
+          }),
+        ],
+        []
+      )
+    )
+    expect(parsed).not.toBeNull()
+    expect(parsed!.videos[0].source).toEqual({
+      kind: "imported",
+      relativePath: "assets/videos/legacy-import/clip.mp4",
+      fileSize: 42,
     })
   })
 })

@@ -40,6 +40,9 @@ export interface RunExportOptions {
   settings: ExportSettings
   assetUrlsByVideoId: Record<string, string>
   container: HTMLDivElement
+  // Absolute project folder used to load cursor sidecars; when absent the
+  // stage falls back to deriving the folder from the screen video's URL.
+  projectPath?: string
   onProgress?: (progress: ExportProgress) => void
   onStage?: (stage: ExportStage) => void
   signal?: AbortSignal
@@ -92,6 +95,7 @@ export async function runExport(
     settings,
     assetUrlsByVideoId,
     container,
+    projectPath,
     onProgress,
     onStage,
     signal,
@@ -140,6 +144,7 @@ export async function runExport(
     assetUrlsByVideoId,
     outputSize,
     container,
+    projectPath,
   })
 
   // From here on, `handles` owns an offscreen Pixi application; every exit path

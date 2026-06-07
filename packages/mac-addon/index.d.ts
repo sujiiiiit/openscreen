@@ -310,6 +310,9 @@ export interface RecordingOutputMetadata {
 }
 
 export interface RecordingManifest {
+  // Manifest schema version. Absent in recordings made before the field
+  // shipped (treat as the original/unversioned shape).
+  version?: number
   sessionId: string
   startedAtUnixMs: number
   hostStartMs: number

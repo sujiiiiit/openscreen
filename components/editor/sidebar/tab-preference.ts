@@ -18,11 +18,16 @@ export const SIDEBAR_TAB_STORAGE_KEY = "openscreen:sidebarTab"
 
 /**
  * Whether sidebar tab persistence is enabled at all — toggled from the
- * titlebar switch. Default ON. Stored as its own key (the preference about
- * persisting is itself app-level chrome). Turning it OFF also clears the
- * stored tab entry, so "don't persist" reliably means the defaults
- * (`background`, open) on the next launch rather than a stale snapshot from
- * when the switch was last on.
+ * Settings window (Editor section). Default ON. Stored as its own key (the
+ * preference about persisting is itself app-level chrome). Turning it OFF
+ * also clears the stored tab entry, so "don't persist" reliably means the
+ * defaults (`background`, open) on the next launch rather than a stale
+ * snapshot from when the switch was last on.
+ *
+ * The Settings window is a separate BrowserWindow, so the change event below
+ * only reaches listeners in the window the toggle ran in; cross-window
+ * listeners (the editor's `SidebarTabsProvider`) additionally watch the
+ * `storage` event for this key.
  */
 export const SIDEBAR_TAB_PERSIST_STORAGE_KEY = "openscreen:sidebarTabPersist"
 export const SIDEBAR_TAB_PERSIST_CHANGE_EVENT =

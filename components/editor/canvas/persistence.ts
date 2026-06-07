@@ -41,9 +41,12 @@ export function fingerprintProjectState(
       videos: snapshot.videos,
       timelineClips: snapshot.timelineClips,
       // Included so a zoom-clip edit changes the fingerprint and triggers a
-      // save. `undefined` (empty/omitted) stringifies away, so legacy projects
-      // with no zoom clips keep a stable, no-op fingerprint.
-      zoomClips: snapshot.zoomClips,
+      // save. Normalized to `[]` because "absent" and "present but empty"
+      // are the same state: `serializeProjectState` omits the key when the
+      // array is empty while a hand-rolled or round-tripped file may carry
+      // an explicit `[]` — without normalization an add-then-delete cycle
+      // produced one spurious save.
+      zoomClips: snapshot.zoomClips ?? [],
     })
   } catch {
     return null

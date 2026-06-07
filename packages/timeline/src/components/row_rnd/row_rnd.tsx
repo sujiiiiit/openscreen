@@ -100,14 +100,21 @@ export const RowDnd = React.forwardRef<RowRndApi, RowRndProps>(
         const count = parseInt(deltaX.current / distance + '');
         let curLeft = preLeft + count * distance;
 
-        // Handle snapping
+        // Handle snapping (track minDis so the *nearest* guide wins, not the
+        // last one within range)
         let adsorption = curLeft;
         let minDis = Number.MAX_SAFE_INTEGER;
         adsorptionPositions.forEach((item) => {
           const dis = Math.abs(item - curLeft);
-          if (dis < adsorptionDistance && dis < minDis) adsorption = item;
+          if (dis < adsorptionDistance && dis < minDis) {
+            adsorption = item;
+            minDis = dis;
+          }
           const dis2 = Math.abs(item - (curLeft + preWidth));
-          if (dis2 < adsorptionDistance && dis2 < minDis) adsorption = item - preWidth;
+          if (dis2 < adsorptionDistance && dis2 < minDis) {
+            adsorption = item - preWidth;
+            minDis = dis2;
+          }
         });
 
         if (adsorption !== curLeft) {
@@ -138,6 +145,9 @@ export const RowDnd = React.forwardRef<RowRndApi, RowRndProps>(
             scrollDelta,
           );
           if (ret === false) return;
+          // Adjusted placement: the consumer clamped the move (e.g. flush
+          // against a neighbour) — apply its position instead of the raw one.
+          if (ret && typeof ret === 'object') curLeft = ret.left;
         }
 
         handleUpdateLeft(curLeft, false);
@@ -197,12 +207,15 @@ export const RowDnd = React.forwardRef<RowRndApi, RowRndProps>(
           const count = parseInt(deltaX.current / distance + '');
           let curLeft = preLeft + count * distance;
 
-          // Handle snapping
+          // Handle snapping (track minDis so the *nearest* guide wins)
           let adsorption = curLeft;
           let minDis = Number.MAX_SAFE_INTEGER;
           adsorptionPositions.forEach((item) => {
             const dis = Math.abs(item - curLeft);
-            if (dis < adsorptionDistance && dis < minDis) adsorption = item;
+            if (dis < adsorptionDistance && dis < minDis) {
+              adsorption = item;
+              minDis = dis;
+            }
           });
 
           if (adsorption !== curLeft) {
@@ -221,7 +234,7 @@ export const RowDnd = React.forwardRef<RowRndApi, RowRndProps>(
           // Clamp to bounds
           const tempRight = preLeft + preWidth;
           if (curLeft < bounds.left) curLeft = bounds.left;
-          const curWidth = tempRight - curLeft;
+          let curWidth = tempRight - curLeft;
 
           if (onResize) {
             const ret = onResize('left', {
@@ -231,6 +244,11 @@ export const RowDnd = React.forwardRef<RowRndApi, RowRndProps>(
               width: curWidth,
             });
             if (ret === false) return;
+            // Adjusted placement from the consumer (clamped resize)
+            if (ret && typeof ret === 'object') {
+              curLeft = ret.left;
+              curWidth = ret.width;
+            }
           }
 
           handleUpdateLeft(curLeft, false);
@@ -242,12 +260,15 @@ export const RowDnd = React.forwardRef<RowRndApi, RowRndProps>(
           const count = parseInt(deltaX.current / grid + '');
           let curWidth = preWidth + count * grid;
 
-          // Handle snapping
+          // Handle snapping (track minDis so the *nearest* guide wins)
           let adsorption = preLeft + curWidth;
           let minDis = Number.MAX_SAFE_INTEGER;
           adsorptionPositions.forEach((item) => {
             const dis = Math.abs(item - (preLeft + curWidth));
-            if (dis < adsorptionDistance && dis < minDis) adsorption = item;
+            if (dis < adsorptionDistance && dis < minDis) {
+              adsorption = item;
+              minDis = dis;
+            }
           });
 
           if (adsorption !== preLeft + curWidth) {
@@ -276,6 +297,8 @@ export const RowDnd = React.forwardRef<RowRndApi, RowRndProps>(
               width: curWidth,
             });
             if (ret === false) return;
+            // Adjusted placement from the consumer (clamped resize)
+            if (ret && typeof ret === 'object') curWidth = ret.width;
           }
 
           handleUpdateWidth(curWidth, false);

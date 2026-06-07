@@ -188,10 +188,32 @@ function loadRecordingQualitySettings(): RecordingQualitySettings {
   // Persisted values feed into the same coercion path the IPC handler uses,
   // so any unknown enum value (e.g. an older build that wrote `proRes422`
   // or `hevcWithAlpha`) gets normalized back to defaults on load.
-  return coerceRecordingQualitySettings({
+  const persisted = readPersistedRecordingQuality()
+  const settings = coerceRecordingQualitySettings({
     ...defaultRecordingQualitySettings(),
-    ...readPersistedRecordingQuality(),
+    ...persisted,
   })
+  // Coercion silently rewrites invalid persisted values; surface what it
+  // changed so a corrupt / hand-edited settings file is debuggable instead
+  // of looking like the app "forgot" a choice. Keys absent from the file
+  // are normal defaults and never warned about.
+  const coercedKeys = (
+    Object.keys(persisted) as (keyof RecordingQualitySettings)[]
+  ).filter(
+    (key) => persisted[key] !== undefined && settings[key] !== persisted[key]
+  )
+  if (coercedKeys.length > 0) {
+    console.warn(
+      '[recorder] invalid persisted recording-quality values coerced:',
+      Object.fromEntries(
+        coercedKeys.map((key) => [
+          key,
+          { persisted: persisted[key], coerced: settings[key] },
+        ])
+      )
+    )
+  }
+  return settings
 }
 
 function persistRecordingQualitySettings(value: RecordingQualitySettings): void {

@@ -32,6 +32,7 @@ import type {
 import {
   useEditorCanvasActions,
   useEditorCanvasArtboard,
+  useEditorCanvasCursorData,
   useEditorCanvasMedia,
 } from "@/components/editor/canvas/provider"
 import {
@@ -295,6 +296,7 @@ function CursorStylePicker({
 export function CursorPanel() {
   const { artboard } = useEditorCanvasArtboard()
   const { videos } = useEditorCanvasMedia()
+  const { cursorTrackUnavailable } = useEditorCanvasCursorData()
   const {
     setCursorCustomRenderingEnabled,
     setCursorSetId,
@@ -373,6 +375,12 @@ export function CursorPanel() {
         <p className="text-xs text-muted-foreground select-none">
           Adjust how the cursor appears in your recording.
         </p>
+        {cursorTrackUnavailable && hasScreenVideo && customRenderingEnabled ? (
+          <p className="text-xs text-destructive select-none">
+            Cursor data for this recording could not be loaded — the custom
+            cursor won&apos;t be shown in the preview or the exported video.
+          </p>
+        ) : null}
       </header>
 
       <div className="flex w-full flex-col gap-9">

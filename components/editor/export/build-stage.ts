@@ -94,6 +94,11 @@ export interface BuildStageOptions {
   outputSize: { width: number; height: number }
   /** Off-DOM container the canvas attaches to (hidden via CSS display:none). */
   container: HTMLDivElement
+  /**
+   * Absolute project folder — preferred source for cursor sidecar loading.
+   * When absent, the folder is derived from the screen video's file URL.
+   */
+  projectPath?: string
 }
 
 /**
@@ -117,7 +122,8 @@ export interface BuildStageOptions {
 export async function buildExportStage(
   options: BuildStageOptions
 ): Promise<ExportStageHandles> {
-  const { state, assetUrlsByVideoId, outputSize, container } = options
+  const { state, assetUrlsByVideoId, outputSize, container, projectPath } =
+    options
   const { artboard } = state
 
   const app = await createExportApp(outputSize, container)
@@ -174,7 +180,12 @@ export async function buildExportStage(
 
   // Cursor sits above the video nodes in the content camera (same z-order as the
   // editor preview), so it zooms + clips with the content.
-  const cursor = await buildExportCursor(state, assetUrlsByVideoId, contentCamera)
+  const cursor = await buildExportCursor(
+    state,
+    assetUrlsByVideoId,
+    contentCamera,
+    projectPath
+  )
 
   const applyZoomCamera = (camera: ZoomCamera) => {
     backgroundCamera.scale.set(camera.scale)
@@ -212,7 +223,8 @@ export async function buildExportStage(
 async function buildExportCursor(
   state: ProjectStateV1,
   assetUrlsByVideoId: Record<string, string>,
-  parent: Container
+  parent: Container,
+  projectPath?: string
 ): Promise<ExportCursorHandle | null> {
   if (state.artboard.cursorCustomRenderingEnabled === false) return null
   const screenVideo = state.videos.find(
@@ -221,7 +233,9 @@ async function buildExportCursor(
   if (!screenVideo) return null
   const url = assetUrlsByVideoId[screenVideo.id]
   if (!url) return null
-  const folder = projectFolderFromObjectUrl(url)
+  // Prefer the explicit project folder; URL derivation is the legacy
+  // fallback for payloads that predate `projectPath`.
+  const folder = projectPath ?? projectFolderFromObjectUrl(url)
   if (!folder) return null
 
   const data = await window.api?.projects.getCursorData(folder)

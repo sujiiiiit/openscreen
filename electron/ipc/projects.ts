@@ -3,10 +3,8 @@ import {
   promises as fs,
   readFileSync,
   statSync,
-  writeFileSync,
   type Dirent,
 } from "node:fs"
-import * as os from "node:os"
 import * as path from "node:path"
 import { pathToFileURL } from "node:url"
 import type {
@@ -15,17 +13,15 @@ import type {
   RecordingOutputMetadata,
 } from "@openscreen/mac-addon"
 
+import { writeJsonAtomic } from "./fs-utils"
 import {
   CURRENT_PROJECT_STATE_VERSION,
   parseProjectState,
-  type ImportAssetPayload,
-  type ImportAssetResult,
   type ProjectStateV1,
   type SaveProjectStateResult,
 } from "./project-schema"
 
 const PROJECT_STATE_FILE_NAME = "project.json"
-const IMPORTED_ASSETS_DIR = path.join("assets", "videos")
 
 // IMPORTANT: the exported types below are mirrored in `types/api.d.ts`. Edits
 // here MUST be reflected there.
@@ -88,23 +84,48 @@ export function projectsRoot(): string {
 // restarts, so refreshing the editor window always returns the user to the
 // project they were working on, not "the newest folder by mtime". Cleared
 // implicitly (replaced) by another open / record action.
+//
+// Alongside the absolute `path` we persist the recording's `sessionId` so a
+// project folder that was moved or renamed can be re-found by identity (a
+// scan over the projects root) instead of silently falling back to "newest
+// by mtime" — which may be a different project entirely.
 const ACTIVE_PROJECT_FILE = "active-project.json"
+
+interface ActiveProjectRecord {
+  path: string
+  sessionId: string | null
+}
 
 // `undefined` means we haven't tried to read the on-disk value yet; `null`
 // means we read it and there is no active project. Avoids paying the disk
 // read on every `getLatest` call.
-let activeProjectPath: string | null | undefined = undefined
+let activeProject: ActiveProjectRecord | null | undefined = undefined
 
 function activeProjectFilePath(): string {
   return path.join(app.getPath("userData"), ACTIVE_PROJECT_FILE)
 }
 
-function readPersistedActiveProjectPath(): string | null {
+function readPersistedActiveProject(): ActiveProjectRecord | null {
   try {
     const raw = readFileSync(activeProjectFilePath(), "utf-8")
-    const parsed = JSON.parse(raw) as { path?: unknown }
-    if (parsed && typeof parsed.path === "string" && parsed.path.length > 0) {
-      return parsed.path
+    const parsed = JSON.parse(raw) as {
+      path?: unknown
+      sessionId?: unknown
+    } | null
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof parsed.path === "string" &&
+      parsed.path.length > 0
+    ) {
+      return {
+        path: parsed.path,
+        // Legacy `{ path }` files (pre-sessionId) read as identity-less.
+        sessionId:
+          typeof parsed.sessionId === "string" && parsed.sessionId.length > 0
+            ? parsed.sessionId
+            : null,
+      }
     }
   } catch {
     // Missing or unreadable — first launch or fresh userData.
@@ -112,31 +133,41 @@ function readPersistedActiveProjectPath(): string | null {
   return null
 }
 
-function persistActiveProjectPath(value: string | null): void {
+async function persistActiveProject(
+  value: ActiveProjectRecord | null
+): Promise<void> {
   try {
-    writeFileSync(
-      activeProjectFilePath(),
-      JSON.stringify({ path: value }, null, 2)
-    )
+    await writeJsonAtomic(activeProjectFilePath(), {
+      path: value?.path ?? null,
+      sessionId: value?.sessionId ?? null,
+    })
   } catch (error) {
     // Best-effort. A failed write means the next refresh might fall back to
-    // "latest by mtime", but never loses unsaved editor state.
-    if (process.env.NODE_ENV === "development") {
-      console.warn("[projects] failed to persist active project path", error)
-    }
+    // "latest by mtime", but never loses unsaved editor state. Warn
+    // unconditionally — a silently stale active project is confusing to
+    // debug in production.
+    console.warn("[projects] failed to persist active project", error)
   }
 }
 
-function getActiveProjectPath(): string | null {
-  if (activeProjectPath === undefined) {
-    activeProjectPath = readPersistedActiveProjectPath()
+function getActiveProject(): ActiveProjectRecord | null {
+  if (activeProject === undefined) {
+    activeProject = readPersistedActiveProject()
   }
-  return activeProjectPath
+  return activeProject
 }
 
 function clearActiveProjectPath(): void {
-  activeProjectPath = null
-  persistActiveProjectPath(null)
+  activeProject = null
+  void persistActiveProject(null)
+}
+
+async function readManifestForFolder(
+  folder: string
+): Promise<RecordingManifest | null> {
+  const manifestPath = await findManifestPath(folder)
+  if (!manifestPath) return null
+  return readManifest(manifestPath)
 }
 
 // The single "the user is opening this project" entry point. Anything that
@@ -151,9 +182,67 @@ export async function setActiveProjectFromFolder(
   if (!folder) return null
   const summary = await loadProjectFromFolder(folder)
   if (!summary) return null
-  activeProjectPath = folder
-  persistActiveProjectPath(folder)
+  const manifest = await readManifestForFolder(folder)
+  activeProject = {
+    path: folder,
+    sessionId:
+      typeof manifest?.sessionId === "string" && manifest.sessionId.length > 0
+        ? manifest.sessionId
+        : null,
+  }
+  await persistActiveProject(activeProject)
   return summary
+}
+
+// Identity recovery: the stored active path went stale (folder moved,
+// renamed, or on a re-mounted volume) but we know which recording session it
+// held. Scan the projects root for the folder whose manifest carries that
+// sessionId. Only runs on the stale-path miss, never on the hot path.
+async function findProjectFolderBySessionId(
+  sessionId: string
+): Promise<string | null> {
+  const root = projectsRoot()
+  let entries: Dirent[]
+  try {
+    entries = await fs.readdir(root, { withFileTypes: true })
+  } catch {
+    return null
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const folder = path.join(root, entry.name)
+    const manifest = await readManifestForFolder(folder)
+    if (manifest?.sessionId === sessionId) return folder
+  }
+  return null
+}
+
+// Per-folder write serialization for `project.json`. A single renderer
+// already serializes its own autosaves, but two editor windows on the same
+// project would otherwise interleave between the `fs.access` check and the
+// atomic write — last-writer-wins is unavoidable for whole-file state, but
+// the writes themselves must not race. The chain tail swallows rejections so
+// one failed save never poisons subsequent saves; callers still receive the
+// rejection through the returned promise.
+const saveChainByFolder = new Map<string, Promise<void>>()
+
+function withFolderSaveLock<T>(
+  folder: string,
+  task: () => Promise<T>
+): Promise<T> {
+  const prev = saveChainByFolder.get(folder) ?? Promise.resolve()
+  const run = prev.then(task)
+  const tail = run.then(
+    () => undefined,
+    () => undefined
+  )
+  saveChainByFolder.set(folder, tail)
+  void tail.then(() => {
+    if (saveChainByFolder.get(folder) === tail) {
+      saveChainByFolder.delete(folder)
+    }
+  })
+  return run
 }
 
 async function readProjectState(
@@ -169,89 +258,11 @@ async function readProjectState(
   }
 }
 
-// Crash-safe write: render the JSON next to its target, then `rename` it on
-// top. POSIX `rename` is atomic on the same filesystem, so even an unplugged
-// laptop will see either the previous good `project.json` or the new one —
-// never a half-flushed file. Any failure path unlinks the tmp so we don't
-// accumulate orphan `.tmp` files on a disk that's full or read-only.
-async function writeJsonAtomic(
-  target: string,
-  payload: unknown
-): Promise<void> {
-  const dir = path.dirname(target)
-  await fs.mkdir(dir, { recursive: true })
-  const tmpName = `.${path.basename(target)}.${process.pid}-${Date.now()}-${Math.random()
-    .toString(36)
-    .slice(2)}.tmp`
-  const tmp = path.join(dir, tmpName)
-  const serialized = JSON.stringify(payload, null, 2) + os.EOL
-  try {
-    await fs.writeFile(tmp, serialized, "utf8")
-    await fs.rename(tmp, target)
-  } catch (error) {
-    try {
-      await fs.unlink(tmp)
-    } catch {
-      // best-effort cleanup — tmp may not exist if writeFile threw before
-      // the file descriptor was created.
-    }
-    throw error
-  }
-}
-
-// A name composed solely of dots ('.', '..', '...') still passes the
-// allowlist regex (`.` is allowed), so we reject those explicitly to keep
-// callers from writing to a parent dir or a hidden-cwd ancestor even though
-// `isPathInside` would also reject the resulting path.
-function isAllDots(value: string): boolean {
-  return value.length > 0 && /^\.+$/.test(value)
-}
-
-function sanitizeFileName(input: string): string {
-  // Strip path separators and reserved characters so a hostile filename can't
-  // escape `<folder>/assets/videos/<id>/`. We keep a generous allowlist of
-  // ASCII filename chars and collapse the rest to underscores.
-  const trimmed = input.trim().replace(/[\\/]/g, "_")
-  const cleaned = trimmed.replace(/[^A-Za-z0-9._\- ]+/g, "_").slice(0, 200)
-  if (!cleaned || isAllDots(cleaned)) return "video.mp4"
-  return cleaned
-}
-
-function sanitizeAssetId(input: string): string {
-  const cleaned = input.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 100)
-  if (!cleaned || isAllDots(cleaned)) return "asset"
-  return cleaned
-}
-
 function isPathInside(parent: string, child: string): boolean {
   const relative = path.relative(parent, child)
   return (
     relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative)
   )
-}
-
-async function importVideoAsset(
-  folder: string,
-  payload: ImportAssetPayload
-): Promise<ImportAssetResult> {
-  if (!folder) throw new Error("Project folder is required to import an asset.")
-  const id = sanitizeAssetId(payload.id)
-  const fileName = sanitizeFileName(payload.fileName)
-  const relativeDir = path.join(IMPORTED_ASSETS_DIR, id)
-  const targetDir = path.join(folder, relativeDir)
-  const targetFile = path.join(targetDir, fileName)
-  if (!isPathInside(folder, targetFile)) {
-    throw new Error("Refusing to write asset outside the project folder.")
-  }
-  await fs.mkdir(targetDir, { recursive: true })
-  const buffer = Buffer.from(payload.bytes)
-  await fs.writeFile(targetFile, buffer)
-  const relativePath = path.join(relativeDir, fileName)
-  return {
-    relativePath,
-    fileUrl: pathToFileURL(targetFile).toString(),
-    fileSize: buffer.byteLength,
-  }
 }
 
 async function findManifestPath(folder: string): Promise<string | null> {
@@ -340,26 +351,46 @@ export interface CursorTrackData {
   displayHeight: number
 }
 
+// Every null return path warns with a reason: cursor data silently failing
+// to load is otherwise indistinguishable from "this recording has no input
+// capture", and the symptom (no cursor in preview AND export) is far from
+// the cause.
+function warnCursorUnavailable(folder: string, reason: string): null {
+  console.warn("[projects] cursor data unavailable:", folder, "—", reason)
+  return null
+}
+
 async function loadCursorTrackData(
   folder: string
 ): Promise<CursorTrackData | null> {
   const manifestPath = await findManifestPath(folder)
-  if (!manifestPath) return null
+  if (!manifestPath) return warnCursorUnavailable(folder, "no recording.json")
   const manifest = await readManifest(manifestPath)
-  if (!manifest) return null
+  if (!manifest) {
+    return warnCursorUnavailable(folder, "unreadable recording.json")
+  }
 
   const input = (manifest.outputs ?? []).find(
     (output) => output.source === "input"
   )
+  // No input entry is normal for recordings made before input capture
+  // existed — not worth a warning.
   if (!input) return null
 
   const movesPath = resolveAssetPath(
     folder,
     manifest.files?.mouseMoves ?? input.mouseMovesFilename
   )
-  if (!movesPath) return null
+  if (!movesPath) {
+    return warnCursorUnavailable(folder, "manifest names no mousemoves file")
+  }
   const moves = await readJsonArray<CursorMoveSample>(movesPath)
-  if (!moves || moves.length === 0) return null
+  if (!moves) {
+    return warnCursorUnavailable(folder, "mousemoves sidecar unreadable/corrupt")
+  }
+  if (moves.length === 0) {
+    return warnCursorUnavailable(folder, "mousemoves sidecar is empty")
+  }
   const clicksPath = resolveAssetPath(
     folder,
     manifest.files?.mouseClicks ?? input.mouseClicksFilename
@@ -368,12 +399,36 @@ async function loadCursorTrackData(
     ? ((await readJsonArray<CursorClickSample>(clicksPath)) ?? [])
     : []
 
+  // A zero/garbage display size would silently break all cursor placement
+  // math downstream (positions are normalized against display bounds).
+  const displayWidth = input.displayBoundsPoints?.width ?? 0
+  const displayHeight = input.displayBoundsPoints?.height ?? 0
+  if (
+    !Number.isFinite(displayWidth) ||
+    !Number.isFinite(displayHeight) ||
+    displayWidth <= 0 ||
+    displayHeight <= 0
+  ) {
+    return warnCursorUnavailable(folder, "invalid displayBoundsPoints")
+  }
+
+  const rawClockStart =
+    input.session?.processTimeStartMs ?? manifest.hostStartMs
+  if (rawClockStart !== undefined && !Number.isFinite(rawClockStart)) {
+    // Non-finite clock anchors are coerced to 0 below — visible here so a
+    // corrupt manifest clock doesn't masquerade as an old-format sidecar.
+    console.warn(
+      "[projects] cursor manifest clock anchor is non-finite:",
+      folder
+    )
+  }
+
   return {
     moves,
     clicks,
     processTimeStartMs: resolveCursorProcessTimeStart(manifest, input, moves),
-    displayWidth: input.displayBoundsPoints?.width ?? 0,
-    displayHeight: input.displayBoundsPoints?.height ?? 0,
+    displayWidth,
+    displayHeight,
   }
 }
 
@@ -595,12 +650,26 @@ export function registerProjectsHandlers(
     async (): Promise<ProjectSummary | null> => {
       // Sticky active path wins over "latest recording" so a window refresh
       // always returns to the project the user explicitly opened. If the
-      // folder has been deleted out from under us, clear the slot and fall
-      // through to the legacy "newest by mtime" path.
-      const active = getActiveProjectPath()
+      // path went stale but we know the recording's sessionId, try to
+      // re-find the moved/renamed folder by identity before giving up —
+      // this is recovery of the *same* project the user had open, not a
+      // fallback promotion, so it doesn't violate the "getLatest never
+      // promotes" invariant. Only when identity recovery also fails do we
+      // clear the slot and fall through to the legacy "newest by mtime"
+      // path.
+      const active = getActiveProject()
       if (active) {
-        const loaded = await loadProjectFromFolder(active)
+        const loaded = await loadProjectFromFolder(active.path)
         if (loaded) return loaded
+        if (active.sessionId) {
+          const recovered = await findProjectFolderBySessionId(
+            active.sessionId
+          )
+          if (recovered) {
+            const reopened = await setActiveProjectFromFolder(recovered)
+            if (reopened) return reopened
+          }
+        }
         clearActiveProjectPath()
       }
       const hinted = options.getLatestRecordingDir()
@@ -678,45 +747,34 @@ export function registerProjectsHandlers(
       if (!validated) {
         return { ok: false, reason: "invalid-state" }
       }
-      try {
-        await fs.access(folderPath)
-      } catch {
-        return { ok: false, reason: "folder-missing" }
-      }
-      const stamped: ProjectStateV1 = {
-        ...validated,
-        updatedAtUnixMs: Date.now(),
-      }
-      const target = path.join(folderPath, PROJECT_STATE_FILE_NAME)
-      try {
-        await writeJsonAtomic(target, stamped)
-        return { ok: true, writtenAtUnixMs: stamped.updatedAtUnixMs }
-      } catch (cause) {
-        const reason = cause instanceof Error ? cause.message : "write-failed"
-        return { ok: false, reason }
-      }
+      // Validation is pure and runs outside the lock; the filesystem
+      // sequence (existence check → timestamp → atomic write) is serialized
+      // per folder. The timestamp is stamped inside the lock so write order
+      // on disk matches `updatedAtUnixMs` order.
+      return withFolderSaveLock(folderPath, async () => {
+        try {
+          await fs.access(folderPath)
+        } catch {
+          return { ok: false, reason: "folder-missing" } as const
+        }
+        const stamped: ProjectStateV1 = {
+          ...validated,
+          updatedAtUnixMs: Date.now(),
+        }
+        const target = path.join(folderPath, PROJECT_STATE_FILE_NAME)
+        try {
+          await writeJsonAtomic(target, stamped)
+          return {
+            ok: true,
+            writtenAtUnixMs: stamped.updatedAtUnixMs,
+          } as const
+        } catch (cause) {
+          const reason =
+            cause instanceof Error ? cause.message : "write-failed"
+          return { ok: false, reason } as const
+        }
+      })
     }
   )
 
-  ipcMain.handle(
-    "projects:importAsset",
-    async (
-      _event,
-      folderPath: string,
-      payload: ImportAssetPayload
-    ): Promise<ImportAssetResult> => {
-      if (typeof folderPath !== "string" || !folderPath) {
-        throw new Error("Project folder is required to import an asset.")
-      }
-      if (
-        !payload ||
-        typeof payload.id !== "string" ||
-        typeof payload.fileName !== "string" ||
-        !(payload.bytes instanceof ArrayBuffer)
-      ) {
-        throw new Error("Invalid import-asset payload.")
-      }
-      return importVideoAsset(folderPath, payload)
-    }
-  )
 }

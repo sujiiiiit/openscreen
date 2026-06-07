@@ -605,8 +605,12 @@ export function computeCursorBlur(
   }
 }
 
-/** Derive the project folder from a recording asset's file:// URL. Shared by
- * the editor overlay and the export pipeline to locate the cursor sidecar. */
+/** Derive the project folder from a recording asset's file:// URL.
+ *
+ * FALLBACK ONLY: the editor overlay and the export pipeline both prefer the
+ * explicit project path (`project.path` / `ExportStartPayload.projectPath`)
+ * to locate cursor sidecars; this URL derivation covers payloads and
+ * sessions that predate the explicit path. */
 export function projectFolderFromObjectUrl(objectUrl: string): string | null {
   if (!objectUrl.startsWith("file:")) return null
   try {

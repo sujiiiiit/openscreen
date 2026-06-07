@@ -169,6 +169,7 @@ export default function ExportPage() {
         state: session.payload.state,
         settings: session.settings,
         assetUrlsByVideoId: session.payload.assetUrlsByVideoId,
+        projectPath: session.payload.projectPath,
         container,
         signal: abortController.signal,
         onStage: (next) => setStage(next),

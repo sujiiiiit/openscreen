@@ -45,6 +45,7 @@ export function TitleBarExportButton() {
       state,
       assetUrlsByVideoId,
       outputBaseName: project.name,
+      projectPath: project.path,
     })
   }, [project, isExportable, artboard, videos, timelineClips, zoomClips])
 

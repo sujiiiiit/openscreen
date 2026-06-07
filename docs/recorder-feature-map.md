@@ -84,13 +84,14 @@ Initial recorder output is written under `~/Documents/openscreen/<timestamp>/`.
 | `cursors.json` | Cursor-shape capture enabled, which Electron always does | `CursorTrack` | Cursor catalog metadata. |
 | `cursors/*.png` | Cursor-shape capture enabled | `CursorTrack` | System/custom cursor bitmaps. |
 | `project.json` | After the editor opens and autosaves the recording project | `projects:saveState` / editor provider | Atomic save, not produced by native stop itself. |
-| `assets/videos/<id>/<filename>` | User imports more media in the editor | `projects:importAsset` | Sanitized project-local asset copy. |
+| `assets/videos/<id>/<filename>` | LEGACY — the import pipeline was removed (recordings are the only video source) | ~~`projects:importAsset`~~ (removed) | Existing files keep loading via their persisted `relativePath`; nothing writes here anymore. |
 | `exports/*` | User exports from editor | Export pipeline | Not part of raw recorder output. |
 
 Per-user app data:
 
-- `<userData>/recording-quality.json` stores recording quality settings.
-- `<userData>/active-project.json` stores the sticky project path that refresh/app restart reopens.
+- `<userData>/recording-quality.json` stores recording quality settings (invalid persisted values are coerced to defaults with a `console.warn` listing what changed).
+- `<userData>/active-project.json` stores the sticky project record (`{ path, sessionId }`, written atomically) that refresh/app restart reopens; the sessionId lets a moved/renamed project folder be re-found by identity.
+- `<userData>/window-bounds.json` stores user-positioned window bounds (editor, camera preview, recorder bar, export window), validated against connected displays on restore.
 
 ## Storage Handling
 

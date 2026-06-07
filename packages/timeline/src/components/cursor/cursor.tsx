@@ -123,7 +123,12 @@ export const Cursor: FC<CursorProps> = ({
     >
       <div
         className={cn(
-          'timeline-editor-cursor-body absolute top-8 box-border h-[calc(100%-32px)] cursor-ew-resize border-l border-r border-timeline-cursor',
+          // The line is a 2px background (halved to 1px by the cursor-body
+          // scaleX(0.5) transform), not borders, so it can fade: solid for
+          // the top 65%, then to transparent — the tail of a full-height
+          // seek line shouldn't compete with the clips it crosses. Consumers
+          // theme it via a `from-*` color in the `cursor` slot.
+          'timeline-editor-cursor-body absolute top-0 box-border h-full w-0.5 cursor-ew-resize bg-gradient-to-b from-timeline-cursor from-65% to-transparent',
           slots.cursor,
         )}
       >
@@ -131,7 +136,13 @@ export const Cursor: FC<CursorProps> = ({
             a sharp point at the bottom. The point sits at the path's horizontal
             centre (x = width/2), so the `.timeline-editor-cursor-top` transform
             keeps it pinned exactly on the seek line. `currentColor` lets the
-            consumer theme the fill via the `cursorTop` slot. */}
+            consumer theme the fill via the `cursorTop` slot. The body spans the
+            full timeline height (`top-0 h-full`), so the 1px seek line runs up
+            through the ruler, and the pin head sits at the very top of the
+            line (`top-0`, inside the ruler) — the classic NLE look. The head
+            covers a ruler label only while the playhead is directly over it.
+            Must match the hover ghost cursor's pin offset in
+            timeline-panel.tsx so the two seek indicators align. */}
         <svg
           className={cn('timeline-editor-cursor-top absolute top-0 left-1/2 m-auto text-sky-400', slots.cursorTop)}
           width="12"
@@ -139,8 +150,13 @@ export const Cursor: FC<CursorProps> = ({
           viewBox="0 0 12 22"
           fill="none"
         >
+          {/* Teardrop with a curvature-matched bulb→tail seam: the tail cubics
+              start with the same curvature as the bulb arcs (G2-continuous at
+              x=0/12, y=6.2), tapering gradually to a crisp needle tip at
+              (6,22). Keep in sync with the hover ghost pin in
+              timeline-panel.tsx. */}
           <path
-            d="M6 22C5.5 17 0 8.5 0 6C0 2.6863 2.6863 0 6 0C9.3137 0 12 2.6863 12 6C12 8.5 6.5 17 6 22Z"
+            d="M6 0C9.3 0 12 2.8 12 6.2C12 10.8 6.7 16.5 6 22C5.3 16.5 0 10.8 0 6.2C0 2.8 2.7 0 6 0Z"
             fill="currentColor"
           />
         </svg>

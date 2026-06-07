@@ -21,6 +21,7 @@ import {
   getArtboardPreset,
   getFitViewTransform,
   resolveAutoArtboard,
+  resolveAutoSourceDims,
 } from "@/lib/editor-canvas"
 import { useProject } from "@/components/editor/project/provider"
 import type {
@@ -51,14 +52,14 @@ import {
   serializeProjectState,
 } from "@/components/editor/canvas/persistence"
 import {
+  clampZoomMove,
+  clampZoomResize,
   createZoomClipId,
-  MIN_ZOOM_CLIP_SECONDS,
   normalizeZoomClips,
   placeZoomSpan,
   sanitizeZoomClipPatch,
   withZoomClipDefaults,
   zoomRadialBlurSettingsEqual,
-  zoomSpanOverlaps,
   zoomTransitionSettingsEqual,
 } from "@/lib/zoom-clips"
 import {
@@ -210,11 +211,21 @@ type EditorCanvasContextValue = {
   primaryAudioVideoId: string | null
   viewportSize: CanvasSize
   artboard: EditorArtboard
+  /**
+   * Screen-recording source pixel size the Auto preset resolves against
+   * (null = no screen source this session; Auto falls back to Wide). Lets
+   * chrome preview the Auto size without selecting it.
+   */
+  sourceVideoDims: { width: number; height: number } | null
   viewTransform: ViewTransform
   isPreviewMode: boolean
-  importError: string | null
-  addVideoFile: (file: File) => Promise<void>
   addRemoteVideo: (input: AddRemoteVideoInput) => Promise<string | null>
+  /**
+   * Canvas → provider report: the recorded cursor track failed to load for
+   * the current screen recording (missing/corrupt sidecars). Session-only;
+   * drives the inline notice in the cursor settings panel.
+   */
+  reportCursorTrackUnavailable: (unavailable: boolean) => void
   selectItem: (id: string | null) => void
   updateVideoAppearance: (id: string, patch: CanvasVideoAppearancePatch) => void
   deleteVideo: (id: string) => void
@@ -281,16 +292,12 @@ type EditorCanvasContextValue = {
 
 type EditorCanvasMediaContextValue = Pick<
   EditorCanvasContextValue,
-  | "videos"
-  | "detachedVideos"
-  | "selectedItemId"
-  | "selectedVideo"
-  | "importError"
+  "videos" | "detachedVideos" | "selectedItemId" | "selectedVideo"
 >
 
 type EditorCanvasArtboardContextValue = Pick<
   EditorCanvasContextValue,
-  "artboard"
+  "artboard" | "sourceVideoDims"
 >
 
 type EditorCanvasViewContextValue = Pick<
@@ -317,8 +324,8 @@ type EditorCanvasTimelineContextValue = Pick<
 
 type EditorCanvasActionsContextValue = Pick<
   EditorCanvasContextValue,
-  | "addVideoFile"
   | "addRemoteVideo"
+  | "reportCursorTrackUnavailable"
   | "selectItem"
   | "updateVideoAppearance"
   | "deleteVideo"
@@ -375,6 +382,13 @@ type EditorCanvasSaveStatusContextValue = {
   error: string | null
 }
 
+// Session-only cursor-data health for the current project. Kept in its own
+// slice (not media/artboard) so the notice consumer doesn't re-render the
+// hot canvas paths.
+type EditorCanvasCursorDataContextValue = {
+  cursorTrackUnavailable: boolean
+}
+
 type EditorCanvasHistoryContextValue = {
   canUndo: boolean
   canRedo: boolean
@@ -396,6 +410,8 @@ const EditorCanvasTimelineActionsContext =
   createContext<EditorCanvasTimelineActionsContextValue | null>(null)
 const EditorCanvasSaveStatusContext =
   createContext<EditorCanvasSaveStatusContextValue | null>(null)
+const EditorCanvasCursorDataContext =
+  createContext<EditorCanvasCursorDataContextValue | null>(null)
 const EditorCanvasHistoryContext =
   createContext<EditorCanvasHistoryContextValue | null>(null)
 
@@ -601,6 +617,16 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const [detachedVideos, setDetachedVideos] = useState<CanvasVideoItem[]>([])
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null)
   const [artboard, setArtboard] = useState<EditorArtboard>(DEFAULT_ARTBOARD)
+  // Reactive mirror of `sourceVideoDimsRef` so editor chrome (the artboard
+  // preset dropdown's Auto row) can show what the Auto preset would resolve
+  // to without selecting it. Session-only — re-derived from the project's
+  // screen asset at hydration, never persisted. Must be written wherever the
+  // ref is written so the UI never disagrees with what `setArtboardPreset`
+  // would actually do.
+  const [sourceVideoDims, setSourceVideoDims] = useState<{
+    width: number
+    height: number
+  } | null>(null)
   const [viewportSize, setViewportSizeState] = useState<CanvasSize>(
     DEFAULT_VIEWPORT_SIZE
   )
@@ -609,7 +635,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   )
   // Session-only fullscreen preview flag. Not persisted, not in undo history.
   const [isPreviewMode, setIsPreviewMode] = useState(false)
-  const [importError, setImportError] = useState<string | null>(null)
+  // Session-only: the canvas reported that cursor sidecar data could not be
+  // loaded for the current screen recording. Not persisted.
+  const [cursorTrackUnavailable, setCursorTrackUnavailable] = useState(false)
   const [timelineClips, setTimelineClips] = useState<CanvasTimelineClip[]>([])
   // Manual Zoom-track clips (persisted) + the session-only selected zoom clip.
   // Selection is intentionally NOT persisted (mirrors `selectedItemId`).
@@ -2408,7 +2436,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         artboardRef.current.cursorAlwaysUsePointer
       let nextArtboard: EditorArtboard
       if (id === AUTO_ARTBOARD_PRESET_ID) {
-        const auto = resolveAutoArtboard(sourceVideoDimsRef.current)
+        // Screen-source dims when hydration captured them, else the on-canvas
+        // video's intrinsic size (imported videos) — same chain the preset
+        // dropdown displays, so Auto applies exactly what it advertised.
+        const auto = resolveAutoArtboard(
+          resolveAutoSourceDims(sourceVideoDimsRef.current, videosRef.current)
+        )
         nextArtboard = {
           presetId: AUTO_ARTBOARD_PRESET_ID,
           width: auto.width,
@@ -2631,28 +2664,22 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     (id: string, start: number) => {
       const clip = zoomClipsRef.current.find((c) => c.id === id)
       if (!clip) return
-      const duration = Math.max(MIN_ZOOM_CLIP_SECONDS, clip.end - clip.start)
-      const timelineDuration = Math.max(0, timelineDurationRef.current)
-      const maxStart = Math.max(0, timelineDuration - duration)
-      const nextStart = Math.max(
-        0,
-        Math.min(Number.isFinite(start) ? start : 0, maxStart)
-      )
-      const nextEnd = nextStart + duration
-      if (nextStart === clip.start) return
-      // Safety net only — real-time `onActionMoving` blocks overlap during the
-      // drag, so the committed position should already be clear.
-      const overlaps = zoomSpanOverlaps(
+      // Neighbour-aware clamp + weld (same helper as the panel's real-time
+      // clamp, so dragged preview === committed span). A request that would
+      // overlap slides flush against the neighbour instead of silently
+      // reverting, and drag-end pixel→time float residue welds to exact
+      // adjacency so flush clips abut with a zero-second gap in project.json.
+      const placed = clampZoomMove(
         zoomClipsRef.current,
-        nextStart,
-        nextEnd,
-        id
+        Math.max(0, timelineDurationRef.current),
+        clip,
+        start
       )
-      if (overlaps) return
+      if (placed.start === clip.start && placed.end === clip.end) return
       historyCommitTagRef.current = "zoom-move"
       const next = zoomClipsRef.current
         .map((c) =>
-          c.id === id ? { ...c, start: nextStart, end: nextEnd } : c
+          c.id === id ? { ...c, start: placed.start, end: placed.end } : c
         )
         .sort((a, b) => a.start - b.start)
       commitZoomClipsRef(next)
@@ -2665,32 +2692,21 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     (id: string, start: number, end: number, direction: "left" | "right") => {
       const clip = zoomClipsRef.current.find((c) => c.id === id)
       if (!clip) return
-      const timelineDuration = Math.max(0, timelineDurationRef.current)
-      let nextStart = clip.start
-      let nextEnd = clip.end
-      if (direction === "left") {
-        nextStart = Math.max(
-          0,
-          Math.min(start, clip.end - MIN_ZOOM_CLIP_SECONDS)
-        )
-      } else {
-        nextEnd = Math.min(
-          timelineDuration,
-          Math.max(end, clip.start + MIN_ZOOM_CLIP_SECONDS)
-        )
-      }
-      if (nextStart === clip.start && nextEnd === clip.end) return
-      const overlaps = zoomSpanOverlaps(
+      // Neighbour-aware clamp + weld — see moveZoomClip. The moving edge
+      // stops flush at the neighbour / timeline bound / minimum duration; the
+      // anchored edge is kept exactly as committed.
+      const placed = clampZoomResize(
         zoomClipsRef.current,
-        nextStart,
-        nextEnd,
-        id
+        Math.max(0, timelineDurationRef.current),
+        clip,
+        { start, end },
+        direction
       )
-      if (overlaps) return
+      if (placed.start === clip.start && placed.end === clip.end) return
       historyCommitTagRef.current = "zoom-resize"
       const next = zoomClipsRef.current
         .map((c) =>
-          c.id === id ? { ...c, start: nextStart, end: nextEnd } : c
+          c.id === id ? { ...c, start: placed.start, end: placed.end } : c
         )
         .sort((a, b) => a.start - b.start)
       commitZoomClipsRef(next)
@@ -2744,132 +2760,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     [commitZoomClipsRef]
   )
 
-  const addVideoFile = useCallback(
-    async (file: File) => {
-      if (!file.type.startsWith("video/")) {
-        setImportError("Choose a video file to add it to the canvas.")
-        return
-      }
-
-      const currentProject = projectRef.current
-      if (!currentProject) {
-        setImportError(
-          "Open a project before adding videos so the file can be saved."
-        )
-        return
-      }
-      // Snapshot the project id so we can detect a switch during the async
-      // probe + copy. If the user opens a different project mid-import we
-      // would otherwise attach an asset whose path lives in the old folder
-      // to the new project's videos.
-      const expectedProjectId = currentProject.id
-
-      // Probe metadata from a transient blob URL — the renderer needs a URL
-      // it can hand to a `<video>` element to learn the intrinsic size and
-      // duration before the file is copied into the project folder.
-      const probeUrl = URL.createObjectURL(file)
-      let metadata: VideoMetadata
-      try {
-        metadata = await readVideoMetadata(probeUrl)
-      } catch (error) {
-        URL.revokeObjectURL(probeUrl)
-        setImportError(
-          error instanceof Error
-            ? error.message
-            : "The selected video could not be loaded."
-        )
-        return
-      } finally {
-        URL.revokeObjectURL(probeUrl)
-      }
-
-      if (projectRef.current?.id !== expectedProjectId) {
-        // Project switched during the probe — drop the import silently;
-        // the user has already moved on.
-        return
-      }
-
-      const id = createCanvasId()
-      let importResult
-      try {
-        const bytes = await file.arrayBuffer()
-        importResult = await window.api?.projects.importAsset(
-          currentProject.path,
-          { id, fileName: file.name, bytes }
-        )
-      } catch (error) {
-        setImportError(
-          error instanceof Error
-            ? error.message
-            : "The selected video could not be copied into the project."
-        )
-        return
-      }
-      if (!importResult) {
-        setImportError(
-          "The selected video could not be copied into the project."
-        )
-        return
-      }
-
-      if (projectRef.current?.id !== expectedProjectId) {
-        // Project switched after the copy completed. The asset file is now
-        // orphaned in the previous project's `assets/videos/<id>/` — accept
-        // the leak (we have no IPC to undo the copy yet) and refuse to wire
-        // the new project to a foreign file path.
-        console.warn(
-          "[provider] addVideoFile aborted after project switch; orphaning asset",
-          importResult.relativePath
-        )
-        return
-      }
-
-      const placement = computeVideoPlacement(metadata, artboardRef.current)
-      const item: CanvasVideoItem = {
-        id,
-        fileName: file.name,
-        objectUrl: importResult.fileUrl,
-        fileSize: importResult.fileSize,
-        source: {
-          kind: "imported",
-          relativePath: importResult.relativePath,
-          fileSize: importResult.fileSize,
-        },
-        intrinsicWidth: metadata.width,
-        intrinsicHeight: metadata.height,
-        durationMs: metadata.durationMs,
-        rotation: 0,
-        locked: false,
-        role: "media",
-        ...placement,
-        ...createVideoAppearanceDefaults("media", placement),
-      }
-
-      // Remember the file:// URL so a later undo of a delete can re-attach
-      // it without a new IPC round-trip. The map only ever holds strings.
-      sessionVideoUrlsRef.current.set(id, importResult.fileUrl)
-      // Add is destructive — flush any pending non-destructive edits as
-      // their own history entry first, then tag this mutation so the next
-      // autosave creates a separate entry for the add itself.
-      flushAutosaveNow()
-      historyCommitTagRef.current = "add"
-      setVideos((current) => {
-        const nextVideos = [...current, item]
-        commitVideosRef(nextVideos)
-        return nextVideos
-      })
-      setTimelineClips((current) => {
-        const clip = createTimelineClip(item)
-        const nextClips = [...current, clip]
-        commitTimelineClipsRef(nextClips)
-        return nextClips
-      })
-      selectedItemIdRef.current = id
-      setSelectedItemId(id)
-      setImportError(null)
-    },
-    [commitTimelineClipsRef, commitVideosRef, flushAutosaveNow]
-  )
+  // Reported by the canvas's cursor-track loader; React bails on same-value
+  // sets so repeated reports are free.
+  const reportCursorTrackUnavailable = useCallback((unavailable: boolean) => {
+    setCursorTrackUnavailable(unavailable)
+  }, [])
 
   const addRemoteVideo = useCallback(
     async (input: AddRemoteVideoInput): Promise<string | null> => {
@@ -2943,7 +2838,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         ...createVideoAppearanceDefaults(role, placement),
       }
 
-      // Same treatment as `addVideoFile`: cache the URL so undo/redo can
+      // Cache the URL so undo/redo can
       // re-attach it. Recordings need this too — a freshly recorded project
       // has no `project.json` yet, so `assetUrlsByVideoId` is empty and this
       // session cache is the only thing that survives a restore onto a snapshot
@@ -3435,6 +3330,17 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         getTimelineDurationForClips(restoredClips)
       )
 
+      // Prune measured-fps entries for videos the restored snapshot no
+      // longer contains (on-canvas or detached). Without this, undoing past
+      // an add leaves a stale fps keyed by the removed id; frame-stepping a
+      // later video that reuses the id would read the wrong rate.
+      const snapshotVideoIds = new Set(
+        savedState.videos.map((video) => video.id)
+      )
+      for (const id of Array.from(videoFpsRef.current.keys())) {
+        if (!snapshotVideoIds.has(id)) videoFpsRef.current.delete(id)
+      }
+
       restoringFromHistoryRef.current = true
       historyRef.current = {
         past: history.past,
@@ -3550,16 +3456,16 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       detachedVideos,
       selectedItemId,
       selectedVideo,
-      importError,
     }),
-    [detachedVideos, importError, selectedItemId, selectedVideo, videos]
+    [detachedVideos, selectedItemId, selectedVideo, videos]
   )
 
   const artboardValue = useMemo<EditorCanvasArtboardContextValue>(
     () => ({
       artboard,
+      sourceVideoDims,
     }),
-    [artboard]
+    [artboard, sourceVideoDims]
   )
 
   const saveStatusValue = useMemo<EditorCanvasSaveStatusContextValue>(
@@ -3568,6 +3474,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       error: saveError,
     }),
     [saveStatus, saveError]
+  )
+
+  const cursorDataValue = useMemo<EditorCanvasCursorDataContextValue>(
+    () => ({ cursorTrackUnavailable }),
+    [cursorTrackUnavailable]
   )
 
   const historyValue = useMemo<EditorCanvasHistoryContextValue>(
@@ -3619,8 +3530,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
 
   const actionsValue = useMemo<EditorCanvasActionsContextValue>(
     () => ({
-      addVideoFile,
       addRemoteVideo,
+      reportCursorTrackUnavailable,
       selectItem,
       updateVideoAppearance,
       deleteVideo,
@@ -3645,8 +3556,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       exitPreview,
     }),
     [
-      addVideoFile,
       addRemoteVideo,
+      reportCursorTrackUnavailable,
       selectItem,
       updateVideoAppearance,
       deleteVideo,
@@ -3800,6 +3711,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       isPreviewModeRef.current = false
       selectedItemIdRef.current = null
       selectedZoomClipIdRef.current = null
+      // Source dims belong to the previous project's screen recording — clear
+      // them (ref + mirror) so a project without a screen asset resolves Auto
+      // to the Wide fallback instead of the stale dims.
+      sourceVideoDimsRef.current = null
       setVideos([])
       setDetachedVideos([])
       setTimelineClips([])
@@ -3809,6 +3724,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setIsPreviewMode(false)
       setSelectedItemId(null)
       setSelectedZoomClipId(null)
+      setSourceVideoDims(null)
+      // Cursor-data health belongs to the previous project's recording; the
+      // canvas re-reports for the new one once its track loads (or fails).
+      setCursorTrackUnavailable(false)
     }
 
     hydrationGenerationRef.current += 1
@@ -3875,6 +3794,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           width: screenAsset.width,
           height: screenAsset.height,
         }
+        setSourceVideoDims({
+          width: screenAsset.width,
+          height: screenAsset.height,
+        })
       }
 
       const toCanvasVideo = (video: ProjectStateV1["videos"][number]) =>
@@ -3983,6 +3906,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         width: screenAsset.width,
         height: screenAsset.height,
       }
+      setSourceVideoDims({
+        width: screenAsset.width,
+        height: screenAsset.height,
+      })
 
       // Display captures inherit the source's aspect via the Auto preset so
       // the recording fills the artboard with no letterboxing. Window /
@@ -4248,9 +4175,13 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
             <EditorCanvasArtboardContext.Provider value={artboardValue}>
               <EditorCanvasViewContext.Provider value={viewValue}>
                 <EditorCanvasSaveStatusContext.Provider value={saveStatusValue}>
-                  <EditorCanvasHistoryContext.Provider value={historyValue}>
-                    {children}
-                  </EditorCanvasHistoryContext.Provider>
+                  <EditorCanvasCursorDataContext.Provider
+                    value={cursorDataValue}
+                  >
+                    <EditorCanvasHistoryContext.Provider value={historyValue}>
+                      {children}
+                    </EditorCanvasHistoryContext.Provider>
+                  </EditorCanvasCursorDataContext.Provider>
                 </EditorCanvasSaveStatusContext.Provider>
               </EditorCanvasViewContext.Provider>
             </EditorCanvasArtboardContext.Provider>
@@ -4318,6 +4249,13 @@ export function useEditorCanvasSaveStatus() {
   return useRequiredEditorCanvasContext(
     useContext(EditorCanvasSaveStatusContext),
     "useEditorCanvasSaveStatus"
+  )
+}
+
+export function useEditorCanvasCursorData() {
+  return useRequiredEditorCanvasContext(
+    useContext(EditorCanvasCursorDataContext),
+    "useEditorCanvasCursorData"
   )
 }
 

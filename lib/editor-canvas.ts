@@ -1,5 +1,6 @@
 import type {
   CanvasSize,
+  CanvasVideoItem,
   PixelGridSettings,
   ViewTransform,
 } from "@/types/editor-canvas"
@@ -40,18 +41,18 @@ export const ARTBOARD_PRESETS = [
     height: 1920,
   },
   {
-    id: "portrait",
-    label: "Portrait",
-    ratioLabel: "4:5",
-    width: 1080,
-    height: 1350,
-  },
-  {
     id: "standard",
     label: "Standard",
     ratioLabel: "4:3",
     width: 1440,
     height: 1080,
+  },
+  {
+    id: "portrait",
+    label: "Portrait",
+    ratioLabel: "4:5",
+    width: 1080,
+    height: 1350,
   },
   {
     id: "square",
@@ -76,6 +77,29 @@ export function getArtboardPreset(id: ArtboardPresetId) {
   return (
     ARTBOARD_PRESETS.find((preset) => preset.id === id) ?? ARTBOARD_PRESETS[0]
   )
+}
+
+/**
+ * The source dims the Auto preset resolves against: the screen recording's
+ * pixel size when hydration captured it, else the screen-role canvas video's
+ * intrinsic size, else the first on-canvas video with a known intrinsic size
+ * (imported videos), else null — `resolveAutoArtboard` then falls back to
+ * Wide. Shared by `setArtboardPreset` and the artboard preset dropdown so the
+ * advertised Auto size always matches what selecting Auto actually applies.
+ */
+export function resolveAutoSourceDims(
+  screenSourceDims: { width: number; height: number } | null,
+  videos: readonly CanvasVideoItem[]
+): { width: number; height: number } | null {
+  if (screenSourceDims) return screenSourceDims
+  const hasDims = (video: CanvasVideoItem) =>
+    video.intrinsicWidth > 0 && video.intrinsicHeight > 0
+  const candidate =
+    videos.find((video) => video.role === "screen" && hasDims(video)) ??
+    videos.find(hasDims)
+  return candidate
+    ? { width: candidate.intrinsicWidth, height: candidate.intrinsicHeight }
+    : null
 }
 
 export function resolveAutoArtboard(source: {

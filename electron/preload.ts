@@ -16,8 +16,6 @@ import type {
 } from './ipc/window-picker'
 import type { CursorTrackData, ProjectSummary } from './ipc/projects'
 import type {
-  ImportAssetPayload,
-  ImportAssetResult,
   ProjectStateV1,
   SaveProjectStateResult,
 } from './ipc/project-schema'
@@ -102,11 +100,6 @@ const api = {
       state: ProjectStateV1,
     ): Promise<SaveProjectStateResult> =>
       ipcRenderer.invoke('projects:saveState', folderPath, state),
-    importAsset: (
-      folderPath: string,
-      payload: ImportAssetPayload,
-    ): Promise<ImportAssetResult> =>
-      ipcRenderer.invoke('projects:importAsset', folderPath, payload),
     getCursorData: (folderPath: string): Promise<CursorTrackData | null> =>
       ipcRenderer.invoke('projects:getCursorData', folderPath),
   },

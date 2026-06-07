@@ -23,9 +23,7 @@ import { HistoryControls } from "@/components/editor/history-controls"
 import { SaveStatusIndicator } from "@/components/editor/save-status-indicator"
 import { TitleBarPreviewButton } from "@/components/editor/title-bar-preview-button"
 import { TitleBarExportButton } from "@/components/editor/title-bar-export-button"
-import { TitleBarAutoplaySwitch } from "@/components/editor/title-bar-autoplay-switch"
 import { TitleBarRendererMenu } from "@/components/editor/title-bar-renderer-menu"
-import { TitleBarTabPersistSwitch } from "@/components/editor/title-bar-tab-persist-switch"
 
 export function Titlebar() {
   const [platform, setPlatform] = useState<NodeJS.Platform | null>(null)
@@ -107,8 +105,6 @@ export function Titlebar() {
         className="ml-auto flex items-center gap-2 pr-2 pl-2"
         style={NO_DRAG}
       >
-        <TitleBarAutoplaySwitch />
-        <TitleBarTabPersistSwitch />
         <TitleBarRendererMenu />
         <TitleBarPreviewButton />
         <TitleBarExportButton />

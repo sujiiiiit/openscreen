@@ -28,6 +28,9 @@ export interface ExportStartPayload {
   state: ProjectStateV1
   assetUrlsByVideoId: Record<string, string>
   outputBaseName?: string
+  // Absolute project folder — lets the export stage load cursor sidecars
+  // directly instead of re-deriving the folder from a video file URL.
+  projectPath?: string
 }
 
 interface RegisterExportHandlersOptions {
@@ -79,10 +82,28 @@ function persistExportSettings(value: ExportSettings): void {
 }
 
 function loadExportSettings(): ExportSettings {
-  return coerceExportSettings({
+  const persisted = readPersistedExportSettings()
+  const settings = coerceExportSettings({
     ...defaultExportSettings(),
-    ...readPersistedExportSettings(),
+    ...persisted,
   })
+  // Surface what coercion changed so a corrupt / hand-edited settings file
+  // is debuggable. Keys absent from the file are normal defaults — silent.
+  const coercedKeys = (Object.keys(persisted) as (keyof ExportSettings)[]).filter(
+    (key) => persisted[key] !== undefined && settings[key] !== persisted[key]
+  )
+  if (coercedKeys.length > 0) {
+    console.warn(
+      '[export] invalid persisted export-settings values coerced:',
+      Object.fromEntries(
+        coercedKeys.map((key) => [
+          key,
+          { persisted: persisted[key], coerced: settings[key] },
+        ])
+      )
+    )
+  }
+  return settings
 }
 
 let cachedExportsDir: string | null = null

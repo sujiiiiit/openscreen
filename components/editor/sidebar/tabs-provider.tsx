@@ -13,6 +13,7 @@ import {
   getSidebarTabPersistEnabled,
   readSidebarTabPreference,
   SIDEBAR_TAB_PERSIST_CHANGE_EVENT,
+  SIDEBAR_TAB_PERSIST_STORAGE_KEY,
   writeSidebarTabPreference,
 } from "@/components/editor/sidebar/tab-preference"
 import type { TabId } from "@/types/editor-tabs"
@@ -35,8 +36,9 @@ export function SidebarTabsProvider({
   // SSR has no localStorage, so the first client render must match the
   // prerendered defaults; the stored tab is restored in a one-shot effect.
   const restoredRef = useRef(false)
-  // Mirrors the titlebar "Remember tab" switch (kept in sync via the change
-  // event below). A ref, not state — it only gates writes, never rendering.
+  // Mirrors the Settings window's "Remember sidebar tab" switch (kept in
+  // sync via the change/storage events below). A ref, not state — it only
+  // gates writes, never rendering.
   const persistEnabledRef = useRef(true)
   // Latest state for the change-event listener, which must write the current
   // tab through on re-enable without re-subscribing on every tab change.
@@ -53,7 +55,7 @@ export function SidebarTabsProvider({
   // it runs first with `restoredRef` still false and skips, so the pre-restore
   // defaults never clobber the stored value. Every later change (tab select,
   // collapse/expand, selection-bridge routing) writes through while the
-  // titlebar switch is on.
+  // settings switch is on.
   useEffect(() => {
     if (!restoredRef.current) return
     if (!persistEnabledRef.current) return
@@ -69,10 +71,13 @@ export function SidebarTabsProvider({
     restoredRef.current = true
   }, [restore])
 
-  // Titlebar switch sync. On enable, capture the current state immediately so
+  // Settings switch sync. On enable, capture the current state immediately so
   // a restart right after toggling restores what the user is looking at; on
   // disable, `setSidebarTabPersistEnabled(false)` already cleared the entry —
-  // only the gate ref needs updating.
+  // only the gate ref needs updating. The switch lives in the Settings
+  // window — a separate BrowserWindow on the same origin — so the same-window
+  // custom event alone is not enough: cross-window toggles arrive as a
+  // `storage` event for the persist key instead.
   useEffect(() => {
     const onPersistChange = () => {
       const enabled = getSidebarTabPersistEnabled()
@@ -84,12 +89,20 @@ export function SidebarTabsProvider({
         })
       }
     }
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== null && event.key !== SIDEBAR_TAB_PERSIST_STORAGE_KEY)
+        return
+      onPersistChange()
+    }
     window.addEventListener(SIDEBAR_TAB_PERSIST_CHANGE_EVENT, onPersistChange)
-    return () =>
+    window.addEventListener("storage", onStorage)
+    return () => {
       window.removeEventListener(
         SIDEBAR_TAB_PERSIST_CHANGE_EVENT,
         onPersistChange
       )
+      window.removeEventListener("storage", onStorage)
+    }
   }, [])
 
   return (

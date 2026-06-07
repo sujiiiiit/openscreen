@@ -12,6 +12,7 @@ import type {
   ViewTransform,
 } from "@/types/editor-canvas"
 
+import { useProject } from "@/components/editor/project/provider"
 import {
   useEditorCanvasActions,
   useEditorCanvasArtboard,
@@ -89,8 +90,13 @@ export function PixiCanvas() {
 
   const { artboard } = useEditorCanvasArtboard()
   const { viewTransform, viewportSize, isPreviewMode } = useEditorCanvasView()
-  const { setViewTransform, setViewportSize, selectItem } =
-    useEditorCanvasActions()
+  const {
+    setViewTransform,
+    setViewportSize,
+    selectItem,
+    reportCursorTrackUnavailable,
+  } = useEditorCanvasActions()
+  const { project } = useProject()
   const { videos, selectedItemId } = useEditorCanvasMedia()
   const { primaryAudioVideoId, zoomClips, timelineTime, timelineClips } =
     useEditorCanvasTimeline()
@@ -710,12 +716,20 @@ export function PixiCanvas() {
     ) {
       cursorTrackRef.current = null
       controller?.setTrack(null)
+      // No screen recording / custom rendering off — the notice is
+      // inapplicable, not "unavailable".
+      reportCursorTrackUnavailable(false)
       return
     }
-    const folder = projectFolderFromObjectUrl(screenVideo.objectUrl)
+    // Prefer the project folder (survives any URL-shape changes); fall back
+    // to deriving it from the screen video's file URL for sessions hydrated
+    // before the project record landed.
+    const folder =
+      project?.path ?? projectFolderFromObjectUrl(screenVideo.objectUrl)
     if (!folder) {
       cursorTrackRef.current = null
       controller?.setTrack(null)
+      reportCursorTrackUnavailable(true)
       return
     }
     let cancelled = false
@@ -727,6 +741,9 @@ export function PixiCanvas() {
       cursorTrackRef.current = track
       cursorControllerRef.current?.setTrack(track)
       cursorControllerRef.current?.place(committedTimeRef.current)
+      // Track === null means the sidecar data was missing/corrupt/unusable
+      // (main has already logged the precise reason).
+      reportCursorTrackUnavailable(track === null)
     })
     return () => {
       cancelled = true
@@ -735,6 +752,8 @@ export function PixiCanvas() {
     screenVideo,
     artboard.cursorCustomRenderingEnabled,
     artboard.cursorSmoothingMode,
+    project?.path,
+    reportCursorTrackUnavailable,
   ])
 
   return (

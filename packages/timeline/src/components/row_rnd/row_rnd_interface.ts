@@ -7,11 +7,16 @@ type EventData = {
   width: number;
 };
 
+/** Corrected placement returned by a drag/resize callback. The interaction
+ * applies these pixel values instead of the requested ones — used to clamp a
+ * clip flush against a neighbour instead of rejecting the whole step. */
+export type AdjustedTransform = { left: number; width: number };
+
 export type RndDragStartCallback = () => void;
 export type RndDragCallback = (
   data: EventData,
   scrollDelta?: number,
-) => boolean | void;
+) => boolean | void | AdjustedTransform;
 export type RndDragEndCallback = (data: Pick<EventData, 'left' | 'width'>) => void;
 
 export type Direction = "left" | "right";
@@ -19,7 +24,7 @@ export type RndResizeStartCallback = (dir: Direction) => void;
 export type RndResizeCallback = (
   dir: Direction,
   data: EventData
-) => boolean | void;
+) => boolean | void | AdjustedTransform;
 export type RndResizeEndCallback = (
   dir: Direction,
   data: Pick<EventData, 'left' | 'width'>
