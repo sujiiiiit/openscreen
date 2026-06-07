@@ -165,7 +165,9 @@ export default function ExportPage() {
 
     await api.markPreparing()
     try {
-      const result = await runExport({
+      // runExport streams the encoded file to disk through the export
+      // stream IPC as it encodes; nothing is returned to this renderer.
+      await runExport({
         state: session.payload.state,
         settings: session.settings,
         assetUrlsByVideoId: session.payload.assetUrlsByVideoId,
@@ -184,7 +186,8 @@ export default function ExportPage() {
         setPhase("cancelled")
         return
       }
-      const done = await api.reportDone(result.bytes)
+      // Renames the streamed temp file into its final exports-folder name.
+      const done = await api.reportDone()
       setOutputPath(done.outputPath)
       setPhase("done")
     } catch (error) {

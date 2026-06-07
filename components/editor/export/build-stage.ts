@@ -3,6 +3,7 @@ import {
   Application,
   Container,
   Graphics,
+  ImageSource,
   Rectangle,
   Sprite,
   Texture,
@@ -56,12 +57,17 @@ import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
 import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
 
 /**
- * One exportable video node. The render loop pushes each decoded source canvas
+ * One exportable video node. The render loop pushes each decoded source frame
  * via {@link setFrame}; nodes outside their active clip are hidden so a clip
  * that ended last frame doesn't ghost.
+ *
+ * `setFrame` accepts either a decoded `VideoFrame` (fast path — becomes the
+ * texture's upload resource directly; caller closes it after the stage
+ * renders) or any `CanvasImageSource` (fallback — staged through a reused 2D
+ * canvas).
  */
 export interface ExportVideoNode {
-  setFrame(source: CanvasImageSource): void
+  setFrame(source: CanvasImageSource | VideoFrame): void
   hide(): void
 }
 
@@ -308,19 +314,35 @@ function buildExportVideoNode(
   const intrinsicW = Math.max(1, video.intrinsicWidth)
   const intrinsicH = Math.max(1, video.intrinsicHeight)
 
+  // Staging canvas for the fallback path (rotated / size-mismatched
+  // sources) and the texture's initial placeholder resource. On the
+  // VideoFrame fast path it is never drawn into — the decoded frame itself
+  // becomes the upload resource, so the per-frame canvas→canvas blit and
+  // canvas→GPU upload collapse into one (GPU→GPU for hardware-decoded
+  // sources).
   const reusedCanvas = document.createElement("canvas")
   reusedCanvas.width = intrinsicW
   reusedCanvas.height = intrinsicH
   const reusedCtx = reusedCanvas.getContext("2d")
   if (!reusedCtx) return null
 
-  const base = Texture.from(reusedCanvas)
+  // Explicit ImageSource (not Texture.from's CanvasSource) so the upload
+  // resource can be swapped per frame between the staging canvas and a
+  // decoded VideoFrame. Fixed pixel size = intrinsic dims; every swapped
+  // resource matches, so uploads hit the no-realloc texSubImage2D path.
+  const imageSource = new ImageSource({
+    resource: reusedCanvas,
+    width: intrinsicW,
+    height: intrinsicH,
+    resolution: 1,
+    label: `export-video-${video.id}`,
+  })
   const cover = getVideoCoverCrop(
     { width: intrinsicW, height: intrinsicH },
     { width: video.width, height: video.height }
   )
   const texture = new Texture({
-    source: base.source,
+    source: imageSource,
     dynamic: true,
     frame: new Rectangle(
       cover.cropX,
@@ -359,8 +381,18 @@ function buildExportVideoNode(
 
   const handle: ExportVideoNode = {
     setFrame(source) {
-      reusedCtx.drawImage(source, 0, 0, intrinsicW, intrinsicH)
-      texture.source.update()
+      if (typeof VideoFrame !== "undefined" && source instanceof VideoFrame) {
+        // Fast path: upload straight from the decoded frame. The caller
+        // keeps the frame open until after app.render() (the upload happens
+        // inside render), then closes it.
+        imageSource.resource = source
+      } else {
+        if (imageSource.resource !== reusedCanvas) {
+          imageSource.resource = reusedCanvas
+        }
+        reusedCtx.drawImage(source, 0, 0, intrinsicW, intrinsicH)
+      }
+      imageSource.update()
       sprite.renderable = true
     },
     hide() {

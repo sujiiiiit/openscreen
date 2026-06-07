@@ -132,8 +132,15 @@ const api = {
     markPreparing: (): Promise<void> => ipcRenderer.invoke('export:markPreparing'),
     reportProgress: (progress: ExportProgress): Promise<void> =>
       ipcRenderer.invoke('export:reportProgress', progress),
-    reportDone: (bytes: ArrayBuffer): Promise<{ outputPath: string }> =>
-      ipcRenderer.invoke('export:reportDone', bytes),
+    // Streamed output: the encoder writes container chunks straight to a
+    // temp file via positional writes; reportDone renames it into place.
+    streamBegin: (format: ExportSettings['format']): Promise<void> =>
+      ipcRenderer.invoke('export:streamBegin', format),
+    streamWrite: (position: number, data: Uint8Array): Promise<void> =>
+      ipcRenderer.invoke('export:streamWrite', position, data),
+    streamAbort: (): Promise<void> => ipcRenderer.invoke('export:streamAbort'),
+    reportDone: (): Promise<{ outputPath: string }> =>
+      ipcRenderer.invoke('export:reportDone'),
     reportError: (message: string): Promise<void> =>
       ipcRenderer.invoke('export:reportError', message),
     cancel: (): Promise<void> => ipcRenderer.invoke('export:cancel'),

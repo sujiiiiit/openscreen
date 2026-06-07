@@ -505,7 +505,12 @@ export interface Api {
     setSettings: (patch: Partial<ExportSettings>) => Promise<ExportSettings>
     markPreparing: () => Promise<void>
     reportProgress: (progress: ExportProgress) => Promise<void>
-    reportDone: (bytes: ArrayBuffer) => Promise<{ outputPath: string }>
+    // Streamed output: the encoder writes container chunks straight to a
+    // temp file via positional writes; reportDone renames it into place.
+    streamBegin: (format: ExportFormatId) => Promise<void>
+    streamWrite: (position: number, data: Uint8Array) => Promise<void>
+    streamAbort: () => Promise<void>
+    reportDone: () => Promise<{ outputPath: string }>
     reportError: (message: string) => Promise<void>
     cancel: () => Promise<void>
     revealOutput: (path: string) => Promise<void>

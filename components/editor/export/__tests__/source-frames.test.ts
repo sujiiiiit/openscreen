@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest"
 
-import { planExportFrames } from "@/components/editor/export/source-frames"
+import {
+  canUseDirectVideoFrames,
+  planExportFrames,
+} from "@/components/editor/export/source-frames"
 import type { ProjectTimelineClip } from "@/types/api"
 
 function clip(
@@ -20,6 +23,35 @@ function clip(
     sourceOut: partial.sourceIn + (partial.end - partial.start),
   } as ProjectTimelineClip
 }
+
+describe("canUseDirectVideoFrames", () => {
+  const base = {
+    rotation: 0,
+    codedWidth: 2880,
+    codedHeight: 1800,
+    intrinsicWidth: 2880,
+    intrinsicHeight: 1800,
+  }
+
+  it("allows the fast path for rotation-0 sources whose coded size matches intrinsic", () => {
+    expect(canUseDirectVideoFrames(base)).toBe(true)
+  })
+
+  it("falls back when the track carries rotation metadata (canvas bakes it in)", () => {
+    expect(canUseDirectVideoFrames({ ...base, rotation: 90 })).toBe(false)
+    expect(canUseDirectVideoFrames({ ...base, rotation: 180 })).toBe(false)
+    expect(canUseDirectVideoFrames({ ...base, rotation: 270 })).toBe(false)
+  })
+
+  it("falls back when coded size differs from the intrinsic size the stage was built around", () => {
+    expect(
+      canUseDirectVideoFrames({ ...base, codedWidth: 1920, codedHeight: 1080 })
+    ).toBe(false)
+    // One-axis mismatch (e.g. encoder padding) must also fall back — the
+    // cover-crop frame Rectangle is in intrinsic pixel coordinates.
+    expect(canUseDirectVideoFrames({ ...base, codedHeight: 1802 })).toBe(false)
+  })
+})
 
 describe("planExportFrames", () => {
   it("emits a per-frame active list and a monotonic source timeline per source", () => {

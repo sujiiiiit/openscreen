@@ -1,14 +1,16 @@
 import {
   ALL_FORMATS,
   AudioBufferSource,
-  BufferTarget,
+  canEncodeVideo,
   CanvasSource,
   Input,
   Mp4OutputFormat,
   Output,
+  StreamTarget,
   UrlSource,
   WebMOutputFormat,
   type OutputFormat,
+  type StreamTargetChunk,
 } from "mediabunny"
 
 import type {
@@ -48,10 +50,6 @@ export interface RunExportOptions {
   signal?: AbortSignal
 }
 
-export interface RunExportResult {
-  bytes: ArrayBuffer
-}
-
 const PROGRESS_INTERVAL_MS = 100
 
 // Hard ceiling on how long a single export can be. Above this we refuse to
@@ -77,19 +75,23 @@ const AUDIO_PROBE_SAMPLE_RATE = 48_000
 /**
  * End-to-end export driver. Renders every frame of the timeline through an
  * offscreen PixiJS stage (`app.canvas`), then hands each frame to Mediabunny's
- * WebCodecs-backed encoder. Audio is streamed in a separate windowed
- * mixer (`streamTimelineAudio`) so peak RAM stays bounded regardless of
- * source-file size or timeline duration.
+ * WebCodecs-backed encoder. The encoded container bytes stream straight to a
+ * temp file on disk through the `export:stream*` IPC (16 MiB chunks,
+ * positional writes), so peak renderer memory stays bounded regardless of
+ * output size; `export:reportDone` renames the temp file into place. Audio is
+ * mixed by a windowed streaming mixer (`streamTimelineAudio`) running
+ * CONCURRENTLY with the video frame loop — the muxer interleaves the two
+ * tracks with per-track backpressure — so audio adds no wall-clock time of
+ * its own.
  *
  * The driver is designed to live in any context that has DOM + WebCodecs
- * (currently the export window's renderer thread). The plan is to lift it
- * into a Web Worker once the source-pixel path moves to WebCodecs
- * VideoDecoder (v2). Until then HTMLVideoElement is required for source
- * playback.
+ * (currently the export window's renderer thread). Source pixels come from
+ * WebCodecs decoders (`SourceFrameProvider`), so lifting the whole driver
+ * into a Web Worker is possible if main-thread contention ever shows up —
+ * note WebCodecs codecs already run off-thread, so a worker buys
+ * responsiveness, not encode throughput.
  */
-export async function runExport(
-  options: RunExportOptions
-): Promise<RunExportResult> {
+export async function runExport(options: RunExportOptions): Promise<void> {
   const {
     state,
     settings,
@@ -138,6 +140,12 @@ export async function runExport(
     )
   }
 
+  // Streamed-output bridge — fail fast before any heavy setup.
+  const api = window.api?.export
+  if (!api) {
+    throw new Error("Export bridge is unavailable.")
+  }
+
   onStage?.("preparing")
   const handles = await buildExportStage({
     state,
@@ -148,19 +156,64 @@ export async function runExport(
   })
 
   // From here on, `handles` owns an offscreen Pixi application; every exit path
-  // (success, abort, error) must call handles.dispose().
+  // (success, abort, error) must call handles.dispose(). Once the disk stream
+  // opens, every failure path must also discard the temp file (streamAbort).
+  let streamNeedsAbort = false
   try {
     throwIfAborted(signal)
+
+    const videoCodec = formatToVideoCodec(settings.format)
+    const bitrate = computeScreenContentBitrate(
+      videoCodec,
+      outputSize.width,
+      outputSize.height,
+      settings.fps
+    )
+    // Ask WebCodecs up front whether a hardware encoder exists for this
+    // exact codec/size/bitrate. Chromium's 'no-preference' hardware/software
+    // policy is undocumented and resolution-dependent — a silent software
+    // fallback at 4K is a multi-× slowdown. Probing first means we only pin
+    // 'prefer-hardware' when it is actually supported, and otherwise leave
+    // Chromium's default in place (pinning blindly rejects the config on
+    // machines without a hardware encoder).
+    const hardwareAcceleration = await probePreferHardwareEncode(
+      videoCodec,
+      outputSize,
+      bitrate
+    )
+    throwIfAborted(signal)
+
+    // The encoded container streams straight to a temp file in the exports
+    // folder (positional writes over IPC). BufferTarget would hold the whole
+    // output in renderer memory AND make the MP4 muxer default to fastStart
+    // 'in-memory' (whole-file assembly at finalize); StreamTarget keeps peak
+    // memory at ~chunk size and finalize cheap. `export:reportDone` renames
+    // the temp file into place after this function resolves.
+    await api.streamBegin(settings.format)
+    streamNeedsAbort = true
 
     const format = makeOutputFormat(settings.format)
     const output = new Output({
       format,
-      target: new BufferTarget(),
+      target: new StreamTarget(
+        new WritableStream<StreamTargetChunk>({
+          // Returning the IPC promise propagates disk backpressure up
+          // through Mediabunny's writer into `videoSource.add()`.
+          write: (chunk) => api.streamWrite(chunk.position, chunk.data),
+        }),
+        // Gather output into 16 MiB chunks — one IPC hop per chunk instead
+        // of one per muxer write.
+        { chunked: true }
+      ),
     })
+
+    // Captured from Mediabunny's encoder init via onEncoderConfig and
+    // surfaced in the end-of-export perf log, so a silent software-encode
+    // fallback is diagnosable from the console.
+    let resolvedEncoderConfig: VideoEncoderConfig | null = null
 
     // PixiJS composites the whole scene into one canvas (`app.canvas`), so we
     // hand that straight to Mediabunny — no per-layer composite blit needed.
-    const videoCodec = formatToVideoCodec(settings.format)
     const videoSource = new CanvasSource(handles.app.canvas, {
       codec: videoCodec,
       // Custom screen-recording-tuned bitrate ladder. Mediabunny's QUALITY_*
@@ -170,12 +223,7 @@ export async function runExport(
       // bitrate that looks great on a movie clip turns terminal output into
       // mush. computeScreenContentBitrate roughly doubles Mediabunny's
       // numbers at every quality tier.
-      bitrate: computeScreenContentBitrate(
-        videoCodec,
-        outputSize.width,
-        outputSize.height,
-        settings.fps
-      ),
+      bitrate,
       // Tells the underlying VideoEncoder to optimise rate allocation for
       // text legibility (vs `'motion'` for action video). Browsers that
       // honour the hint pour more bits into edge detail, which is exactly
@@ -188,6 +236,12 @@ export async function runExport(
       // for static text), delta frames only encode motion. More keyframes =
       // sharper static content on average for the same total bits.
       keyFrameInterval: 1,
+      // 'prefer-hardware' iff the probe above confirmed it; undefined
+      // otherwise (Chromium's 'no-preference' default).
+      hardwareAcceleration,
+      onEncoderConfig: (config) => {
+        resolvedEncoderConfig = config
+      },
     })
     output.addVideoTrack(videoSource, { frameRate: settings.fps })
 
@@ -280,11 +334,61 @@ export async function runExport(
       }
 
       await output.start()
+
+      // Audio mixes CONCURRENTLY with the video frame loop — the sources
+      // are independent and the muxer interleaves them with per-track
+      // backpressure — so the old serial "muxing-audio" stage no longer
+      // adds wall-clock time. AbortError must propagate (it IS the cancel
+      // path); any other audio failure degrades to silence after the video
+      // loop, matching the previous serial behavior.
+      let audioWork: Promise<boolean> | null = null
+      let audioCtx: OfflineAudioContext | null = null
+      if (audioSource) {
+        const src = audioSource
+        // OfflineAudioContext is just a host for `createBuffer` calls; we
+        // never actually run it. One frame is enough for the constructor.
+        audioCtx = new OfflineAudioContext(2, 1, AUDIO_PROBE_SAMPLE_RATE)
+        const ctx = audioCtx
+        audioWork = (async () => {
+          try {
+            return await streamTimelineAudio({
+              state,
+              assetUrlsByVideoId,
+              audioSource: src,
+              audioContext: ctx,
+              signal,
+            })
+          } catch (audioError) {
+            if (isAbortError(audioError)) throw audioError
+            // Audio failure must not kill the video export — the caller
+            // muxes a silent track instead.
+            if (process.env.NODE_ENV !== "production") {
+              console.warn(
+                "[export] audio mix failed; muxing silence",
+                audioError
+              )
+            }
+            return false
+          }
+        })()
+        // The video loop may throw first (e.g. cancel) and never await this
+        // promise — pre-attach a noop catch so the rejection isn't unhandled.
+        audioWork.catch(() => {})
+      }
+
       onStage?.("encoding")
 
       let lastProgressAt = 0
       const startWall = performance.now()
       const frameDuration = 1 / settings.fps
+      // Per-leg wall-clock accumulators, logged once at the end — the first
+      // thing to read when an export is slower than expected. decodeWait =
+      // stalls on the source decoders; render = PixiJS scene render +
+      // texture uploads; encodeWait = backpressure from the WebCodecs
+      // encoder/muxer/disk (the encoder itself runs in parallel).
+      let decodeWaitMs = 0
+      let renderMs = 0
+      let encodeWaitMs = 0
       // Catch the "silently black export" case (a source that opens but never
       // decodes a single frame — corrupt or undecodable media) by tracking,
       // per source, whether it ever produced a frame across the whole render.
@@ -305,53 +409,74 @@ export async function runExport(
           sampleZoomCameraAtTime(state.zoomClips ?? [], state.artboard, t)
         )
 
-        // Hide every node first so a clip that ended on the previous frame
-        // doesn't ghost a stale image into this one. setFrame() re-activates
-        // the ones that should render now.
-        for (const node of handles.nodesByVideoId.values()) {
-          node.hide()
-        }
-
-        // Pull the next decoded canvas from each active source's iterator
-        // in parallel. The decoders pre-fetch ~poolSize frames ahead, so
-        // this resolves almost instantly once the pipeline is warm.
-        await Promise.all(
-          active.map(async (entry) => {
-            const provider = providers.get(entry.videoId)
-            if (!provider) return
-            const canvas = await provider.next()
-            if (!canvas) return
-            const node = handles.nodesByVideoId.get(entry.videoId)
-            if (!node) return
-            node.setFrame(canvas)
-            decodedSourceIds.add(entry.videoId)
-          })
-        )
-
-        // Place the recorded cursor using the screen clip's source time straight
-        // from the plan (honors trims/splits). Same CursorSprite the preview uses.
-        const cursor = handles.cursor
-        if (cursor) {
-          const screenEntry = active.find(
-            (entry) => entry.videoId === cursor.screenVideoId
-          )
-          if (screenEntry) {
-            cursor.cursorSprite.render(
-              cursor.track,
-              cursor.video,
-              screenEntry.sourceTimeSec,
-              cursor.options,
-              cursor.motionBlur
-            )
-          } else {
-            cursor.cursorSprite.hide()
+        // Decoded VideoFrames handed out this iteration. They must stay
+        // open until app.render() has uploaded them (the upload happens
+        // inside render), then be closed promptly — open frames pin decoder
+        // memory and can stall WebCodecs.
+        const framesToClose: VideoFrame[] = []
+        try {
+          // Hide every node first so a clip that ended on the previous frame
+          // doesn't ghost a stale image into this one. setFrame() re-activates
+          // the ones that should render now.
+          for (const node of handles.nodesByVideoId.values()) {
+            node.hide()
           }
+
+          // Pull the next decoded frame from each active source's iterator
+          // in parallel. The decoders pre-fetch a few frames ahead, so this
+          // resolves almost instantly once the pipeline is warm.
+          const decodeStart = performance.now()
+          await Promise.all(
+            active.map(async (entry) => {
+              const provider = providers.get(entry.videoId)
+              if (!provider) return
+              const decoded = await provider.next()
+              if (!decoded) return
+              if (
+                typeof VideoFrame !== "undefined" &&
+                decoded instanceof VideoFrame
+              ) {
+                framesToClose.push(decoded)
+              }
+              const node = handles.nodesByVideoId.get(entry.videoId)
+              if (!node) return
+              node.setFrame(decoded)
+              decodedSourceIds.add(entry.videoId)
+            })
+          )
+          decodeWaitMs += performance.now() - decodeStart
+
+          // Place the recorded cursor using the screen clip's source time straight
+          // from the plan (honors trims/splits). Same CursorSprite the preview uses.
+          const cursor = handles.cursor
+          if (cursor) {
+            const screenEntry = active.find(
+              (entry) => entry.videoId === cursor.screenVideoId
+            )
+            if (screenEntry) {
+              cursor.cursorSprite.render(
+                cursor.track,
+                cursor.video,
+                screenEntry.sourceTimeSec,
+                cursor.options,
+                cursor.motionBlur
+              )
+            } else {
+              cursor.cursorSprite.hide()
+            }
+          }
+
+          // Render the whole scene into app.canvas (the export composite Mediabunny reads).
+          const renderStart = performance.now()
+          handles.app.render()
+          renderMs += performance.now() - renderStart
+        } finally {
+          for (const decodedFrame of framesToClose) decodedFrame.close()
         }
 
-        // Render the whole scene into app.canvas (the export composite Mediabunny reads).
-        handles.app.render()
-
+        const encodeStart = performance.now()
         await videoSource.add(t, frameDuration)
+        encodeWaitMs += performance.now() - encodeStart
 
         const now = performance.now()
         if (
@@ -392,37 +517,20 @@ export async function runExport(
       videoSource.close()
 
       if (audioSource) {
+        // Usually the concurrent mixer finished long before the last video
+        // frame; this await is only visible when audio decode is the
+        // bottleneck (or surfaces a deferred AbortError from cancel).
         onStage?.("muxing-audio")
-        // OfflineAudioContext is just a host for `createBuffer` calls; we
-        // never actually run it. One frame is enough for the constructor.
-        const audioCtx = new OfflineAudioContext(2, 1, AUDIO_PROBE_SAMPLE_RATE)
-        let wroteAudio = false
-        try {
-          wroteAudio = await streamTimelineAudio({
-            state,
-            assetUrlsByVideoId,
-            audioSource,
-            audioContext: audioCtx,
-            signal,
-          })
-        } catch (audioError) {
-          // Audio failure must not kill the video export. Fall through:
-          // we'll mux a silent track below so finalize() doesn't reject
-          // for an empty audio track.
-          if (process.env.NODE_ENV !== "production") {
-            console.warn(
-              "[export] audio mix failed; muxing silence",
-              audioError
-            )
-          }
-        }
+        const wroteAudio = audioWork ? await audioWork : false
         if (!wroteAudio) {
           // Edge case: probe said audio exists but mixer produced nothing
           // (every source's audio decode failed, every clip is outside its
           // source's audio range, etc.). Mediabunny requires at least one
           // packet per declared track before finalize; push a single tiny
           // silent buffer so the muxer is happy.
-          const silent = audioCtx.createBuffer(2, 1, AUDIO_PROBE_SAMPLE_RATE)
+          const ctx =
+            audioCtx ?? new OfflineAudioContext(2, 1, AUDIO_PROBE_SAMPLE_RATE)
+          const silent = ctx.createBuffer(2, 1, AUDIO_PROBE_SAMPLE_RATE)
           await audioSource.add(silent)
         }
         audioSource.close()
@@ -430,12 +538,24 @@ export async function runExport(
 
       onStage?.("finalizing")
       await output.finalize()
+      streamNeedsAbort = false
 
-      const buffer = (output.target as BufferTarget).buffer
-      if (!buffer) {
-        throw new Error("Export finalized without producing a buffer.")
+      if (process.env.NODE_ENV !== "production") {
+        const seconds = (performance.now() - startWall) / 1000
+        const providerList = Array.from(providers.values())
+        console.info("[export] perf", {
+          frames: totalFrames,
+          seconds: Math.round(seconds * 10) / 10,
+          fps: Math.round((totalFrames / Math.max(0.001, seconds)) * 10) / 10,
+          decodeWaitMs: Math.round(decodeWaitMs),
+          renderMs: Math.round(renderMs),
+          encodeWaitMs: Math.round(encodeWaitMs),
+          renderer: handles.app.renderer.name,
+          hardwareAcceleration: hardwareAcceleration ?? "no-preference",
+          directVideoFrameSources: `${providerList.filter((p) => p.usesVideoFrames).length}/${providerList.length}`,
+          encoderConfig: resolvedEncoderConfig,
+        })
       }
-      return { bytes: buffer }
     } finally {
       for (const provider of providers.values()) {
         try {
@@ -445,6 +565,18 @@ export async function runExport(
         }
       }
     }
+  } catch (error) {
+    if (streamNeedsAbort) {
+      // Discard the temp output file — nothing references it after a failed
+      // or cancelled export. Best-effort: main also cleans up on cancel,
+      // reportError, and window close.
+      try {
+        await api.streamAbort()
+      } catch {
+        // best-effort
+      }
+    }
+    throw error
   } finally {
     try {
       handles.dispose()
@@ -452,6 +584,35 @@ export async function runExport(
       // best-effort
     }
   }
+}
+
+/**
+ * Returns `'prefer-hardware'` when WebCodecs confirms a hardware encoder
+ * exists for this exact codec/size/bitrate, undefined otherwise. Mediabunny
+ * recommends leaving the hint unset because pinning 'prefer-hardware'
+ * blindly makes the encoder config rejection-prone on machines without one —
+ * probing first gives hardware speed when available with no such risk.
+ */
+async function probePreferHardwareEncode(
+  codec: "avc" | "hevc" | "vp9" | "vp8" | "av1",
+  size: { width: number; height: number },
+  bitrate: number
+): Promise<"prefer-hardware" | undefined> {
+  try {
+    const supported = await canEncodeVideo(codec, {
+      width: size.width,
+      height: size.height,
+      bitrate,
+      hardwareAcceleration: "prefer-hardware",
+    })
+    return supported ? "prefer-hardware" : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError"
 }
 
 function makeOutputFormat(formatId: ExportSettings["format"]): OutputFormat {
@@ -532,7 +693,8 @@ function computeTimelineDuration(clips: ProjectTimelineClip[]): number {
  * Cheap audio-presence probe. Mediabunny doesn't allow removing a track
  * after `output.start()`, so we have to decide whether to call
  * `addAudioTrack` upfront. Opens each unique source URL just long enough
- * to ask `getPrimaryAudioTrack()`, then disposes. Returns true if any
+ * to ask `getPrimaryAudioTrack()`, then disposes — all sources probed in
+ * parallel (each is one lightweight metadata read). Returns true if any
  * source has at least one audio track.
  */
 async function probeHasAnyAudio(options: {
@@ -541,34 +703,37 @@ async function probeHasAnyAudio(options: {
   signal?: AbortSignal
 }): Promise<boolean> {
   const { state, assetUrlsByVideoId, signal } = options
-  const seenUrls = new Set<string>()
+  const uniqueUrls = new Set<string>()
   for (const video of state.videos) {
-    throwIfAborted(signal)
     const url = assetUrlsByVideoId[video.id]
-    if (!url) continue
-    if (seenUrls.has(url)) continue
-    seenUrls.add(url)
-    let input: Input | null = null
-    try {
-      input = new Input({
-        formats: ALL_FORMATS,
-        source: new UrlSource(url),
-      })
-      const track = await input.getPrimaryAudioTrack()
-      if (track) return true
-    } catch {
-      // Source unreadable — fall through, treat as no audio for this URL.
-    } finally {
-      if (input) {
-        try {
-          input.dispose()
-        } catch {
-          // best-effort
+    if (url) uniqueUrls.add(url)
+  }
+  throwIfAborted(signal)
+  const results = await Promise.all(
+    Array.from(uniqueUrls, async (url) => {
+      let input: Input | null = null
+      try {
+        input = new Input({
+          formats: ALL_FORMATS,
+          source: new UrlSource(url),
+        })
+        return (await input.getPrimaryAudioTrack()) !== null
+      } catch {
+        // Source unreadable — treat as no audio for this URL.
+        return false
+      } finally {
+        if (input) {
+          try {
+            input.dispose()
+          } catch {
+            // best-effort
+          }
         }
       }
-    }
-  }
-  return false
+    })
+  )
+  throwIfAborted(signal)
+  return results.some(Boolean)
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

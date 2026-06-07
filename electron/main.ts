@@ -867,7 +867,15 @@ function createExportWindow(): void {
     // Mediabunny's `new VideoFrame(canvas, …)` call. Sandbox /
     // contextIsolation / nodeIntegration stay locked down via
     // SHARED_WEB_PREFERENCES.
-    webPreferences: { ...SHARED_WEB_PREFERENCES, webSecurity: false },
+    webPreferences: {
+      ...SHARED_WEB_PREFERENCES,
+      webSecurity: false,
+      // A minimized/occluded export window must keep encoding at full
+      // speed — Chromium's background timer/compositor throttling would
+      // otherwise slow the frame loop. Paired with the powerSaveBlocker in
+      // electron/ipc/export.ts (App Nap suppression).
+      backgroundThrottling: false,
+    },
   })
   rememberWindowBounds(exportWin, 'export', { persistSize: false })
   if (process.platform === 'darwin') {
