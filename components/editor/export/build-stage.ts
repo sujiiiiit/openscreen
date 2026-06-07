@@ -361,6 +361,10 @@ async function buildExportSurface(
   surface: Container,
   artboard: ProjectStateV1["artboard"]
 ): Promise<void> {
+  // Background master switch (Background tab header): when off, the export
+  // paints no fill/wallpaper and no grain — same as the editor preview. The
+  // stored values stay in project.json untouched.
+  if (artboard.backgroundEnabled === false) return
   const background = artboard.background ?? null
 
   if (background?.type === "color") {

@@ -1,6 +1,6 @@
 "use client"
 
-import { useId, useState } from "react"
+import { useId } from "react"
 
 import { Button } from "@/components/ui/button"
 import { Slider } from "@/components/ui/slider"
@@ -101,9 +101,17 @@ export function BackgroundPanel() {
   const switchId = useId()
   const { artboard } = useEditorCanvasArtboard()
   const { videos } = useEditorCanvasMedia()
-  const { setArtboardBackground, setArtboardGrain, setArtboardPadding } =
-    useEditorCanvasActions()
-  const [enabled, setEnabled] = useState(true)
+  const {
+    setArtboardBackground,
+    setArtboardBackgroundEnabled,
+    setArtboardGrain,
+    setArtboardPadding,
+  } = useEditorCanvasActions()
+  // Master switch — persisted on the artboard (project-level). When off, the
+  // preview/export paint no background and every control below disables; the
+  // stored background/grain/padding values are kept, not reset (mirrors the
+  // Cursor tab's custom-rendering switch).
+  const enabled = artboard.backgroundEnabled
 
   const wallpaperBackground =
     artboard.background?.type === "wallpaper" ? artboard.background : null
@@ -155,7 +163,8 @@ export function BackgroundPanel() {
             id={switchId}
             size="sm"
             checked={enabled}
-            onCheckedChange={setEnabled}
+            onCheckedChange={setArtboardBackgroundEnabled}
+            aria-label="Background rendering"
           />
         </div>
         <p className="text-xs text-muted-foreground select-none">
@@ -163,24 +172,37 @@ export function BackgroundPanel() {
           surface.
         </p>
       </header>
-      <Tabs defaultValue="wallpaper">
-        <TabsList aria-label="Background style" className="justify-start gap-1">
-          {BACKGROUND_TABS.map((tab) => (
-            <TabsTrigger key={tab.value} value={tab.value}>
-              {tab.label}
-            </TabsTrigger>
-          ))}
-        </TabsList>
-        <TabsContents className="min-h-24">
-          <TabsContent value="wallpaper">
-            <WallpaperGrid />
-          </TabsContent>
+      {/* The grids manage their own provider writes, so the off state dims +
+          blocks the whole block instead of threading a disabled prop down. */}
+      <div
+        className={cn(
+          "transition-opacity",
+          !enabled && "pointer-events-none opacity-50 select-none"
+        )}
+        aria-disabled={!enabled}
+      >
+        <Tabs defaultValue="wallpaper">
+          <TabsList
+            aria-label="Background style"
+            className="justify-start gap-1"
+          >
+            {BACKGROUND_TABS.map((tab) => (
+              <TabsTrigger key={tab.value} value={tab.value}>
+                {tab.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          <TabsContents className="min-h-24">
+            <TabsContent value="wallpaper">
+              <WallpaperGrid />
+            </TabsContent>
 
-          <TabsContent value="color" className="pb-6">
-            <ColorGrid />
-          </TabsContent>
-        </TabsContents>
-      </Tabs>
+            <TabsContent value="color" className="pb-6">
+              <ColorGrid />
+            </TabsContent>
+          </TabsContents>
+        </Tabs>
+      </div>
       <div className="flex flex-col gap-9">
         <AdjustmentRow
           label="Padding"
@@ -194,7 +216,7 @@ export function BackgroundPanel() {
           onReset={() => applyPadding(PADDING_DEFAULT)}
           min={0}
           max={PADDING_MAX}
-          disabled={!hasScreenVideo}
+          disabled={!enabled || !hasScreenVideo}
           showValueTooltip
           formatValue={(v) => `${Math.round(v)}px`}
         />
@@ -210,7 +232,7 @@ export function BackgroundPanel() {
           onReset={() => applyBlur(BACKGROUND_BLUR_DEFAULT)}
           min={0}
           max={BACKGROUND_BLUR_MAX}
-          disabled={!isWallpaperActive}
+          disabled={!enabled || !isWallpaperActive}
           showValueTooltip
           formatValue={(v) => `${Math.round(v)}px`}
         />
@@ -222,6 +244,7 @@ export function BackgroundPanel() {
           onReset={() => applyGrain(GRAIN_DEFAULT)}
           min={0}
           max={GRAIN_MAX}
+          disabled={!enabled}
           showValueTooltip
           formatValue={(v) => `${Math.round(v)}`}
         />

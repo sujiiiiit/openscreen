@@ -19,6 +19,11 @@ export type EditorArtboard = CanvasSize & {
   background: ArtboardBackground | null
   grain: number
   padding: number
+  // Master switch for the background treatment (Background tab header). When
+  // false, preview and export skip painting the background fill/wallpaper and
+  // grain; the stored background/grain/padding values stay persisted so they
+  // come back when re-enabled. Mirrors cursorCustomRenderingEnabled.
+  backgroundEnabled: boolean
   // Master switch for the custom cursor overlay. When false, preview and export
   // skip rendering the themed cursor entirely; the other cursor settings stay
   // persisted so they come back when the overlay is re-enabled.

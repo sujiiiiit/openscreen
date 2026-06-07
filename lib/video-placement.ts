@@ -11,7 +11,13 @@ import type { CanvasSize, CanvasVideoItem, EditorArtboard } from "@/types/editor
  */
 
 /** Minimal artboard shape placement depends on — keeps this module pure. */
-export type PlacementArtboard = Pick<EditorArtboard, "width" | "height" | "padding">
+export type PlacementArtboard = Pick<
+  EditorArtboard,
+  "width" | "height" | "padding"
+> &
+  // Optional so loose callers/tests keep working; only an explicit `false`
+  // (Background tab master switch off) changes behavior.
+  Partial<Pick<EditorArtboard, "backgroundEnabled">>
 
 export const ARTBOARD_PADDING_MAX = 500
 
@@ -20,6 +26,10 @@ export const ARTBOARD_PADDING_MAX = 500
 // collapse to zero — leaving a 2px floor keeps `computeVideoPlacement`'s
 // `Math.max(1, ...)` from masking a too-aggressive value.
 export function getPaddingInsetPx(artboard: PlacementArtboard) {
+  // Background master switch off ⇒ the whole background treatment is off,
+  // padding included: every video lays out full-bleed (cover-fit) while the
+  // stored padding value stays untouched for when the switch comes back on.
+  if (artboard.backgroundEnabled === false) return 0
   const raw = Math.max(0, Math.min(ARTBOARD_PADDING_MAX, artboard.padding ?? 0))
   if (raw <= 0) return 0
   const maxInset = Math.max(

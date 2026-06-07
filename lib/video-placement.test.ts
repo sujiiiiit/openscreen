@@ -58,6 +58,16 @@ describe("getPaddingInsetPx", () => {
     // Shorter edge 200 → max inset floor(200 / 2) - 1 = 99.
     expect(getPaddingInsetPx(artboard(1920, 200, 150))).toBe(99)
   })
+
+  test("background switch off ⇒ no inset, regardless of stored padding", () => {
+    expect(
+      getPaddingInsetPx({ ...artboard(1920, 1080, 100), backgroundEnabled: false })
+    ).toBe(0)
+    // Explicit true and absent behave identically (back-compat default).
+    expect(
+      getPaddingInsetPx({ ...artboard(1920, 1080, 100), backgroundEnabled: true })
+    ).toBe(getPaddingInsetPx(artboard(1920, 1080, 100)))
+  })
 })
 
 describe("computeVideoPlacement", () => {
@@ -111,6 +121,16 @@ describe("computeVideoPlacement", () => {
     expect(
       computeVideoPlacement({ width: 0, height: 0 }, artboard(1920, 1080))
     ).toEqual({ x: 0, y: 0, width: 1920, height: 1080 })
+  })
+
+  test("background switch off ⇒ cover-fit even with stored padding", () => {
+    const withPadding = artboard(1920, 1080, 100)
+    expect(
+      computeVideoPlacement(
+        { width: 1920, height: 1080 },
+        { ...withPadding, backgroundEnabled: false }
+      )
+    ).toEqual(computeVideoPlacement({ width: 1920, height: 1080 }, artboard(1920, 1080)))
   })
 })
 

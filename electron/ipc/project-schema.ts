@@ -59,6 +59,10 @@ export interface ProjectArtboard {
   background: ProjectArtboardBackground | null
   padding: number
   grain: number
+  // Master switch for the background treatment (fill/wallpaper + grain).
+  // Optional + defaulted to true for old project.json files so existing
+  // projects keep rendering their background.
+  backgroundEnabled?: boolean
   // Master switch for the custom cursor overlay. Optional + defaulted to true
   // for old project.json files so existing projects keep rendering the cursor.
   cursorCustomRenderingEnabled?: boolean
@@ -328,6 +332,7 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
   const cursorMotionRotationMode =
     value["cursorMotionRotationMode"] === "rotation" ? "rotation" : "side-lean"
 
+  const backgroundEnabled = value["backgroundEnabled"] === false ? false : true
   const cursorCustomRenderingEnabled =
     value["cursorCustomRenderingEnabled"] === false ? false : true
   const cursorSetId = CURSOR_SET_IDS.includes(
@@ -356,6 +361,7 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     background,
     padding: value["padding"] as number,
     grain: value["grain"] as number,
+    backgroundEnabled,
     cursorCustomRenderingEnabled,
     cursorSetId,
     cursorSizeMultiplier,

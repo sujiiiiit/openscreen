@@ -35,6 +35,7 @@ function AdjustmentRow({
   onValueChange,
   onReset,
   resetDisabled,
+  disabled = false,
 }: {
   label: string
   description: string
@@ -46,16 +47,19 @@ function AdjustmentRow({
   onValueChange: (value: number) => void
   onReset: () => void
   resetDisabled?: boolean
+  disabled?: boolean
 }) {
   return (
     <div className="space-y-2">
-      <div className="space-y-1 select-none">
-        <div className="flex items-center justify-between gap-3">
-          <h4 className="text-xs font-semibold">{label}</h4>
-          <span className="text-[11px] font-medium text-muted-foreground tabular-nums">
-            {formatValue(value)}
-          </span>
-        </div>
+      {/* No inline value readout — the slider's value tooltip already shows
+          the current value (matches the Video panel's AdjustmentRow). */}
+      <div
+        className={cn(
+          "space-y-1 transition-opacity select-none",
+          disabled && "opacity-50"
+        )}
+      >
+        <h4 className="text-xs font-semibold">{label}</h4>
         <p className="text-xs text-muted-foreground">{description}</p>
       </div>
       <div className="flex items-center gap-3">
@@ -65,6 +69,7 @@ function AdjustmentRow({
           min={min}
           max={max}
           step={step}
+          disabled={disabled}
           showValueTooltip
           formatValue={formatValue}
           onValueChange={(values) =>
@@ -77,7 +82,7 @@ function AdjustmentRow({
           variant="link"
           size="sm"
           onClick={onReset}
-          disabled={resetDisabled}
+          disabled={disabled || resetDisabled}
         >
           Reset
         </Button>
@@ -133,9 +138,11 @@ function useSceneSnapshotUrl(clipId: string): string | null {
 
 function ZoomFocusPreview({
   clip,
+  disabled = false,
   onFocusChange,
 }: {
   clip: CanvasZoomClip
+  disabled?: boolean
   onFocusChange: (focus: CanvasZoomClip["focus"]) => void
 }) {
   const previewRef = useRef<HTMLDivElement | null>(null)
@@ -162,9 +169,12 @@ function ZoomFocusPreview({
     <div
       ref={previewRef}
       className={cn(
-        "relative w-full overflow-hidden border border-border/60 bg-black shadow-inner",
-        isDragging && "cursor-grabbing"
+        "relative w-full overflow-hidden border border-border/60 bg-black shadow-inner transition-opacity",
+        isDragging && "cursor-grabbing",
+        // Disabled clip: keep showing the snapshot, but block focus edits.
+        disabled && "pointer-events-none opacity-50"
       )}
+      aria-disabled={disabled}
       style={{ aspectRatio: `${artboard.width} / ${artboard.height}` }}
       onPointerDown={(event) => {
         event.currentTarget.setPointerCapture(event.pointerId)
@@ -232,6 +242,9 @@ export function ZoomPanel() {
 
   const scalePct = Math.round(selectedClip.scale * 100)
   const blurPct = Math.round(selectedClip.radialBlur * 100)
+  // Disabled clip: the header switch stays interactive, everything else dims
+  // and locks; the clip's settings are kept so re-enabling restores them.
+  const clipDisabled = !selectedClip.enabled
 
   return (
     <section className="flex w-full flex-col gap-6 pb-6">
@@ -256,11 +269,17 @@ export function ZoomPanel() {
         <div className="space-y-2">
           <ZoomFocusPreview
             clip={selectedClip}
+            disabled={clipDisabled}
             onFocusChange={(focus) =>
               updateZoomClip(selectedClip.id, { focus })
             }
           />
-          <p className="text-xs text-muted-foreground select-none">
+          <p
+            className={cn(
+              "text-xs text-muted-foreground transition-opacity select-none",
+              clipDisabled && "opacity-50"
+            )}
+          >
             Drag the dot to set the point the zoom centers on.
           </p>
         </div>
@@ -283,6 +302,7 @@ export function ZoomPanel() {
             })
           }
           resetDisabled={selectedClip.scale === ZOOM_SCALE_DEFAULT}
+          disabled={clipDisabled}
         />
 
         <AdjustmentRow
@@ -302,6 +322,7 @@ export function ZoomPanel() {
             })
           }
           resetDisabled={selectedClip.radialBlur === ZOOM_RADIAL_BLUR_DEFAULT}
+          disabled={clipDisabled}
         />
 
         <AdjustmentRow
@@ -332,6 +353,7 @@ export function ZoomPanel() {
             selectedClip.transition.durationMs ===
             ZOOM_TRANSITION_DURATION_MS_DEFAULT
           }
+          disabled={clipDisabled}
         />
       </div>
     </section>

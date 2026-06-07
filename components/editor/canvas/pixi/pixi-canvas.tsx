@@ -196,9 +196,11 @@ export function PixiCanvas() {
   const viewTransformRef = useRef(viewTransform)
   const setViewTransformRef = useRef(setViewTransform)
   const setViewportSizeRef = useRef(setViewportSize)
+  // Effective background/grain for the scene: the Background tab's master
+  // switch paints nothing when off (values stay stored in provider state).
   const artboardBgRef = useRef({
-    background: artboard.background,
-    grain: artboard.grain,
+    background: artboard.backgroundEnabled ? artboard.background : null,
+    grain: artboard.backgroundEnabled ? artboard.grain : 0,
   })
   useEffect(() => {
     artboardSizeRef.current = { width: artboard.width, height: artboard.height }
@@ -217,10 +219,10 @@ export function PixiCanvas() {
   }, [setViewportSize])
   useEffect(() => {
     artboardBgRef.current = {
-      background: artboard.background,
-      grain: artboard.grain,
+      background: artboard.backgroundEnabled ? artboard.background : null,
+      grain: artboard.backgroundEnabled ? artboard.grain : 0,
     }
-  }, [artboard.background, artboard.grain])
+  }, [artboard.background, artboard.grain, artboard.backgroundEnabled])
 
   const videosRef = useRef(videos)
   const primaryAudioRef = useRef(primaryAudioVideoId)
@@ -615,8 +617,11 @@ export function PixiCanvas() {
   }, [artboard.width, artboard.height])
 
   useEffect(() => {
-    sceneRef.current?.setBackground(artboard.background, artboard.grain)
-  }, [artboard.background, artboard.grain])
+    sceneRef.current?.setBackground(
+      artboard.backgroundEnabled ? artboard.background : null,
+      artboard.backgroundEnabled ? artboard.grain : 0
+    )
+  }, [artboard.background, artboard.grain, artboard.backgroundEnabled])
 
   useEffect(() => {
     const controller = controllerRef.current

@@ -101,6 +101,7 @@ const DEFAULT_ARTBOARD: EditorArtboard = {
   background: null,
   grain: 0,
   padding: 0,
+  backgroundEnabled: true,
   cursorCustomRenderingEnabled: true,
   cursorSetId: CURSOR_SET_DEFAULT,
   cursorSizeMultiplier: CURSOR_SIZE_DEFAULT,
@@ -220,6 +221,7 @@ type EditorCanvasContextValue = {
   addVideoToCanvas: (id: string) => void
   setArtboardPreset: (id: ArtboardPresetId) => void
   setArtboardBackground: (background: ArtboardBackground | null) => void
+  setArtboardBackgroundEnabled: (enabled: boolean) => void
   setArtboardGrain: (grain: number) => void
   setArtboardPadding: (padding: number) => void
   setCursorCustomRenderingEnabled: (enabled: boolean) => void
@@ -323,6 +325,7 @@ type EditorCanvasActionsContextValue = Pick<
   | "addVideoToCanvas"
   | "setArtboardPreset"
   | "setArtboardBackground"
+  | "setArtboardBackgroundEnabled"
   | "setArtboardGrain"
   | "setArtboardPadding"
   | "setCursorCustomRenderingEnabled"
@@ -2391,6 +2394,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const prevBackground = artboardRef.current.background
       const prevGrain = artboardRef.current.grain
       const prevPadding = artboardRef.current.padding
+      const prevBackgroundEnabled = artboardRef.current.backgroundEnabled
       const prevCursorCustomRenderingEnabled =
         artboardRef.current.cursorCustomRenderingEnabled
       const prevCursorSetId = artboardRef.current.cursorSetId
@@ -2412,6 +2416,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           background: prevBackground,
           grain: prevGrain,
           padding: prevPadding,
+          backgroundEnabled: prevBackgroundEnabled,
           cursorCustomRenderingEnabled: prevCursorCustomRenderingEnabled,
           cursorSetId: prevCursorSetId,
           cursorSizeMultiplier: prevCursorSize,
@@ -2430,6 +2435,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           background: prevBackground,
           grain: prevGrain,
           padding: prevPadding,
+          backgroundEnabled: prevBackgroundEnabled,
           cursorCustomRenderingEnabled: prevCursorCustomRenderingEnabled,
           cursorSetId: prevCursorSetId,
           cursorSizeMultiplier: prevCursorSize,
@@ -3048,6 +3054,36 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     setArtboard(nextArtboard)
   }, [])
 
+  // Master switch for the background treatment (Background tab header). Only
+  // the flag flips — background/grain/padding values stay stored so they come
+  // back when re-enabled (mirrors setCursorCustomRenderingEnabled).
+  const setArtboardBackgroundEnabled = useCallback(
+    (enabled: boolean) => {
+      const current = artboardRef.current
+      const nextEnabled = Boolean(enabled)
+      if (current.backgroundEnabled === nextEnabled) return
+      historyCommitTagRef.current = "background-enabled"
+      const nextArtboard: EditorArtboard = {
+        ...current,
+        backgroundEnabled: nextEnabled,
+      }
+      artboardRef.current = nextArtboard
+      setArtboard(nextArtboard)
+
+      // The switch also turns the padding *effect* on/off (off ⇒ full-bleed
+      // cover-fit): placement is derived, so re-fit every video against the
+      // effective padding (`getPaddingInsetPx` reads `backgroundEnabled`) —
+      // same flow as setArtboardPadding.
+      setVideos((currentVideos) => {
+        const nextVideos = applyAutoLayout(currentVideos, nextArtboard)
+        if (nextVideos === currentVideos) return currentVideos
+        commitVideosRef(nextVideos)
+        return nextVideos
+      })
+    },
+    [commitVideosRef]
+  )
+
   const setCursorSetId = useCallback((setId: CursorSetId) => {
     const current = artboardRef.current
     const clamped = clampCursorSetId(setId)
@@ -3354,6 +3390,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         background: savedState.artboard.background,
         grain: savedState.artboard.grain,
         padding: savedState.artboard.padding,
+        backgroundEnabled: savedState.artboard.backgroundEnabled !== false,
         cursorCustomRenderingEnabled:
           savedState.artboard.cursorCustomRenderingEnabled !== false,
         cursorSetId: clampCursorSetId(savedState.artboard.cursorSetId),
@@ -3590,6 +3627,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       addVideoToCanvas,
       setArtboardPreset,
       setArtboardBackground,
+      setArtboardBackgroundEnabled,
       setArtboardGrain,
       setArtboardPadding,
       setCursorCustomRenderingEnabled,
@@ -3615,6 +3653,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       addVideoToCanvas,
       setArtboardPreset,
       setArtboardBackground,
+      setArtboardBackgroundEnabled,
       setArtboardGrain,
       setArtboardPadding,
       setCursorCustomRenderingEnabled,
@@ -3790,6 +3829,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         background: savedState.artboard.background,
         grain: savedState.artboard.grain,
         padding: savedState.artboard.padding,
+        backgroundEnabled: savedState.artboard.backgroundEnabled !== false,
         cursorCustomRenderingEnabled:
           savedState.artboard.cursorCustomRenderingEnabled !== false,
         cursorSetId: clampCursorSetId(savedState.artboard.cursorSetId),
@@ -3953,6 +3993,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const previousBackground = artboardRef.current.background
       const previousGrain = artboardRef.current.grain
       const previousPadding = artboardRef.current.padding
+      const previousBackgroundEnabled = artboardRef.current.backgroundEnabled
       const previousCursorCustomRenderingEnabled =
         artboardRef.current.cursorCustomRenderingEnabled
       const previousCursorSetId = artboardRef.current.cursorSetId
@@ -3976,6 +4017,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               background: previousBackground,
               grain: previousGrain,
               padding: previousPadding,
+              backgroundEnabled: previousBackgroundEnabled,
               cursorCustomRenderingEnabled:
                 previousCursorCustomRenderingEnabled,
               cursorSetId: previousCursorSetId,
@@ -3996,6 +4038,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               background: previousBackground,
               grain: previousGrain,
               padding: previousPadding,
+              backgroundEnabled: previousBackgroundEnabled,
               cursorCustomRenderingEnabled:
                 previousCursorCustomRenderingEnabled,
               cursorSetId: previousCursorSetId,

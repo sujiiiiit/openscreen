@@ -208,6 +208,10 @@ export interface ProjectArtboard {
   background: ProjectArtboardBackground | null
   padding: number
   grain: number
+  // Master switch for the background treatment (fill/wallpaper + grain).
+  // Optional on disk; validator defaults to true so old projects keep
+  // rendering their background.
+  backgroundEnabled?: boolean
   // Master switch for the custom cursor overlay. Optional on disk; validator
   // defaults to true so old projects keep their current cursor rendering.
   cursorCustomRenderingEnabled?: boolean

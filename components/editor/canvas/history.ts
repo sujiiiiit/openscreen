@@ -19,6 +19,7 @@ export type HistoryCommitTag =
   | "delete"
   | "preset"
   | "background"
+  | "background-enabled"
   | "padding"
   | "grain"
   | "cursor-custom-rendering"

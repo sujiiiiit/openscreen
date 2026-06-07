@@ -17,6 +17,7 @@ const ARTBOARD: EditorArtboard = {
   background: null,
   grain: 0,
   padding: 0,
+  backgroundEnabled: true,
   cursorCustomRenderingEnabled: true,
   cursorSetId: "macos",
   cursorSizeMultiplier: 1,
