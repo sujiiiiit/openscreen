@@ -782,6 +782,69 @@ The outer workspace background color is a theme token:
 
 Use this token for future editor workspace surfaces instead of hardcoding the color.
 
+## Auto-Zoom
+
+Auto-zoom is a **generator of ordinary manual zoom clips**, not a separate camera
+system. After a recording finishes and opens in the editor for the first time, it
+analyses the captured clicks and emits plain `CanvasZoomClip`s onto the manual
+[Zoom track](#timeline-and-playback) — choosing only **when** (`start`/`end` in
+timeline seconds), **where** (artboard-normalized `focus`), and **how much**
+(`scale`). Everything downstream — the whole-composite camera, easing, zoom
+blur, persistence, the Zoom settings panel, and export — is the manual system,
+unchanged. A generated clip is indistinguishable in kind from a hand-made one and
+is fully editable / movable / deletable. Full design notes: `docs/auto-zoom-plan.md`.
+
+**Runs once, automatically.** Detection fires in the provider's slow-path
+hydration (first open of a fresh recording) and never re-runs: the generated
+clips are autosaved into `project.json`, so every later open restores them via
+the fast path. There is no button, no "Regenerate", no confirm, and no
+auto-vs-manual marker (the Zoom track is empty at first open). Deleting the
+generated clips is permanent in v1 (no re-trigger).
+
+Modules and wiring:
+
+- **`lib/auto-zoom/zoom-detect.ts`** — the pure, deterministic detector
+  (`buildAutoZoomClips`). No React/DOM/`Date.now()`/`Math.random()`; identical
+  input yields byte-identical clips (deterministic ids included). It consumes
+  click samples already mapped to artboard-normalized focus + timeline seconds,
+  pairs `down`→`up` (classifying drags by travel), segments by time-gap +
+  focus-jump, resolves a settle-point focus and a calm window (lead-in → hold →
+  tail), then reduces (merge nearby — the biggest anti-pump lever — drop
+  low-weight, enforce the `MIN_ZOOM_CLIP_SECONDS` floor, rate-limit per minute)
+  and emits clips through `withZoomClipDefaults` + `normalizeZoomClips`. Tuning
+  lives in `AUTO_ZOOM_DEFAULTS` (calm & sparse: ~1.8× clicks, 2.0× `iBeam`
+  typing, cap 2.5×, 600 ms ease, ≤4 zooms/min).
+- **`components/editor/canvas/auto-zoom-scene.ts`** — the renderer-side adapter
+  (`autoZoomClicksFromCursorData`). Maps each captured click through the screen
+  clip's source↔timeline inversion (`timelineS = clip.start + (sourceS −
+  sourceIn)`, dropping trimmed-out clicks) and through the **shared**
+  `displayPointToArtboard` cover-crop chain ÷ artboard size (dropping off-video
+  clicks). Reusing the cursor overlay's mapping guarantees a zoom's focus lands
+  on exactly the pixel the cursor sits on.
+- **`components/editor/canvas/cursor-scene.ts`** — `displayPointToArtboard` was
+  extracted here (and `placeCursor` now calls it) so the cursor overlay and
+  auto-zoom share one cover-crop/rotation mapping rather than duplicating it.
+- **`components/editor/canvas/provider.tsx`** — the slow path arms
+  `autoZoomPendingRef`; a one-shot effect (keyed on `videos`/`timelineClips`)
+  fires once the screen video **and** its timeline clip are committed, reads the
+  cursor data via the existing `projects:getCursorData` IPC, runs the detector,
+  and commits the result with `commitZoomClipsRef` + `setZoomClips` under the
+  `zoom-auto-generate` history tag (in `ALWAYS_NEW_ENTRY_TAGS`, so a single
+  `Cmd+Z` removes all generated zooms). Detection failures (missing/corrupt
+  sidecars) emit no clips and never block the editor.
+
+What auto-zoom does **not** touch: the zoom sampler/renderer, the export
+pipeline, the `project.json` schema, the IPC surface, the native recorder, and
+the Zoom UI — all inherited from the manual system. Captured **clicks** were
+already exposed to the renderer (`CursorTrackData.clicks`); typing is inferred
+from the `iBeam` cursor shape. Real keystroke and scroll-wheel signals are
+**deferred** (not captured for the renderer today).
+
+Limitations (v1): whole-display recordings only (window/region would need
+target-rect normalization, like the cursor overlay); the focus is artboard-
+normalized and baked at generation time, so moving/resizing the screen video on
+the artboard afterward drifts the focus — the same property manual clips have.
+
 ## Project Persistence
 
 Editor state is autosaved into the project folder so reloading a project reproduces the exact same arrangement. Recording files are owned by the mac-addon and remain untouched.
@@ -812,7 +875,7 @@ Schema (`electron/ipc/project-schema.ts`):
   - `{ kind: "imported", relativePath, fileSize }` — `relativePath` is always inside `<project>/assets/videos/<id>/`.
   - `onCanvas?: boolean` — **optional, back-compat-safe** (added without a version bump per the "adding optional fields is safe" rule). Missing or `true` means the video is on the canvas; `false` marks a **detached** video (removed from the canvas but kept in the project). `serializeProjectState` writes on-canvas videos first with the field omitted (so legacy `project.json` stays byte-identical and the post-hydration fingerprint is a no-op), then appends detached videos tagged `onCanvas: false`.
 - `timelineClips: ProjectTimelineClip[]` — `start`, `end`, `sourceIn`, `sourceOut` per clip. Only on-canvas videos have a clip; detached videos carry none.
-- `zoomClips?: ProjectZoomClip[]` — **optional, back-compat-safe** (added without a version bump per the "adding optional fields is safe" rule). Manual [Zoom track](#timeline-and-playback) segments (`id`, `start`, `end` in timeline seconds) plus optional persisted camera settings (`enabled`, normalized `focus`, `scale`, `radialBlur`, and `transition`). `focus` persists the full-artboard zoom anchor; the derived visible zoom window is not persisted. The Pixi-style zoom-blur strength, 2% inner radius, and outer radius are baked (`ZOOM_RADIAL_BLUR_SHADER.strength`, `centerSize = 0.02`, renderer `radius = -1`) and the ease `curve` is baked to `smootherstep`; new saves no longer write `radialBlurSettings`. Legacy files that still carry the older full `radialBlurSettings` object (or the older `easePreset`) keep loading because the schema parses them tolerantly, but the renderer ignores those old blur-radius knobs. `serializeProjectState` **omits the key entirely when empty** so legacy `project.json` stays byte-identical, and omits default-valued settings per clip to keep the saved file small. `parseProjectState` parses it **tolerantly** (absent → `undefined`; malformed entries are dropped rather than rejecting the whole project, unlike the required `timelineClips`). The renderer applies `withZoomClipDefaults` and normalizes restored clips into a single non-overlapping lane via `normalizeZoomClips` before state is committed. Included in `fingerprintProjectState` so a zoom edit triggers a save and an undo step. Zoom clips are part of the output video: editor preview and export both sample them by composition time through the shared zoom camera helpers.
+- `zoomClips?: ProjectZoomClip[]` — **optional, back-compat-safe** (added without a version bump per the "adding optional fields is safe" rule). Manual [Zoom track](#timeline-and-playback) segments (`id`, `start`, `end` in timeline seconds) plus optional persisted camera settings (`enabled`, normalized `focus`, `scale`, `radialBlur`, and `transition`). `focus` persists the full-artboard zoom anchor; the derived visible zoom window is not persisted. The Pixi-style zoom-blur strength, 2% inner radius, and outer radius are baked (`ZOOM_RADIAL_BLUR_SHADER.strength`, `centerSize = 0.02`, renderer `radius = -1`) and the ease `curve` is baked to `smootherstep`; new saves no longer write `radialBlurSettings`. Legacy files that still carry the older full `radialBlurSettings` object (or the older `easePreset`) keep loading because the schema parses them tolerantly, but the renderer ignores those old blur-radius knobs. `serializeProjectState` **omits the key entirely when empty** so legacy `project.json` stays byte-identical, and omits default-valued settings per clip to keep the saved file small. `parseProjectState` parses it **tolerantly** (absent → `undefined`; malformed entries are dropped rather than rejecting the whole project, unlike the required `timelineClips`). The renderer applies `withZoomClipDefaults` and normalizes restored clips into a single non-overlapping lane via `normalizeZoomClips` before state is committed. Included in `fingerprintProjectState` so a zoom edit triggers a save and an undo step. Zoom clips are part of the output video: editor preview and export both sample them by composition time through the shared zoom camera helpers. On the first open of a fresh recording these clips may be produced by [Auto-Zoom](#auto-zoom) (one-shot, then persisted like any manual clip); thereafter they are indistinguishable from hand-placed clips, so no `source`/provenance field is stored.
 - `updatedAtUnixMs` — refreshed by main on every successful write.
 
 Not persisted: selection (including the **selected zoom clip** `selectedZoomClipId`, session-only and mutually exclusive with the video `selectedItemId`; reset on project switch), playhead time, timeline zoom/scroll, viewport transform, measured viewport size / renderer resolution (session-only Pixi preview layout), **fullscreen preview state (`isPreviewMode`)** (session-only flag for [Fullscreen Preview Mode](#fullscreen-preview-mode); reset on project switch), the **open-time autoplay flag** (`autoplayPendingRef`, session-only — armed by hydration, consumed by the first video element to load; see [Autoplay on open](#timeline-and-playback); reset on project switch), the zoom-track **hover ghost** (imperative preview, never state), hover preview state, measured per-clip source fps (`videoFpsRef`, re-measured each session for frame-stepping), the **cursor overlay track and click events** (loaded on demand from the recording's input sidecars via `projects:getCursorData` and re-built each session — see [Cursor Overlay](#cursor-overlay)), cursor asset `visualBounds` / `opticalScale` metadata (generated from bundled assets, not project state), the in-memory undo/redo history (`historyRef`), the session-only video URL cache (`sessionVideoUrlsRef`, holding `file://` URLs for both recordings and imports), runtime `objectUrl` strings, the **screen-source pixel size** (`sourceVideoDimsRef` + its reactive `sourceVideoDims` state mirror, session-only — re-derived from the project's screen asset by both hydration paths and reset on project switch; feeds `resolveAutoArtboard` for the Auto preset and the preset dropdown's Auto-row subtext), all `*Ref` runtime state. The view always re-fits the artboard on load.

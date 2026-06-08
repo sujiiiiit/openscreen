@@ -38,6 +38,7 @@ export type HistoryCommitTag =
   | "zoom-resize"
   | "zoom-settings"
   | "zoom-remove"
+  | "zoom-auto-generate"
   | "unknown"
 
 export interface HistoryEntry {
@@ -68,6 +69,9 @@ export const ALWAYS_NEW_ENTRY_TAGS: ReadonlySet<HistoryCommitTag> = new Set([
   "add",
   "delete",
   "preset",
+  // One-shot auto-zoom generation (first open of a recording) is a single
+  // atomic undo step, so Cmd+Z removes all generated zooms in one go.
+  "zoom-auto-generate",
 ])
 
 export function createEmptyHistory(): EditorHistory {

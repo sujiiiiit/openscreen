@@ -277,10 +277,62 @@ export interface CursorReferenceSize {
 
 type CursorSample = NonNullable<ReturnType<typeof sampleCursorAtTime>>
 
-interface MappedCursorPoint {
+export interface MappedCursorPoint {
   x: number
   y: number
   onScreen: boolean
+}
+
+/**
+ * Map a captured display point (display-relative logical points, top-left
+ * origin) into artboard pixels, through the screen video's object-fit:cover
+ * crop and its placement/rotation on the artboard.
+ *
+ * Pure and SHARED: the cursor overlay (`placeCursor`) and the auto-zoom detector
+ * both run points through this exact chain, so a generated zoom's focus lands on
+ * precisely the pixel the cursor sits on. Do not duplicate this math elsewhere.
+ *
+ * `onScreen` is false when the point falls outside the visible (cropped) video
+ * rect — callers hide the cursor, or drop the auto-zoom focus, in that case.
+ *
+ * To turn the result into a `CanvasZoomClip.focus`, divide by the artboard
+ * width/height (focus is artboard-normalized, see `zoom-scene.ts`).
+ */
+export function displayPointToArtboard(
+  displayX: number,
+  displayY: number,
+  video: CursorVideoGeometry,
+  displayWidth: number,
+  displayHeight: number
+): MappedCursorPoint {
+  const iw = video.intrinsicWidth || 1
+  const ih = video.intrinsicHeight || 1
+  const dw = displayWidth || iw
+  const dh = displayHeight || ih
+
+  // Display point → source pixel → cover-crop → node-local → artboard.
+  const crop = getVideoCoverCrop(
+    { width: iw, height: ih },
+    { width: video.width, height: video.height }
+  )
+  const sx = (displayX / dw) * iw
+  const sy = (displayY / dh) * ih
+  const localX = ((sx - crop.cropX) / crop.cropWidth) * video.width
+  const localY = ((sy - crop.cropY) / crop.cropHeight) * video.height
+  const onScreen =
+    localX >= 0 &&
+    localX <= video.width &&
+    localY >= 0 &&
+    localY <= video.height
+
+  const rad = (video.rotation * Math.PI) / 180
+  const cos = Math.cos(rad)
+  const sin = Math.sin(rad)
+  return {
+    x: video.x + localX * cos - localY * sin,
+    y: video.y + localX * sin + localY * cos,
+    onScreen,
+  }
 }
 
 export interface CursorPlacement {
@@ -310,34 +362,13 @@ function mapCursorSampleToArtboard(
   track: SmoothedCursorTrack,
   video: CursorVideoGeometry
 ): MappedCursorPoint {
-  const iw = video.intrinsicWidth || 1
-  const ih = video.intrinsicHeight || 1
-  const dw = track.displayWidth || iw
-  const dh = track.displayHeight || ih
-
-  // Display point → source pixel → cover-crop → node-local → artboard.
-  const crop = getVideoCoverCrop(
-    { width: iw, height: ih },
-    { width: video.width, height: video.height }
+  return displayPointToArtboard(
+    sample.x,
+    sample.y,
+    video,
+    track.displayWidth,
+    track.displayHeight
   )
-  const sx = (sample.x / dw) * iw
-  const sy = (sample.y / dh) * ih
-  const localX = ((sx - crop.cropX) / crop.cropWidth) * video.width
-  const localY = ((sy - crop.cropY) / crop.cropHeight) * video.height
-  const onScreen =
-    localX >= 0 &&
-    localX <= video.width &&
-    localY >= 0 &&
-    localY <= video.height
-
-  const rad = (video.rotation * Math.PI) / 180
-  const cos = Math.cos(rad)
-  const sin = Math.sin(rad)
-  return {
-    x: video.x + localX * cos - localY * sin,
-    y: video.y + localX * sin + localY * cos,
-    onScreen,
-  }
 }
 
 function cursorMotionRotationAt(
