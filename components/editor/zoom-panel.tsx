@@ -9,6 +9,11 @@ import {
 } from "@/components/editor/canvas/provider"
 import { captureSceneSnapshot } from "@/components/editor/canvas/scene-snapshot"
 import { getZoomVisibleWindow } from "@/components/editor/canvas/zoom-scene"
+import {
+  getAutoZoomDetector,
+  setAutoZoomDetector,
+} from "@/lib/auto-zoom/detector-preference"
+import { DETECTOR_IDS, type DetectorId } from "@/lib/auto-zoom/zoom-detect"
 import { Button } from "@/components/ui/button"
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
@@ -223,6 +228,68 @@ function ZoomFocusPreview({
   )
 }
 
+const DETECTOR_LABELS: Record<DetectorId, string> = {
+  "click-anchored": "Clicks",
+  "attention-region": "Attention",
+}
+
+/**
+ * Track-level auto-zoom controls: a manual "Regenerate" that re-runs the
+ * detector (replacing the whole Zoom track) and a dev-only detector selector for
+ * A/B-ing the two prototypes on a real recording. Shown whether or not a clip is
+ * selected, because both actions operate on the track, not a single clip.
+ */
+function AutoZoomControls() {
+  const { regenerateAutoZoom } = useEditorCanvasTimelineActions()
+  const [detector, setDetector] = useState<DetectorId>(() =>
+    getAutoZoomDetector()
+  )
+
+  return (
+    <section className="space-y-3 border-t border-border/60 pt-4">
+      <div className="space-y-1 select-none">
+        <h4 className="text-xs font-semibold">Auto-zoom</h4>
+        <p className="text-xs text-muted-foreground">
+          Re-detect zoom moments from the recording&apos;s cursor &amp; clicks.
+          This replaces the Zoom track.
+        </p>
+      </div>
+      <Button
+        type="button"
+        variant="secondary"
+        size="sm"
+        className="w-full"
+        onClick={() => regenerateAutoZoom()}
+      >
+        Regenerate auto-zoom
+      </Button>
+      {/* Dev affordance: which detector Regenerate (and first-open) runs. */}
+      <div className="flex items-center gap-2">
+        <span className="text-[11px] text-muted-foreground select-none">
+          Detector
+        </span>
+        <div className="flex flex-1 gap-1">
+          {DETECTOR_IDS.map((id) => (
+            <Button
+              key={id}
+              type="button"
+              size="sm"
+              variant={detector === id ? "default" : "outline"}
+              className="h-7 flex-1 px-2 text-[11px]"
+              onClick={() => {
+                setAutoZoomDetector(id)
+                setDetector(id)
+              }}
+            >
+              {DETECTOR_LABELS[id]}
+            </Button>
+          ))}
+        </div>
+      </div>
+    </section>
+  )
+}
+
 export function ZoomPanel() {
   const { zoomClips, selectedZoomClipId } = useEditorCanvasTimeline()
   const { updateZoomClip } = useEditorCanvasTimelineActions()
@@ -231,11 +298,14 @@ export function ZoomPanel() {
 
   if (!selectedClip) {
     return (
-      <section className="space-y-2 pb-6">
-        <h3 className="text-sm font-semibold select-none">Zoom</h3>
-        <p className="text-xs text-muted-foreground select-none">
-          Select a Zoom clip in the timeline.
-        </p>
+      <section className="space-y-4 pb-6">
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold select-none">Zoom</h3>
+          <p className="text-xs text-muted-foreground select-none">
+            Select a Zoom clip in the timeline.
+          </p>
+        </div>
+        <AutoZoomControls />
       </section>
     )
   }
@@ -356,6 +426,8 @@ export function ZoomPanel() {
           disabled={clipDisabled}
         />
       </div>
+
+      <AutoZoomControls />
     </section>
   )
 }

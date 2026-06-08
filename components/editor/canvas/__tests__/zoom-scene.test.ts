@@ -251,3 +251,110 @@ describe("manual zoom camera", () => {
     )
   })
 })
+
+describe("continuous zoom (welding adjacent clips)", () => {
+  const A = withZoomClipDefaults({
+    id: "a",
+    start: 0,
+    end: 4,
+    scale: 2.5,
+    focus: { x: 0.2, y: 0.2 },
+  })
+  const B = withZoomClipDefaults({
+    id: "b",
+    start: 4, // abutting A (gap 0)
+    end: 8,
+    scale: 1.7,
+    focus: { x: 0.8, y: 0.8 },
+  })
+
+  it("transitions directly between the two settled zooms — never dropping to 1x", () => {
+    // At the shared boundary the camera is mid-weld: scale sits between the two
+    // targets (2.5 ↔ 1.7), NOT near 1, and the focus has panned halfway.
+    const mid = sampleZoomCameraAtTime([A, B], artboard, 4)
+    expect(mid.scale).toBeGreaterThan(1.7 - 1e-6)
+    expect(mid.scale).toBeLessThan(2.5 + 1e-6)
+    expect(mid.scale).toBeGreaterThan(1.5) // clearly NOT a return to 1x
+    expect(mid.radialBlurCenterX).toBeCloseTo(0.5, 1) // focus panned A→B
+  })
+
+  it("never dips to identity anywhere across the welded boundary", () => {
+    // Sample densely through A's ease-out, the boundary, and B's ease-in.
+    for (let t = 3.3; t <= 4.7; t += 0.05) {
+      const cam = sampleZoomCameraAtTime([A, B], artboard, t)
+      expect(cam.scale).toBeGreaterThan(1.7 - 1e-6)
+      expect(cam.scale).toBeLessThan(2.5 + 1e-6)
+    }
+  })
+
+  it("still holds each clip's own settled zoom away from the boundary", () => {
+    expect(sampleZoomCameraAtTime([A, B], artboard, 2).scale).toBeCloseTo(2.5)
+    expect(sampleZoomCameraAtTime([A, B], artboard, 6).scale).toBeCloseTo(1.7)
+  })
+
+  it("does NOT weld across a real gap (keeps the wide beat)", () => {
+    const far = withZoomClipDefaults({
+      id: "b",
+      start: 9, // 5 s gap after A — far beyond the weld threshold
+      end: 13,
+      scale: 1.7,
+      focus: { x: 0.8, y: 0.8 },
+    })
+    // Mid-gap returns fully wide, exactly as before.
+    expect(sampleZoomCameraAtTime([A, far], artboard, 6.5)).toEqual(
+      IDENTITY_ZOOM_CAMERA
+    )
+  })
+})
+
+describe("cursor follow (cursor never leaves the zoom window)", () => {
+  const clip = withZoomClipDefaults({
+    id: "z",
+    start: 0,
+    end: 6,
+    scale: 2,
+    focus: { x: 0.5, y: 0.5 },
+  })
+  // The visible normalized window for a given (effective focus, scale).
+  const cursorInWindow = (focusN: number, scale: number, c: number) => {
+    const left = focusN * (1 - 1 / scale)
+    return c >= left - 1e-9 && c <= left + 1 / scale + 1e-9
+  }
+
+  it("does not move the camera while the cursor stays in the dead zone", () => {
+    const base = sampleZoomCameraAtTime([clip], artboard, 3)
+    const followed = sampleZoomCameraAtTime([clip], artboard, 3, {
+      x: 0.5,
+      y: 0.5,
+    })
+    expect(followed.radialBlurCenterX).toBeCloseTo(base.radialBlurCenterX)
+    expect(followed.offsetX).toBeCloseTo(base.offsetX)
+    expect(followed.offsetY).toBeCloseTo(base.offsetY)
+  })
+
+  it("pans to bring a cursor that would be off-window back inside it", () => {
+    const noFollow = sampleZoomCameraAtTime([clip], artboard, 3) // window [0.25,0.75]
+    // At the clip's fixed focus the cursor at 0.95 would be off-window…
+    expect(cursorInWindow(noFollow.radialBlurCenterX, noFollow.scale, 0.95)).toBe(
+      false
+    )
+    const cam = sampleZoomCameraAtTime([clip], artboard, 3, { x: 0.95, y: 0.5 })
+    // …so the camera pans right and the cursor is now inside the window.
+    expect(cam.radialBlurCenterX).toBeGreaterThan(noFollow.radialBlurCenterX)
+    expect(cursorInWindow(cam.radialBlurCenterX, cam.scale, 0.95)).toBe(true)
+  })
+
+  it("keeps the cursor in-bounds across a sweep to the corner", () => {
+    for (let c = 0.5; c <= 1.0001; c += 0.05) {
+      const cam = sampleZoomCameraAtTime([clip], artboard, 3, { x: c, y: c })
+      expect(cursorInWindow(cam.radialBlurCenterX, cam.scale, c)).toBe(true)
+      expect(cursorInWindow(cam.radialBlurCenterY, cam.scale, c)).toBe(true)
+    }
+  })
+
+  it("ignores the cursor on identity frames (not zoomed)", () => {
+    expect(
+      sampleZoomCameraAtTime([clip], artboard, 10, { x: 0.95, y: 0.95 })
+    ).toEqual(IDENTITY_ZOOM_CAMERA)
+  })
+})

@@ -666,7 +666,12 @@ export function PixiCanvas() {
       const camera = sampleZoomCameraAtTime(
         zoomClipsRef.current,
         artboardSizeRef.current,
-        time
+        time,
+        // Follow the recorded cursor so it never leaves the zoomed window.
+        cursorControllerRef.current?.getArtboardFocusAt(
+          time,
+          artboardSizeRef.current
+        ) ?? null
       )
       sceneRef.current?.applyZoomCamera(camera)
       cursorControllerRef.current?.place(time)
@@ -682,11 +687,16 @@ export function PixiCanvas() {
   }, [subscribeTimelineTicks, subscribeHoverTime])
 
   useEffect(() => {
+    const artboardSize = { width: artboard.width, height: artboard.height }
     sceneRef.current?.applyZoomCamera(
       sampleZoomCameraAtTime(
         zoomClips,
-        { width: artboard.width, height: artboard.height },
-        timelineTime
+        artboardSize,
+        timelineTime,
+        cursorControllerRef.current?.getArtboardFocusAt(
+          timelineTime,
+          artboardSize
+        ) ?? null
       )
     )
     cursorControllerRef.current?.place(timelineTime)

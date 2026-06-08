@@ -21,6 +21,7 @@ import type {
 } from "@/types/api"
 import { exportResolutionPixels } from "@/lib/editor-project/export-settings"
 import { sampleZoomCameraAtTime } from "@/components/editor/canvas/zoom-scene"
+import { sampleCursorArtboardFocus } from "@/components/editor/canvas/cursor-scene"
 import { formatToVideoCodec } from "./codec-probe"
 import { buildExportStage } from "./build-stage"
 import { streamTimelineAudio } from "./decode-audio"
@@ -405,8 +406,30 @@ export async function runExport(options: RunExportOptions): Promise<void> {
 
         const t = frame * frameDuration
         const active = plan.framePlan[frame]
+        // Cursor follow: the recorded cursor's artboard focus this frame (if
+        // any), so the zoom camera keeps it inside the window — the SAME mapping
+        // the cursor sprite renders with, so preview and export follow identically.
+        let cursorFocus: { x: number; y: number } | null = null
+        if (handles.cursor) {
+          const screenEntry = active.find(
+            (entry) => entry.videoId === handles.cursor?.screenVideoId
+          )
+          if (screenEntry) {
+            cursorFocus = sampleCursorArtboardFocus(
+              handles.cursor.track,
+              handles.cursor.video,
+              screenEntry.sourceTimeSec,
+              state.artboard
+            )
+          }
+        }
         handles.applyZoomCamera(
-          sampleZoomCameraAtTime(state.zoomClips ?? [], state.artboard, t)
+          sampleZoomCameraAtTime(
+            state.zoomClips ?? [],
+            state.artboard,
+            t,
+            cursorFocus
+          )
         )
 
         // Decoded VideoFrames handed out this iteration. They must stay

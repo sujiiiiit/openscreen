@@ -88,8 +88,9 @@ import {
   clampCursorSmoothingMode,
   projectFolderFromObjectUrl,
 } from "@/components/editor/canvas/cursor-scene"
-import { autoZoomClicksFromCursorData } from "@/components/editor/canvas/auto-zoom-scene"
-import { buildAutoZoomClips } from "@/lib/auto-zoom/zoom-detect"
+import { autoZoomTrackFromCursorData } from "@/components/editor/canvas/auto-zoom-scene"
+import { buildAutoZoomClipsFromTrack } from "@/lib/auto-zoom/zoom-detect"
+import { getAutoZoomDetector } from "@/lib/auto-zoom/detector-preference"
 import {
   ARTBOARD_PADDING_MAX,
   applyAutoLayout,
@@ -288,6 +289,8 @@ type EditorCanvasContextValue = {
   updateZoomClip: (id: string, patch: CanvasZoomClipPatch) => void
   removeZoomClip: (id: string) => void
   selectZoomClip: (id: string | null) => void
+  /** Re-run the auto-zoom detector on demand, replacing the Zoom track. */
+  regenerateAutoZoom: () => void
   subscribeTimelineTicks: (subscriber: TimelineTickSubscriber) => () => void
   stepTimelineFrame: (direction: number) => void
   registerTimelineVideoFps: (id: string, fps: number) => void
@@ -375,6 +378,7 @@ type EditorCanvasTimelineActionsContextValue = Pick<
   | "updateZoomClip"
   | "removeZoomClip"
   | "selectZoomClip"
+  | "regenerateAutoZoom"
   | "subscribeTimelineTicks"
   | "stepTimelineFrame"
   | "registerTimelineVideoFps"
@@ -2338,50 +2342,87 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     setCanRedo(false)
   }, [videos, timelineClips])
 
-  // One-shot auto-zoom generation. On the first open of a fresh recording the
-  // slow path arms `autoZoomPendingRef`; once the screen recording and its
-  // timeline clip are committed, generate zoom clips from the captured cursor /
-  // click data and commit them like an ordinary edit (a single
-  // `zoom-auto-generate` undo step). The output is persisted, so later opens
-  // restore it via the fast path and this never runs again. Detection failures
-  // (missing/corrupt sidecars) emit no clips and never block the editor.
-  const runAutoZoomDetection = useCallback(async () => {
+  // Shared core: read the recording's captured interaction data and run the
+  // staged auto-zoom detector (the dev-selected detector — see
+  // `lib/auto-zoom/detector-preference.ts`). Returns the generated clips, or
+  // `null` when detection could not run at all (no active project / screen /
+  // folder / cursor data, or the project switched mid-read). Never throws.
+  const computeAutoZoomClips = useCallback(async (): Promise<
+    CanvasZoomClip[] | null
+  > => {
     const activeProject = project
-    if (!activeProject) return
-    let clips: CanvasZoomClip[] = []
+    if (!activeProject) return null
     try {
       const screen = videosRef.current.find((video) => video.role === "screen")
-      if (!screen || screen.source.kind !== "recording") return
+      if (!screen || screen.source.kind !== "recording") return null
       const folder =
         activeProject.path ?? projectFolderFromObjectUrl(screen.objectUrl)
-      if (!folder) return
+      if (!folder) return null
       const data = await window.api?.projects.getCursorData(folder)
       // The project may have switched during the async read.
-      if (hydratedProjectIdRef.current !== activeProject.id) return
-      if (!data) return
+      if (hydratedProjectIdRef.current !== activeProject.id) return null
+      if (!data) return null
       const screenClips = timelineClipsRef.current
         .filter((clip) => clip.videoId === screen.id)
         .sort((a, b) => a.start - b.start || a.end - b.end)
-      if (screenClips.length === 0) return
-      const samples = autoZoomClicksFromCursorData(data, screen, screenClips, {
-        width: artboardRef.current.width,
-        height: artboardRef.current.height,
-      })
-      clips = buildAutoZoomClips(
-        samples,
+      if (screenClips.length === 0) return null
+      const track = autoZoomTrackFromCursorData(
+        data,
+        screen,
+        screenClips,
+        { width: artboardRef.current.width, height: artboardRef.current.height },
         getTimelineDurationForClips(timelineClipsRef.current)
       )
+      return buildAutoZoomClipsFromTrack(track, {
+        detector: getAutoZoomDetector(),
+      })
     } catch (error) {
       console.warn("[provider] auto-zoom generation failed:", error)
-      clips = []
-    } finally {
-      if (hydratedProjectIdRef.current === activeProject.id && clips.length > 0) {
-        historyCommitTagRef.current = "zoom-auto-generate"
-        commitZoomClipsRef(clips)
-        setZoomClips(clips)
-      }
+      return null
     }
-  }, [project, commitZoomClipsRef])
+  }, [project])
+
+  // One-shot auto-zoom generation. On the first open of a fresh recording the
+  // slow path arms `autoZoomPendingRef`; once the screen recording and its
+  // timeline clip are committed, generate zoom clips and commit them like an
+  // ordinary edit (a single `zoom-auto-generate` undo step). Commits ONLY when
+  // there is something to add (the Zoom track is empty at first open). The
+  // output is persisted, so later opens restore it via the fast path and this
+  // never runs again. Detection failures emit no clips and never block the editor.
+  const runAutoZoomDetection = useCallback(async () => {
+    const activeProject = project
+    if (!activeProject) return
+    const clips = await computeAutoZoomClips()
+    if (
+      clips &&
+      clips.length > 0 &&
+      hydratedProjectIdRef.current === activeProject.id
+    ) {
+      historyCommitTagRef.current = "zoom-auto-generate"
+      commitZoomClipsRef(clips)
+      setZoomClips(clips)
+    }
+  }, [project, computeAutoZoomClips, commitZoomClipsRef])
+
+  // Manual "Regenerate auto-zoom": re-run the detector and REPLACE the Zoom
+  // track with the result (even when empty — that means "no zoom-worthy
+  // moments"), as a single `zoom-regenerate` undo step. Does nothing when
+  // detection could not run (cursor data unavailable), so it never silently
+  // wipes the track. Leaves `autoZoomPendingRef` untouched, so it never
+  // collides with the one-shot / fast-path coexistence.
+  const regenerateAutoZoom = useCallback(() => {
+    const activeProject = project
+    if (!activeProject) return
+    void (async () => {
+      const clips = await computeAutoZoomClips()
+      if (clips === null) return
+      if (hydratedProjectIdRef.current !== activeProject.id) return
+      historyCommitTagRef.current = "zoom-regenerate"
+      commitZoomClipsRef(clips)
+      setZoomClips(clips)
+      setSelectedZoomClipId(null)
+    })()
+  }, [project, computeAutoZoomClips, commitZoomClipsRef])
 
   // Fire the one-shot detector once the recording's screen video AND its
   // timeline clip exist. Armed only in the slow path, so fast-path re-opens
@@ -3673,6 +3714,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       updateZoomClip,
       removeZoomClip,
       selectZoomClip,
+      regenerateAutoZoom,
       subscribeTimelineTicks,
       stepTimelineFrame,
       registerTimelineVideoFps,
@@ -3698,6 +3740,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       updateZoomClip,
       removeZoomClip,
       selectZoomClip,
+      regenerateAutoZoom,
       subscribeTimelineTicks,
       stepTimelineFrame,
       registerTimelineVideoFps,

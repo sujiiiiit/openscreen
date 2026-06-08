@@ -111,44 +111,167 @@ function easeTiming(clip: CanvasZoomClip): {
   }
 }
 
-// Returns the eased zoom amount (`progress`, 0..1) and the real-time rate of
-// change of that progress (`velocity`, per second, always >= 0). Velocity is 0
-// outside the ease ramps (held zoom or identity), which gates zoom blur to only
-// the moving parts of the effect.
-function sampleZoomProgress(
-  clip: CanvasZoomClip,
-  compositionSeconds: number
-): { progress: number; velocity: number } {
-  if (!clip.enabled) return { progress: 0, velocity: 0 }
-  if (compositionSeconds < clip.start || compositionSeconds >= clip.end) {
-    return { progress: 0, velocity: 0 }
-  }
+// --- Continuous zoom (welding) -------------------------------------------
+//
+// Adjacent / near-adjacent zoom clips transition the camera DIRECTLY from one
+// settled zoom to the next (e.g. 2.5x@A → 1.7x@B) instead of dropping to 1x and
+// back — the "pump" between back-to-back clips. The weld engages when the gap
+// between two clips is small *relative to their durations*, computed
+// dynamically. Clips with a real gap are untouched (identical to before), so a
+// single clip and well-separated clips render exactly as they used to.
 
-  const duration = Math.max(0, clip.end - clip.start)
-  if (duration <= 0) return { progress: 0, velocity: 0 }
+// Weld when the inter-clip gap is below this fraction of the shorter clip's
+// duration, clamped to [min, max] seconds. Bigger gaps keep their wide beat.
+const ZOOM_WELD_GAP_FRACTION = 0.25
+const ZOOM_WELD_GAP_MIN_SECONDS = 0.12
+const ZOOM_WELD_GAP_MAX_SECONDS = 0.6
+// Weld transitions use the baked smootherstep glide regardless of either clip's
+// own curve, so the cross-clip pan/zoom reads consistently.
+const ZOOM_WELD_CURVE: CanvasZoomTransitionCurve = "smootherstep"
 
+// --- Cursor follow -------------------------------------------------------
+//
+// While zoomed, the recorded cursor must never leave the visible window. The
+// camera keeps the cursor inside an inner "dead zone" of the window and only
+// pans (shifting the focus) once the cursor crosses that boundary — pinning it
+// at the edge of the dead zone. This is STATELESS (depends only on focus, scale,
+// and the cursor position at the sampled time), so it stays deterministic for
+// export and arbitrary seeking. A larger fraction = follow only near the very
+// edge (fixed framing for normal pointer movement); smaller = the camera tracks
+// the cursor more eagerly.
+const ZOOM_FOLLOW_DEAD_FRACTION = 0.8
+
+// A clip resolved to its sampling-ready form: settled scale/focus, ease ramp
+// lengths, and the hold interval [holdStart, holdEnd] where it sits fully zoomed.
+type ResolvedZoomClip = {
+  start: number
+  end: number
+  scale: number
+  fx: number
+  fy: number
+  blur: number
+  curve: CanvasZoomTransitionCurve
+  holdStart: number
+  holdEnd: number
+  id: string
+}
+
+function resolveZoomClip(input: CanvasZoomClipInput): ResolvedZoomClip {
+  const clip = withZoomClipDefaults(input)
   const { easeInSeconds, easeOutSeconds } = easeTiming(clip)
-  const transition = clampZoomTransitionSettings(clip.transition)
-  const easeInEnd = clip.start + easeInSeconds
-  const easeOutStart = clip.end - easeOutSeconds
-
-  if (easeInSeconds > 0 && compositionSeconds < easeInEnd) {
-    const t = (compositionSeconds - clip.start) / easeInSeconds
-    return {
-      progress: transitionCurveValue(transition.curve, t),
-      velocity: curveSlope(transition.curve, t) / easeInSeconds,
-    }
+  const focus = clampZoomFocus(clip.focus)
+  return {
+    start: clip.start,
+    end: clip.end,
+    scale: clampZoomScale(clip.scale),
+    fx: focus.x,
+    fy: focus.y,
+    blur: clampUnit(clip.radialBlur),
+    curve: clampZoomTransitionSettings(clip.transition).curve,
+    holdStart: clip.start + easeInSeconds,
+    holdEnd: clip.end - easeOutSeconds,
+    id: clip.id,
   }
+}
 
-  if (easeOutSeconds > 0 && compositionSeconds > easeOutStart) {
-    const t = (compositionSeconds - easeOutStart) / easeOutSeconds
-    return {
-      progress: 1 - transitionCurveValue(transition.curve, t),
-      velocity: curveSlope(transition.curve, t) / easeOutSeconds,
-    }
+/** Build the camera transform from a resolved (scale, focus) state. */
+function cameraFromState(
+  scale: number,
+  fx: number,
+  fy: number,
+  radialBlur: number,
+  clipId: string,
+  artboard: ArtboardSize
+): ZoomCamera {
+  if (scale <= 1 + ZOOM_IDENTITY_EPSILON) return IDENTITY_ZOOM_CAMERA
+  return {
+    scale,
+    offsetX: fx * artboard.width * (1 - scale),
+    offsetY: fy * artboard.height * (1 - scale),
+    radialBlur: clampUnit(radialBlur),
+    radialBlurCenterX: fx,
+    radialBlurCenterY: fy,
+    radialBlurSettings: ZOOM_RADIAL_BLUR_SHADER,
+    clipId,
   }
+}
 
-  return { progress: 1, velocity: 0 }
+// Intermediate camera state (scale + focus + blur amount) before the cursor
+// follow nudges the focus and the transform is built. `null` means identity.
+type ZoomState = {
+  scale: number
+  fx: number
+  fy: number
+  radialBlur: number
+  clipId: string
+}
+
+/**
+ * A clip's own ease ramp from/to identity — focus stays FIXED at the clip's
+ * point while only the scale ramps (radial zoom around the anchor). This is the
+ * single-clip behavior, unchanged.
+ */
+function easeState(
+  clip: ResolvedZoomClip,
+  progress: number,
+  velocity: number
+): ZoomState | null {
+  const scale = 1 + (clip.scale - 1) * progress
+  if (scale <= 1 + ZOOM_IDENTITY_EPSILON) return null
+  const scaleVelocity = (clip.scale - 1) * velocity
+  const motion = clampUnit((scaleVelocity / scale) * ZOOM_BLUR_MOTION_GAIN)
+  return { scale, fx: clip.fx, fy: clip.fy, radialBlur: clip.blur * motion, clipId: clip.id }
+}
+
+/**
+ * Shift one axis of the focus so the cursor stays inside the window's dead zone.
+ * Returns the focus unchanged while the cursor is comfortably inside; once it
+ * crosses the dead-zone boundary the focus moves to pin the cursor there. `inv`
+ * is `1 - 1/scale` (> 0), `half` the window half-width `1/(2·scale)`.
+ */
+function followAxis(
+  focus: number,
+  cursor: number,
+  inv: number,
+  half: number,
+  deadHalf: number
+): number {
+  const center = focus * inv + half
+  let desired = center
+  if (cursor < center - deadHalf) desired = cursor + deadHalf
+  else if (cursor > center + deadHalf) desired = cursor - deadHalf
+  else return focus
+  return clampUnit((desired - half) / inv)
+}
+
+/** Keep the cursor inside the zoom window by nudging the focus (both axes). */
+function applyCursorFollow(
+  fx: number,
+  fy: number,
+  scale: number,
+  cursor: { x: number; y: number }
+): { x: number; y: number } {
+  const inv = 1 - 1 / scale
+  if (inv <= 0) return { x: fx, y: fy }
+  const half = 1 / (2 * scale)
+  const deadHalf = half * ZOOM_FOLLOW_DEAD_FRACTION
+  return {
+    x: followAxis(fx, clampUnit(cursor.x), inv, half, deadHalf),
+    y: followAxis(fy, clampUnit(cursor.y), inv, half, deadHalf),
+  }
+}
+
+/** Whether two adjacent clips should weld into a continuous transition. */
+function shouldWeldClips(a: ResolvedZoomClip, b: ResolvedZoomClip): boolean {
+  if (a.scale <= 1 + ZOOM_IDENTITY_EPSILON) return false
+  if (b.scale <= 1 + ZOOM_IDENTITY_EPSILON) return false
+  const gap = Math.max(0, b.start - a.end)
+  const durMin = Math.min(a.end - a.start, b.end - b.start)
+  const threshold = Math.min(
+    ZOOM_WELD_GAP_MAX_SECONDS,
+    Math.max(ZOOM_WELD_GAP_MIN_SECONDS, ZOOM_WELD_GAP_FRACTION * durMin)
+  )
+  return gap <= threshold
 }
 
 export function getZoomCameraCenterForTarget(
@@ -201,53 +324,108 @@ export function getZoomVisibleWindow(
   }
 }
 
+/** The settled / transitioning camera state at `t`, before the cursor follow. */
+function computeZoomState(
+  resolved: readonly ResolvedZoomClip[],
+  t: number
+): ZoomState | null {
+  // 1. Held inside a clip's settle interval → full settled zoom, no blur.
+  for (const c of resolved) {
+    if (t >= c.holdStart && t <= c.holdEnd && t < c.end) {
+      if (c.scale <= 1 + ZOOM_IDENTITY_EPSILON) return null
+      return { scale: c.scale, fx: c.fx, fy: c.fy, radialBlur: 0, clipId: c.id }
+    }
+  }
+
+  // 2. Continuous weld between two near-adjacent clips: blend settled state
+  //    A → B (scale AND focus) directly across A's ease-out, the gap, and B's
+  //    ease-in — never returning to 1x.
+  for (let i = 0; i < resolved.length - 1; i++) {
+    const a = resolved[i]
+    const b = resolved[i + 1]
+    if (t < a.holdEnd || t >= b.holdStart) continue
+    if (!shouldWeldClips(a, b)) continue
+    const windowDur = b.holdStart - a.holdEnd
+    if (windowDur <= 0) continue
+    const raw = (t - a.holdEnd) / windowDur
+    const u = transitionCurveValue(ZOOM_WELD_CURVE, raw)
+    const scale = a.scale + (b.scale - a.scale) * u
+    // Blur tracks how fast the magnification is changing across the weld — a
+    // smaller swing (2.5→1.7) blurs gentler than a full zoom from 1x.
+    const slope = curveSlope(ZOOM_WELD_CURVE, raw) / windowDur
+    const scaleVelocity = Math.abs(b.scale - a.scale) * slope
+    const motion = clampUnit((scaleVelocity / Math.max(scale, 1e-6)) * ZOOM_BLUR_MOTION_GAIN)
+    return {
+      scale,
+      fx: a.fx + (b.fx - a.fx) * u,
+      fy: a.fy + (b.fy - a.fy) * u,
+      radialBlur: (a.blur + (b.blur - a.blur) * u) * motion,
+      clipId: u < 0.5 ? a.id : b.id,
+    }
+  }
+
+  // 3. A clip's own (non-welded) ease-in from identity, focus fixed.
+  for (const c of resolved) {
+    if (t >= c.start && t < c.holdStart) {
+      const easeIn = c.holdStart - c.start
+      if (easeIn <= 0) continue
+      const raw = (t - c.start) / easeIn
+      return easeState(c, transitionCurveValue(c.curve, raw), curveSlope(c.curve, raw) / easeIn)
+    }
+  }
+
+  // 4. A clip's own (non-welded) ease-out to identity, focus fixed.
+  for (const c of resolved) {
+    if (t > c.holdEnd && t < c.end) {
+      const easeOut = c.end - c.holdEnd
+      if (easeOut <= 0) continue
+      const raw = (t - c.holdEnd) / easeOut
+      return easeState(
+        c,
+        1 - transitionCurveValue(c.curve, raw),
+        curveSlope(c.curve, raw) / easeOut
+      )
+    }
+  }
+
+  // 5. In a real gap (or outside every clip) → fully wide.
+  return null
+}
+
+/**
+ * Sample the composition zoom camera at `compositionSeconds`. Shared by editor
+ * preview, hover preview, and export.
+ *
+ * When `cursor` (the recorded cursor's artboard-normalized position at this
+ * time) is provided, the camera follows it so the pointer never leaves the
+ * zoomed window — a stateless dead-zone clamp on the focus. Pass `null` /
+ * omit to disable following (identical to the prior behavior).
+ */
 export function sampleZoomCameraAtTime(
   clips: readonly CanvasZoomClipInput[],
   artboard: ArtboardSize,
-  compositionSeconds: number
+  compositionSeconds: number,
+  cursor?: { x: number; y: number } | null
 ): ZoomCamera {
-  let clip: CanvasZoomClip | null = null
-  for (const candidate of clips) {
-    if (candidate.enabled === false) continue
-    if (
-      compositionSeconds >= candidate.start &&
-      compositionSeconds < candidate.end
-    ) {
-      clip = withZoomClipDefaults(candidate)
-      break
-    }
+  // Resolve + sort enabled clips: welding needs neighbor order. Zoom tracks hold
+  // a handful of clips, so this per-frame pass is cheap; if the track ever grows
+  // large, precompute the resolved list per camera-timeline change instead.
+  const resolved = clips
+    .filter((c) => c.enabled !== false && c.end > c.start)
+    .map(resolveZoomClip)
+    .sort((a, b) => a.start - b.start || a.end - b.end)
+  if (resolved.length === 0) return IDENTITY_ZOOM_CAMERA
+
+  const state = computeZoomState(resolved, compositionSeconds)
+  if (!state) return IDENTITY_ZOOM_CAMERA
+
+  let { fx, fy } = state
+  if (cursor && state.scale > 1 + ZOOM_IDENTITY_EPSILON) {
+    const followed = applyCursorFollow(fx, fy, state.scale, cursor)
+    fx = followed.x
+    fy = followed.y
   }
-  if (!clip) return IDENTITY_ZOOM_CAMERA
-
-  const { progress, velocity } = sampleZoomProgress(clip, compositionSeconds)
-  const targetScale = clampZoomScale(clip.scale)
-  const scale = 1 + (targetScale - 1) * progress
-  if (scale <= 1 + ZOOM_IDENTITY_EPSILON) return IDENTITY_ZOOM_CAMERA
-
-  // Zoom-blur strength tracks the on-screen zoom velocity: how fast the magnification
-  // is changing, relative to the current scale. This is a single smooth bump
-  // (~0 at the ease boundaries, so blur ramps on/off seamlessly) and is naturally
-  // stronger for faster — snappier or shorter — zooms.
-  const scaleVelocity = (targetScale - 1) * velocity
-  const motion = clampUnit((scaleVelocity / scale) * ZOOM_BLUR_MOTION_GAIN)
-
-  const target = clampZoomFocus(clip.focus)
-  // Anchor the zoom at the user's focus point for the entire transition. The
-  // focus stays fixed in rendered artboard coordinates while every other pixel
-  // scales radially around it, avoiding a separate pan-then-zoom drift near
-  // edges.
-  const offsetX = target.x * artboard.width * (1 - scale)
-  const offsetY = target.y * artboard.height * (1 - scale)
-  return {
-    scale,
-    offsetX,
-    offsetY,
-    radialBlur: clampUnit(clip.radialBlur * motion),
-    radialBlurCenterX: target.x,
-    radialBlurCenterY: target.y,
-    radialBlurSettings: ZOOM_RADIAL_BLUR_SHADER,
-    clipId: clip.id,
-  }
+  return cameraFromState(state.scale, fx, fy, state.radialBlur, state.clipId, artboard)
 }
 
 export function zoomCamerasEqual(a: ZoomCamera, b: ZoomCamera) {

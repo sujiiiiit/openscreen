@@ -150,17 +150,34 @@ describe("buildAutoZoomClips segmentation", () => {
 // --- typing & drag ---------------------------------------------------------
 
 describe("buildAutoZoomClips signal types", () => {
-  it("zooms more for a text-entry (iBeam) cluster", () => {
-    const clips = buildAutoZoomClips(click(8, 0.4, 0.4, "iBeam"), 30)
-    expect(clips).toHaveLength(1)
-    expect(clips[0].scale).toBeCloseTo(AUTO_ZOOM_DEFAULTS.zoomTyping, 6)
+  it("zooms more for a text-entry (iBeam) cluster than a plain click", () => {
+    const typing = buildAutoZoomClips(click(8, 0.4, 0.4, "iBeam"), 30)
+    const plain = buildAutoZoomClips(click(8, 0.4, 0.4), 30)
+    expect(typing).toHaveLength(1)
+    expect(plain).toHaveLength(1)
+    // Typing uses the higher typing base (plus its confidence bonus).
+    expect(typing[0].scale).toBeGreaterThanOrEqual(AUTO_ZOOM_DEFAULTS.zoomTyping)
+    expect(typing[0].scale).toBeGreaterThan(plain[0].scale)
   })
 
-  it("anchors a drag at its release/settle point", () => {
+  it("frames the whole selection span of a drag (centered), not the release point", () => {
+    // Drag from (0.2,0.2) to (0.5,0.6): the framed subject is the span, so the
+    // focus is its center (0.35, 0.4) — the "frame the whole selection" rule.
     const clips = buildAutoZoomClips(drag(8, 0.2, 0.2, 8.5, 0.5, 0.6), 30)
     expect(clips).toHaveLength(1)
+    expect(clips[0].focus.x).toBeCloseTo(0.35, 6)
+    expect(clips[0].focus.y).toBeCloseTo(0.4, 6)
+  })
+
+  it("scales down so a large selection fully fits in frame", () => {
+    // A wide selection (0.1→0.9) cannot be shown at the base scale without
+    // cropping, so the framing solver reduces the scale to fit the whole span.
+    const clips = buildAutoZoomClips(drag(8, 0.1, 0.45, 8.5, 0.9, 0.55), 30)
+    expect(clips).toHaveLength(1)
     expect(clips[0].focus.x).toBeCloseTo(0.5, 6)
-    expect(clips[0].focus.y).toBeCloseTo(0.6, 6)
+    // span width 0.8 (+padding) must fit inside 1/scale → scale ≈ 1.05.
+    expect(clips[0].scale).toBeLessThan(AUTO_ZOOM_DEFAULTS.zoomScale)
+    expect(clips[0].scale).toBeGreaterThanOrEqual(1)
   })
 
   it("treats a tiny down→up jitter as a click, not a drag", () => {
@@ -173,8 +190,10 @@ describe("buildAutoZoomClips signal types", () => {
 // --- reducers: rate limit & tail guard -------------------------------------
 
 describe("buildAutoZoomClips reducers", () => {
-  it("rate-limits to maxZoomsPerMin", () => {
-    // 60 s recording → cap = 4. Six well-separated clicks at distinct corners.
+  it("surfaces every distinct event (high recall — no sparsity quota)", () => {
+    // Six well-separated clicks at distinct corners, 10 s apart: each is its own
+    // zoom (no merge — far apart; no idle bridge — 10 s gaps). The per-minute cap
+    // is a high safety backstop, not a sparsifier, so all six survive.
     const clips = buildAutoZoomClips(
       [
         ...click(5, 0.1, 0.1),
@@ -186,12 +205,12 @@ describe("buildAutoZoomClips reducers", () => {
       ],
       60
     )
-    expect(clips.length).toBeLessThanOrEqual(4)
+    expect(clips).toHaveLength(6)
     expectNonOverlapping(clips)
   })
 
   it("clamps a near-end clip's end before the tail guard", () => {
-    const clips = buildAutoZoomClips(click(29, 0.5, 0.5), 30)
+    const clips = buildAutoZoomClips(click(28.8, 0.5, 0.5), 30)
     expect(clips).toHaveLength(1)
     expect(clips[0].end).toBeLessThanOrEqual(
       30 - AUTO_ZOOM_DEFAULTS.tailGuardMs / 1000 + 1e-9

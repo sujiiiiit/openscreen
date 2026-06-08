@@ -1,7 +1,10 @@
 # Auto-Zoom — Implementation Plan (v2)
 
-> Status: **plan / not yet implemented.** Rewritten 2026-06-08 after the user
-> locked the approach. **This supersedes the 2026-05-29 plan**, which predated
+> Status: **superseded — see `docs/auto-zoom-algorithm.md`.** The P1 rewrite
+> (staged pipeline + importance model + two detectors + Regenerate) shipped
+> 2026-06-09; this file is kept for historical design context only. Rewritten
+> 2026-06-08 after the user locked the approach. **This supersedes the 2026-05-29
+> plan**, which predated
 > the PixiJS cutover and the manual Zoom-track and proposed a *separate*
 > `autoZoom` keyframe representation + its own camera. That separate model is
 > **dropped.** Auto-zoom is now a pure **generator of ordinary manual zoom

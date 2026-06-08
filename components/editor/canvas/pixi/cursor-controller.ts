@@ -1,6 +1,7 @@
 import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
 import type { CursorSetId, CursorSmoothingMode } from "@/types/editor-canvas"
 
+import { sampleCursorArtboardFocus } from "../cursor-scene"
 import { CursorSprite } from "./cursor-sprite"
 import type { CanvasScene } from "./scene"
 
@@ -102,6 +103,31 @@ export class CursorController {
       () => this.place(this.lastTimelineSeconds)
     )
     this.scene.requestRender()
+  }
+
+  /**
+   * The cursor's artboard-normalized focus `{ x, y }` (0..1) at a timeline time,
+   * or null when no cursor is shown (rendering off, no track, off-screen, or the
+   * time is outside every screen clip). Feeds the zoom camera's cursor-follow so
+   * the pointer never leaves the zoomed window. Cheap (no asset/sizing work) and
+   * uses the same mapping the rendered sprite does, so the two stay locked.
+   */
+  getArtboardFocusAt(
+    timelineSeconds: number,
+    artboard: { width: number; height: number }
+  ): { x: number; y: number } | null {
+    const { state, track } = this
+    if (!state || !state.customRenderingEnabled || !state.screenVideo || !track) {
+      return null
+    }
+    const sourceSeconds = this.getSourceSeconds(timelineSeconds, state)
+    if (sourceSeconds === null) return null
+    return sampleCursorArtboardFocus(
+      track,
+      state.screenVideo,
+      sourceSeconds,
+      artboard
+    )
   }
 
   private getSourceSeconds(

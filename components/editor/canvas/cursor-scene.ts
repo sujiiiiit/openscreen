@@ -577,6 +577,32 @@ export function placeCursor(
 }
 
 /**
+ * Light position-only sampler: the cursor hotspot's artboard-normalized focus
+ * `{ x, y }` (0..1) at `sourceSeconds`, or null when there is no sample or the
+ * hotspot is off the visible (cropped) video. Used by the zoom camera's
+ * cursor-follow — it skips the asset / motion / sizing work of `placeCursor`
+ * since only the position is needed, and reuses the SAME
+ * `mapCursorSampleToArtboard` mapping so the follow locks to exactly the
+ * rendered cursor pixel.
+ */
+export function sampleCursorArtboardFocus(
+  track: SmoothedCursorTrack,
+  video: CursorVideoGeometry,
+  sourceSeconds: number,
+  artboard: { width: number; height: number }
+): { x: number; y: number } | null {
+  if (artboard.width <= 0 || artboard.height <= 0) return null
+  const sample = sampleCursorAtTime(track, sourceSeconds * 1000)
+  if (!sample) return null
+  const mapped = mapCursorSampleToArtboard(sample, track, video)
+  if (!mapped.onScreen) return null
+  return {
+    x: Math.min(1, Math.max(0, mapped.x / artboard.width)),
+    y: Math.min(1, Math.max(0, mapped.y / artboard.height)),
+  }
+}
+
+/**
  * Derive the motion-blur options for the cursor at `sourceSeconds` from how fast
  * it is moving, or null when no blur should be drawn (intensity 0, cursor still,
  * or no placement). Pure + shared, so the editor preview and the exporter blur
