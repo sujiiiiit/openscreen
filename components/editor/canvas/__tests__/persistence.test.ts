@@ -434,7 +434,7 @@ describe("cursor click press scale persistence", () => {
     })
 
     expect(legacy).not.toBeNull()
-    expect(legacy!.artboard.cursorClickPressScale).toBe(0.88)
+    expect(legacy!.artboard.cursorClickPressScale).toBe(0.78)
     expect(tooSmall).not.toBeNull()
     expect(tooSmall!.artboard.cursorClickPressScale).toBe(0.5)
   })

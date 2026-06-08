@@ -236,7 +236,7 @@ export interface ProjectArtboard {
   // 'default'. See electron/ipc/project-schema.ts.
   cursorSmoothingMode?: "rapid" | "quick" | "default" | "slow"
   // Target cursor scale while a recorded click is pressed. Optional on disk;
-  // validator defaults to 0.88 and clamps to the supported range.
+  // validator defaults to 0.78 and clamps to the supported range.
   cursorClickPressScale?: number
   // When true, every captured cursor id resolves to the themed pointer asset.
   // Optional on disk; validator defaults to false for old projects.

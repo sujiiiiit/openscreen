@@ -335,9 +335,9 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     : "default"
   const cursorClickPressScale = (() => {
     const raw = value["cursorClickPressScale"]
-    // Default mirrors cursor-scene.ts CURSOR_CLICK_PRESS_SCALE_DEFAULT (0.88);
+    // Default mirrors cursor-scene.ts CURSOR_CLICK_PRESS_SCALE_DEFAULT (0.78);
     // clamp to [0.5, 1]. `1` disables the press shrink.
-    if (!isFiniteNumber(raw)) return 0.88
+    if (!isFiniteNumber(raw)) return 0.78
     return Math.min(1, Math.max(0.5, raw))
   })()
   const cursorAlwaysUsePointer = value["cursorAlwaysUsePointer"] === true

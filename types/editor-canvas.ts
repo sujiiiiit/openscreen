@@ -50,7 +50,7 @@ export type EditorArtboard = CanvasSize & {
   // Slow is the softest. Shared by preview and export.
   cursorSmoothingMode: CursorSmoothingMode
   // Target cursor scale while a captured mouse button is pressed. `1` disables
-  // the shrink; default is 0.88. Shared by preview and export.
+  // the shrink; default is 0.78 (22 % downscale). Shared by preview and export.
   cursorClickPressScale: number
   // When true, every captured cursor id resolves to the themed pointer asset.
   // Useful when text/resize cursors are distracting. Shared by preview/export.

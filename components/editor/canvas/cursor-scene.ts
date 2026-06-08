@@ -90,6 +90,22 @@ const CURSOR_MOTION_ROTATION_SMOOTHING_PARAMS: Record<
   slow: { windowSec: 0.36, samples: 9 },
 }
 
+// Click-press timing follows the same smoothing preset, so the cursor reads as
+// one coherent motion personality: a Rapid path glides snappily AND clicks
+// crisply, while Slow cushions both. Only the press/release *durations* and the
+// release *overshoot* scale here — the press depth stays the user's Click
+// downscale slider (`cursorClickPressScale`). `default` is pinned to the
+// previously-shipped 70 / 220 / 0.09 so existing projects look identical.
+const CURSOR_CLICK_PRESS_PARAMS: Record<
+  CursorSmoothingMode,
+  { pressInMs: number; releaseMs: number; overshoot: number }
+> = {
+  rapid: { pressInMs: 45, releaseMs: 150, overshoot: 0.06 },
+  quick: { pressInMs: 58, releaseMs: 185, overshoot: 0.075 },
+  default: { pressInMs: 70, releaseMs: 220, overshoot: 0.09 },
+  slow: { pressInMs: 95, releaseMs: 300, overshoot: 0.12 },
+}
+
 export function clampCursorSmoothingMode(value: unknown): CursorSmoothingMode {
   return CURSOR_SMOOTHING_MODES.includes(value as CursorSmoothingMode)
     ? (value as CursorSmoothingMode)
@@ -156,10 +172,7 @@ const CURSOR_BLUR_KERNEL_MAX = 25
 // sprite. `1` disables the shrink; the current shipped value stays the default.
 export const CURSOR_CLICK_PRESS_SCALE_MIN = 0.5
 export const CURSOR_CLICK_PRESS_SCALE_MAX = 1
-export const CURSOR_CLICK_PRESS_SCALE_DEFAULT = 0.88
-const CURSOR_CLICK_PRESS_IN_MS = 70
-const CURSOR_CLICK_RELEASE_MS = 220
-const CURSOR_CLICK_RELEASE_OVERSHOOT = 0.09
+export const CURSOR_CLICK_PRESS_SCALE_DEFAULT = 0.78
 
 /** Clamp the user motion-blur intensity into [0, 1], defaulting on bad input. */
 export function clampCursorMotionBlur(value: number): number {
@@ -196,7 +209,8 @@ function easeOutCubic(t: number): number {
 function cursorClickScaleAt(
   track: SmoothedCursorTrack,
   tMs: number,
-  pressScale?: number
+  pressScale?: number,
+  smoothingMode?: CursorSmoothingMode
 ): number {
   const clicks = track.clicks
   if (!clicks || clicks.length === 0) return 1
@@ -205,6 +219,10 @@ function cursorClickScaleAt(
     typeof pressScale === "number"
       ? clampCursorClickPressScale(pressScale)
       : CURSOR_CLICK_PRESS_SCALE_DEFAULT
+  // Press/release timing + overshoot follow the same smoothing preset as the
+  // path glide; `clampCursorSmoothingMode` defaults to "default" for omitted or
+  // bad input, so callers that don't pass a mode keep the previous feel.
+  const timing = CURSOR_CLICK_PRESS_PARAMS[clampCursorSmoothingMode(smoothingMode)]
   let lo = 0
   let hi = clicks.length - 1
   if (tMs < clicks[0].t) return 1
@@ -219,16 +237,16 @@ function cursorClickScaleAt(
   if (depth <= 0) return 1
 
   if (event.type === "down") {
-    const p = dt / CURSOR_CLICK_PRESS_IN_MS
+    const p = dt / timing.pressInMs
     if (p < 1) return 1 - depth * easeOutCubic(p)
     return targetScale
   }
 
-  if (dt > CURSOR_CLICK_RELEASE_MS) return 1
-  const p = Math.min(1, Math.max(0, dt / CURSOR_CLICK_RELEASE_MS))
+  if (dt > timing.releaseMs) return 1
+  const p = Math.min(1, Math.max(0, dt / timing.releaseMs))
   const base = targetScale + depth * easeOutCubic(p)
   const rebound =
-    Math.min(CURSOR_CLICK_RELEASE_OVERSHOOT, depth * 0.75) *
+    Math.min(timing.overshoot, depth * 0.75) *
     Math.sin(Math.PI * p) *
     (1 - p)
   return base + rebound
@@ -530,7 +548,8 @@ export function placeCursor(
   const clickScale = cursorClickScaleAt(
     track,
     sourceSeconds * 1000,
-    clickPressScale
+    clickPressScale,
+    smoothingMode
   )
   const renderHeight =
     CURSOR_BOX_HEIGHT_POINTS *

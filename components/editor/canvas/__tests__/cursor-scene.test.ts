@@ -344,6 +344,34 @@ describe("cursor click scale", () => {
       placeCursor(held, geometry(), 0.3, { clickPressScale: 1 })!.clickScale
     ).toBe(1)
   })
+
+  it("presses in faster on rapid than on slow smoothing", () => {
+    const held = track([100, 100, 100, 100, 100], [50, 50, 50, 50, 50], 100, [
+      { t: 100, type: "down" },
+    ])
+    // 50 ms after the down: rapid (45 ms press) has reached the target while
+    // slow (95 ms press) is still easing in, so rapid is shrunk further.
+    const rapid = placeCursor(held, geometry(), 0.15, {
+      smoothingMode: "rapid",
+    })!.clickScale
+    const slow = placeCursor(held, geometry(), 0.15, {
+      smoothingMode: "slow",
+    })!.clickScale
+    expect(rapid).toBeLessThan(slow)
+  })
+
+  it("releases sooner on rapid than on slow smoothing", () => {
+    // `clicked` releases at 150 ms; 200 ms later rapid (150 ms release) has
+    // fully settled back to 1 while slow (300 ms release) is still rebounding.
+    const rapid = placeCursor(clicked, geometry(), 0.35, {
+      smoothingMode: "rapid",
+    })!.clickScale
+    const slow = placeCursor(clicked, geometry(), 0.35, {
+      smoothingMode: "slow",
+    })!.clickScale
+    expect(rapid).toBe(1)
+    expect(slow).not.toBe(1)
+  })
 })
 
 describe("placeCursor pointer override", () => {

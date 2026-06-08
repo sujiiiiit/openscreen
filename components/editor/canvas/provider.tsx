@@ -2989,7 +2989,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   }, [])
 
   // Target scale for the cursor while a captured click is pressed. `1` means no
-  // shrink; the current default remains 0.88. Stored on the artboard and passed
+  // shrink; the current default is 0.78 (22 % downscale). Stored on the artboard and passed
   // through shared `placeCursor` so preview/export agree.
   const setCursorClickPressScale = useCallback((scale: number) => {
     const current = artboardRef.current
