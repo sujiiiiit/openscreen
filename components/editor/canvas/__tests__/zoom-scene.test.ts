@@ -336,6 +336,19 @@ describe("cursor follow (hold + reframe-on-exit)", () => {
     )
   })
 
+  it("holds still through a small wander the old tighter dead zone would reframe", () => {
+    // scale 2 → visible half-extent 0.25; the calmer default dead zone is
+    // 0.84*0.25 = 0.21 from centre. A cursor at 0.70 is 0.20 away — inside the new
+    // box (no reframe), but outside the old 0.72 box (0.18) which would reframe.
+    const sampleCursor = (t: number) =>
+      t < 3 ? { x: 0.5, y: 0.5 } : { x: 0.7, y: 0.5 }
+    expect(computeZoomFollowPaths([clip], sampleCursor).size).toBe(0)
+    // The pre-change dead zone would have built a reframe path here.
+    expect(
+      computeZoomFollowPaths([clip], sampleCursor, { safeFraction: 0.72 }).size
+    ).toBe(1)
+  })
+
   it("reframes onto a new region with an eased (not jumped) move", () => {
     // Cursor sits centred, then jumps right and stays.
     const sampleCursor = (t: number) =>

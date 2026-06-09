@@ -173,8 +173,13 @@ export type ZoomFollowParams = {
 
 export const ZOOM_FOLLOW_DEFAULTS: ZoomFollowParams = {
   sampleHz: 30,
-  safeFraction: 0.72,
-  transitionSec: 0.5,
+  // A generous dead zone: the camera holds still through small cursor wanders and
+  // only reframes on a real excursion (calmer motion; fewer reframes). The hybrid
+  // detector also ships a stable gen-time focus anchor, so within a hold the
+  // cursor usually stays inside this box and no reframe path is built at all.
+  safeFraction: 0.84,
+  // A gentler, longer reframe glide when one is needed.
+  transitionSec: 0.65,
 }
 
 // --- Reframe motion blur (directional) -----------------------------------

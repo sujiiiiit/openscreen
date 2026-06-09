@@ -45,7 +45,7 @@ system, unchanged — a generated clip is indistinguishable from a hand-made one
 InteractionTrack          normalize.ts     all input streams, mapped + sorted
   → Fixation[] / idle      kinematics.ts    cursor dwell vs transit; idle spans
   → Engagement[]           importance.ts    "what is worth a closeup" (scored)
-  → ZoomWindow[]           detectors/*      WHEN + which region (two strategies)
+  → ZoomWindow[]           detectors/*      WHEN + which region
   → ZoomWindow[]           cinematography.ts merge / overlap / rate-limit (pacing)
   → { focus, scale }       framing.ts       keep the subject in frame
   → CanvasZoomClip[]       pipeline.ts      emit, deterministic, normalized
@@ -102,23 +102,32 @@ selection. A **typing** engagement is also *extended* forward (up to
 `maxTypingHoldMs` or the next engagement) so mouse-silent typing reads as one
 sustained zoom — a P1 stand-in until the keystroke stream lands in P2.
 
-### 3. Detector (`detectors/`, pluggable)
+### 3. Detector (`detectors/`)
 
-Both detectors implement `detect(input) → ZoomWindow[]` and share every other
-stage; they differ only in how engagements become windows. The active detector is
-a dev affordance (`detector-preference.ts`) read by both the one-shot and
-Regenerate paths, so it can be A/B-ed on real recordings.
+The detector implements `detect(input) → ZoomWindow[]` — the only "engagements →
+windows" step; it shares every other stage. There is one detector,
+**`hybrid-stabilized`**; the registry stays pluggable so another could be added
+without touching the pipeline.
 
-- **`click-anchored`** (default; reproduces the original, well-tested behavior):
-  segment engagements by time-gap (`segmentGapMs`) + focus-jump
-  (`segmentFocusJump`); each segment becomes a calm window — lead-in
-  (`leadInMs`) → hold (≥ `minHoldMs`) → tail (`easeMs`) — framed on the segment's
-  **region** (the union of its engagements), not a single averaged point.
-- **`attention-region`** (the new model): each engagement is **extended** to cover
-  the surrounding cursor dwell (the fixation before/after the click), so the hold
-  lasts exactly as long as the user stayed in that region; extended engagements
-  that overlap in time *and* sit in the same region are grouped into one
-  continuous working region; the hold is **released at the next idle span**.
+**`hybrid-stabilized`** covers every engagement (high recall preserved) while
+holding the camera steady and framing calmly:
+
+- **Dwell-extended holds** — each engagement is extended to cover the surrounding
+  cursor dwell (the fixation before/after the click), so the hold lasts as long as
+  the user actually stayed in that region. A bare fixation never creates a window;
+  dwell only shapes a window already anchored by a deliberate engagement.
+- **Hysteretic clustering** — extended engagements group into clusters with a
+  *sticky* boundary (`hysteresisFocusJump`, much larger than a naive per-click
+  split) so a small wander never starts a new region (the cure for needless panning
+  + framing drift). One cluster → one steady held window.
+- **Stable framing anchor** — each cluster is framed on the score-weighted
+  centroid of its dense core (members within `clusterRadius` of the peak
+  engagement), *not* the drifting union center; the union is grown symmetrically
+  about the anchor (`geometry.growRectAroundCenter`) so every subject stays in
+  frame while the center stays put.
+- **Idle release** — the hold is released at the next idle span (stay wide only on
+  genuine idle). It pushes in/out on the gentler `hybridEaseMs` / `hybridLeadInMs`
+  ramps, and scale cohesion across a scene is applied at emit (§6).
 
 ### 4. Cinematography / pacing (`cinematography.ts`)
 
@@ -168,12 +177,27 @@ id** (`auto-zoom-<round(startMs)>-<round(focusX·1000)>-<round(focusY·1000)>`) 
 the baked transition, then `normalizeZoomClips` as the final single-lane safety
 net.
 
+**One scale per scene.** Focus is always per-window. When `sceneCohesion` is on
+(the default), the emit groups the paced windows into **scenes** — a maximal run of
+*touching* windows (the tiling in §4 abuts a run's members; only a real idle gap
+breaks the run, since any gap > `idleGapMs` is itself an idle span and
+`bridgeMaxGapMs ≥ idleGapMs`) — and collapses each scene to a single steady scale:
+the run's **MIN** desired scale. MIN is the only choice that keeps every subject
+framed (it can only zoom *less* than a window asked for, never crop), so
+magnification never bounces while the camera tiles across a scene; confidence still
+sets the scale *between* scenes. Scale does not enter the deterministic id, so this
+never churns the autosave fingerprint.
+
 ## Parameters (`params.ts` → `AUTO_ZOOM_DEFAULTS`)
 
 High-recall defaults (tune freely): `zoomScale 1.6` (plain-click base),
 `zoomTyping 2.0`, `confidenceGain 0.3` (scale per confidence over 1), `zoomMax 2.6`,
-`easeMs 450`, `leadInMs 250`, `minHoldMs 900`, `segmentGapMs 1000`,
-`segmentFocusJump 0.14`, `mergeGapMs 1800`, `mergeDist 0.10` (same-region only),
+`easeMs 450`, `leadInMs 250`, `minHoldMs 900`, stabilization knobs
+(`clusterRadius 0.12` = dense-core radius for the framing anchor,
+`hysteresisFocusJump 0.30` = sticky region boundary, `clusterMergeGapMs 2200`,
+`sceneCohesion true` = one scale per scene, `hybridEaseMs 650` = the push ramp,
+`hybridLeadInMs 300`), `mergeGapMs 1800`,
+`mergeDist 0.10` (same-region only),
 `bridgeMaxGapMs 2000` (tiling), `minZoomClipSeconds 0.5`, `maxZoomsPerMin 40`
 (safety backstop, not a quota), `dragMinTravel 0.04`, `doubleClickMs 350`,
 `maxTypingHoldMs 5000`, `tailGuardMs 800` (ignore the Stop click),
@@ -201,9 +225,10 @@ phases (no detector changes):
 
 - Pure: no clock/randomness/DOM. Stable sorts, fixed reducer order, ids derived
   from rounded start + focus.
-- Tests: `lib/auto-zoom/__tests__/` (per-stage units + the legacy click-only
-  regression suite + the track-based pipeline). `compare.ts` reports objective
-  metrics (clip count, zoomed fraction, mean scale, click coverage) to A/B the two
-  detectors over a committed `InteractionTrack` fixture.
-- Verify: `npx vitest run lib/auto-zoom`, `pnpm typecheck`. In-editor: flip the
-  Zoom panel's Clicks/Attention toggle, press **Regenerate auto-zoom**, compare.
+- Tests: `lib/auto-zoom/__tests__/pipeline.test.ts` (per-stage units + the
+  track-based pipeline, including the `hybrid-stabilized` block: guards, dwell
+  extension, hysteresis, stable anchor, one-scale-per-scene, recall, determinism).
+  `compare.ts` reports objective metrics (clip count, zoomed fraction, mean scale,
+  click coverage) over a committed `InteractionTrack` fixture.
+- Verify: `npx vitest run lib/auto-zoom`, `pnpm typecheck`. In-editor: press the
+  Zoom panel's **Regenerate auto-zoom**, compare.

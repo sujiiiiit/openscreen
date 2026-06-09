@@ -75,9 +75,9 @@ function trackFromClickSamples(
 }
 
 /**
- * Build auto-zoom clips from click samples only (the legacy click-anchored
- * path). New callers should build a full {@link InteractionTrack} and use
- * {@link buildAutoZoomClipsFromTrack} so cursor moves feed the attention model.
+ * Build auto-zoom clips from click samples only (a clicks-only convenience over
+ * the detector). New callers should build a full {@link InteractionTrack} and use
+ * {@link buildAutoZoomClipsFromTrack} so cursor moves feed the dwell model.
  */
 export function buildAutoZoomClips(
   clicks: readonly AutoZoomClickSample[],
@@ -86,6 +86,6 @@ export function buildAutoZoomClips(
 ): CanvasZoomClip[] {
   return buildAutoZoomClipsFromTrack(
     trackFromClickSamples(clicks, timelineDurationSeconds),
-    { detector: "click-anchored", params: resolveParams(overrides) }
+    { params: resolveParams(overrides) }
   )
 }

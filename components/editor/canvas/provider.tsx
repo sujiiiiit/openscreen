@@ -90,7 +90,6 @@ import {
 } from "@/components/editor/canvas/cursor-scene"
 import { autoZoomTrackFromCursorData } from "@/components/editor/canvas/auto-zoom-scene"
 import { buildAutoZoomClipsFromTrack } from "@/lib/auto-zoom/zoom-detect"
-import { getAutoZoomDetector } from "@/lib/auto-zoom/detector-preference"
 import {
   ARTBOARD_PADDING_MAX,
   applyAutoLayout,
@@ -2343,10 +2342,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   }, [videos, timelineClips])
 
   // Shared core: read the recording's captured interaction data and run the
-  // staged auto-zoom detector (the dev-selected detector — see
-  // `lib/auto-zoom/detector-preference.ts`). Returns the generated clips, or
-  // `null` when detection could not run at all (no active project / screen /
-  // folder / cursor data, or the project switched mid-read). Never throws.
+  // staged auto-zoom detector. Returns the generated clips, or `null` when
+  // detection could not run at all (no active project / screen / folder / cursor
+  // data, or the project switched mid-read). Never throws.
   const computeAutoZoomClips = useCallback(async (): Promise<
     CanvasZoomClip[] | null
   > => {
@@ -2373,9 +2371,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         { width: artboardRef.current.width, height: artboardRef.current.height },
         getTimelineDurationForClips(timelineClipsRef.current)
       )
-      return buildAutoZoomClipsFromTrack(track, {
-        detector: getAutoZoomDetector(),
-      })
+      return buildAutoZoomClipsFromTrack(track)
     } catch (error) {
       console.warn("[provider] auto-zoom generation failed:", error)
       return null

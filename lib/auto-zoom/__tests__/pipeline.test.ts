@@ -164,14 +164,29 @@ describe("solveFraming", () => {
   })
 })
 
-// --- attention-region detector --------------------------------------------
+// --- hybrid-stabilized detector --------------------------------------------
 
-describe("attention-region detector", () => {
-  const build = (t: InteractionTrack) =>
-    buildAutoZoomClipsFromTrack(t, { detector: "attention-region" })
+describe("hybrid-stabilized detector", () => {
+  const buildHybrid = (t: InteractionTrack) =>
+    buildAutoZoomClipsFromTrack(t, { detector: "hybrid-stabilized" })
+
+  it("returns [] with no clicks (a wide shot is correct)", () => {
+    expect(buildHybrid(track({ events: [] }))).toEqual([])
+  })
+
+  it("returns [] for a recording below the minimum length", () => {
+    expect(
+      buildHybrid(
+        track({
+          events: [down(1, 0.5, 0.5), up(1.05, 0.5, 0.5)],
+          durationSeconds: 2,
+        })
+      )
+    ).toEqual([])
+  })
 
   it("never zooms on dwell alone (no click)", () => {
-    expect(build(track({ moves: dwell(2, 2, 0.5, 0.5) }))).toEqual([])
+    expect(buildHybrid(track({ moves: dwell(2, 2, 0.5, 0.5) }))).toEqual([])
   })
 
   it("extends a hold to cover the dwell around a click", () => {
@@ -179,25 +194,146 @@ describe("attention-region detector", () => {
       moves: dwell(2, 2, 0.3, 0.3), // dwell from 2s..4s
       events: [down(3, 0.3, 0.3), up(3.05, 0.3, 0.3)],
     })
-    const clips = build(t)
+    const clips = buildHybrid(t)
     expect(clips).toHaveLength(1)
     // The hold starts at/before the dwell start (minus lead-in) and runs past it.
     expect(clips[0].start).toBeLessThanOrEqual(2)
     expect(clips[0].end).toBeGreaterThan(4)
   })
 
-  it("splits two distant clicks into two clips", () => {
-    const clips = build(
+  it("holds one steady shot through a mid-range jump (hysteresis)", () => {
+    // Jump 0.2 sits in the hysteresis dead band (> a tight 0.14 per-click split,
+    // but < hysteresisFocusJump 0.30): the camera stays in the region, one shot.
+    const t = track({
+      events: [
+        down(5, 0.4, 0.4),
+        up(5.05, 0.4, 0.4),
+        down(6, 0.6, 0.4),
+        up(6.05, 0.6, 0.4),
+      ],
+    })
+    expect(buildHybrid(t)).toHaveLength(1)
+  })
+
+  it("splits on a clearly distinct jump (beyond the sticky boundary)", () => {
+    const clips = buildHybrid(
       track({
         events: [
-          down(3, 0.2, 0.2),
-          up(3.05, 0.2, 0.2),
-          down(15, 0.8, 0.8),
-          up(15.05, 0.8, 0.8),
+          down(5, 0.2, 0.2),
+          up(5.05, 0.2, 0.2),
+          down(6, 0.8, 0.8),
+          up(6.05, 0.8, 0.8),
         ],
       })
     )
     expect(clips).toHaveLength(2)
+  })
+
+  it("frames the dense core, not pulled by an absorbed outlier", () => {
+    // Three clicks at 0.3 + one absorbed outlier at 0.45 (dist 0.15: sticky, but
+    // outside the 0.12 core). The frame centers on the core (~0.3), not the union
+    // midpoint (~0.34).
+    const clips = buildHybrid(
+      track({
+        events: [
+          down(5, 0.3, 0.3),
+          up(5.04, 0.3, 0.3),
+          down(5.5, 0.3, 0.3),
+          up(5.54, 0.3, 0.3),
+          down(6, 0.3, 0.3),
+          up(6.04, 0.3, 0.3),
+          down(6.5, 0.45, 0.3),
+          up(6.54, 0.45, 0.3),
+        ],
+      })
+    )
+    expect(clips).toHaveLength(1)
+    expect(clips[0].focus.x).toBeCloseTo(0.3, 2)
+  })
+
+  it("holds one steady scale across a tiled scene (no scale bounce)", () => {
+    // A low-confidence single click then a dense cluster in a distinct region,
+    // 1 s apart (non-idle → tiled into one scene). Their desired scales differ,
+    // but the scene holds the steady MIN.
+    const t = track({
+      events: [
+        down(5, 0.2, 0.2),
+        up(5.04, 0.2, 0.2),
+        down(6, 0.8, 0.2),
+        up(6.04, 0.8, 0.2),
+        down(6.3, 0.8, 0.2),
+        up(6.34, 0.8, 0.2),
+        down(6.6, 0.8, 0.2),
+        up(6.64, 0.8, 0.2),
+      ],
+    })
+    const unified = buildHybrid(t)
+    expect(unified).toHaveLength(2)
+    expect(unified[0].scale).toBeCloseTo(unified[1].scale, 6)
+
+    // With cohesion off, the dense cluster zooms harder than the single click.
+    const split = buildAutoZoomClipsFromTrack(t, {
+      detector: "hybrid-stabilized",
+      params: { sceneCohesion: false },
+    })
+    expect(split[1].scale).toBeGreaterThan(split[0].scale)
+    expect(unified[0].scale).toBeCloseTo(split[0].scale, 6) // unified to the MIN
+  })
+
+  it("keeps independent scales across scenes split by idle", () => {
+    const clips = buildHybrid(
+      track({
+        events: [
+          down(5, 0.2, 0.2),
+          up(5.04, 0.2, 0.2),
+          down(12, 0.8, 0.2),
+          up(12.04, 0.8, 0.2),
+          down(12.3, 0.8, 0.2),
+          up(12.34, 0.8, 0.2),
+          down(12.6, 0.8, 0.2),
+          up(12.64, 0.8, 0.2),
+        ],
+        durationSeconds: 20,
+      })
+    )
+    expect(clips).toHaveLength(2)
+    expect(clips[1].scale).toBeGreaterThan(clips[0].scale)
+  })
+
+  it("covers every click (high recall preserved)", () => {
+    const downs = [3, 8, 8.5, 20, 26]
+    const clips = buildHybrid(
+      track({
+        events: [
+          down(3, 0.2, 0.2),
+          up(3.05, 0.2, 0.2),
+          down(8, 0.5, 0.5),
+          up(8.05, 0.5, 0.5),
+          down(8.5, 0.52, 0.5),
+          up(8.55, 0.52, 0.5),
+          down(20, 0.8, 0.8),
+          up(20.05, 0.8, 0.8),
+          down(26, 0.3, 0.7),
+          up(26.05, 0.3, 0.7),
+        ],
+      })
+    )
+    for (const dt of downs) {
+      expect(clips.some((c) => dt >= c.start && dt <= c.end)).toBe(true)
+    }
+  })
+
+  it("is deterministic (identical input → byte-identical output)", () => {
+    const t = track({
+      moves: dwell(2, 1.5, 0.3, 0.3),
+      events: [
+        down(3, 0.3, 0.3),
+        up(3.05, 0.3, 0.3),
+        down(12, 0.8, 0.7),
+        up(12.05, 0.8, 0.7),
+      ],
+    })
+    expect(JSON.stringify(buildHybrid(t))).toEqual(JSON.stringify(buildHybrid(t)))
   })
 })
 
@@ -264,7 +400,7 @@ describe("high-recall pacing", () => {
 })
 
 describe("compareDetectors", () => {
-  it("returns metrics for both detectors", () => {
+  it("reports metrics for the detector", () => {
     const t = track({
       moves: [...dwell(2, 1.5, 0.3, 0.3), ...dwell(10, 1.5, 0.7, 0.6)],
       events: [
@@ -275,10 +411,7 @@ describe("compareDetectors", () => {
       ],
     })
     const metrics = compareDetectors(t)
-    expect(metrics.map((m) => m.id).sort()).toEqual([
-      "attention-region",
-      "click-anchored",
-    ])
+    expect(metrics.map((m) => m.id)).toEqual(["hybrid-stabilized"])
     for (const m of metrics) {
       expect(m.clipCount).toBeGreaterThan(0)
       expect(m.clickCoverage).toBeGreaterThan(0)

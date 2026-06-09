@@ -50,6 +50,28 @@ export function rectUnion(a: NormRect, b: NormRect): NormRect {
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
 }
 
+/**
+ * The smallest rect CENTERED on `center` that still contains `rect`. Used by the
+ * hybrid detector to frame a cluster on its stable anchor: the framed rect's
+ * center is exactly `center` (so `solveFraming` focuses there), while it still
+ * covers the whole union so every subject stays in frame. May extend outside
+ * [0,1] when the anchor sits near an edge — `solveFraming` clamps the focus and
+ * shrinks the scale to fit, so that is safe.
+ */
+export function growRectAroundCenter(
+  rect: NormRect,
+  center: { x: number; y: number }
+): NormRect {
+  const halfW = Math.max(center.x - rect.x, rect.x + rect.width - center.x, 0)
+  const halfH = Math.max(center.y - rect.y, rect.y + rect.height - center.y, 0)
+  return {
+    x: center.x - halfW,
+    y: center.y - halfH,
+    width: halfW * 2,
+    height: halfH * 2,
+  }
+}
+
 /** Weighted-average merge of two rect centers, preserving the union extent. */
 export function rectMergeWeighted(
   a: NormRect,

@@ -27,11 +27,33 @@ export interface AutoZoomParams {
   /** Minimum total clip duration (ms) so a zoom reads as a deliberate hold. */
   minHoldMs: number
 
-  // --- Click-anchored segmentation ----------------------------------------
-  /** New segment when the gap to the previous engagement exceeds this (ms). */
-  segmentGapMs: number
-  /** New segment when the focus jumps farther than this (normalized). */
-  segmentFocusJump: number
+  // --- Detector (stabilized clustering) -----------------------------------
+  /**
+   * Radius (normalized) of a cluster's "core" — the dense sub-cluster around its
+   * peak (highest-confidence) engagement whose score-weighted centroid the camera
+   * frames. Outliers absorbed for stability (below {@link hysteresisFocusJump})
+   * widen the frame but do NOT pull this center, so the framing stays put.
+   */
+  clusterRadius: number
+  /**
+   * Sticky region boundary (normalized): an engagement within this of the cluster
+   * anchor EXTENDS the current cluster; only a jump ≥ this starts a NEW one. Set
+   * well above `segmentFocusJump` so the camera holds a region instead of hopping
+   * (the "too much panning" / framing-drift cure). Must exceed `clusterRadius`.
+   */
+  hysteresisFocusJump: number
+  /** Max time gap (ms) to keep engagements in one cluster (≥ `mergeGapMs`). */
+  clusterMergeGapMs: number
+  /**
+   * One scale per scene: collapse a tiled run of windows to a single steady
+   * magnification (the run's MIN, so every subject stays framed). Only windows
+   * from the hybrid detector are affected; the other detectors never tile-group.
+   */
+  sceneCohesion: boolean
+  /** Hybrid clips' ease-in/out ramp AND window tail (ms) — gentler than `easeMs`. */
+  hybridEaseMs: number
+  /** Hybrid push-in lead (ms) — slightly longer than `leadInMs` for a calm land. */
+  hybridLeadInMs: number
 
   // --- Pacing --------------------------------------------------------------
   /** Merge two windows closer than this in time (ms) … */
@@ -104,8 +126,12 @@ export const AUTO_ZOOM_DEFAULTS: AutoZoomParams = {
   easeMs: 450,
   leadInMs: 250,
   minHoldMs: 900,
-  segmentGapMs: 1000,
-  segmentFocusJump: 0.14,
+  clusterRadius: 0.12,
+  hysteresisFocusJump: 0.3,
+  clusterMergeGapMs: 2200,
+  sceneCohesion: true,
+  hybridEaseMs: 650,
+  hybridLeadInMs: 300,
   mergeGapMs: 1800,
   mergeDist: 0.1,
   bridgeMaxGapMs: 2000,
