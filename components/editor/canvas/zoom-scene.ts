@@ -29,6 +29,13 @@ export type ZoomCamera = {
   radialBlurCenterX: number
   radialBlurCenterY: number
   radialBlurSettings: CanvasZoomRadialBlurSettings
+  // Directional motion blur for a cursor-follow REFRAME (a sideways pan). The
+  // smear vector is a signed fraction of the artboard (x of width, y of height)
+  // so it is resolution-independent; the renderer multiplies by the filter-input
+  // size. Zero except during a reframe — a plain zoom (scale change) uses the
+  // radial blur above, not this.
+  panBlurX: number
+  panBlurY: number
   clipId: string | null
 }
 
@@ -47,6 +54,8 @@ export const IDENTITY_ZOOM_CAMERA: ZoomCamera = {
   radialBlurCenterX: 0.5,
   radialBlurCenterY: 0.5,
   radialBlurSettings: ZOOM_RADIAL_BLUR_SHADER,
+  panBlurX: 0,
+  panBlurY: 0,
   clipId: null,
 }
 
@@ -129,17 +138,86 @@ const ZOOM_WELD_GAP_MAX_SECONDS = 0.6
 // own curve, so the cross-clip pan/zoom reads consistently.
 const ZOOM_WELD_CURVE: CanvasZoomTransitionCurve = "smootherstep"
 
-// --- Cursor follow -------------------------------------------------------
+// --- Cursor follow (hold + reframe-on-exit) ------------------------------
 //
-// While zoomed, the recorded cursor must never leave the visible window. The
-// camera keeps the cursor inside an inner "dead zone" of the window and only
-// pans (shifting the focus) once the cursor crosses that boundary — pinning it
-// at the edge of the dead zone. This is STATELESS (depends only on focus, scale,
-// and the cursor position at the sampled time), so it stays deterministic for
-// export and arbitrary seeking. A larger fraction = follow only near the very
-// edge (fixed framing for normal pointer movement); smaller = the camera tracks
-// the cursor more eagerly.
-const ZOOM_FOLLOW_DEAD_FRACTION = 0.8
+// While a clip is held zoomed, the camera keeps the recorded cursor in the
+// visible window WITHOUT sliding continuously with it (the "scene + cursor both
+// move" churn is exactly what we are avoiding). Instead the frame HOLDS still
+// and only REFRAMES — one eased move that recentres on the cursor — when the
+// cursor is about to leave a generous inner "safe box". Between reframes the
+// camera does not move at all.
+//
+// "Hold then reframe" is STATEFUL (it remembers where it settled), which would
+// break the pure per-frame sampler that keeps preview == export. So we
+// PRECOMPUTE a follow path per clip from the recorded cursor (deterministic:
+// fixed-rate sampling of a fixed track) — timed focus anchors with eased moves
+// between them. `sampleZoomCameraAtTime` then just reads the path, so the
+// sampler stays pure and replayable and the editor preview, hover, and export
+// all follow identically. A clip whose cursor never leaves the safe box gets no
+// path and renders byte-identically to a plain fixed-focus zoom.
+
+export type ZoomFollowParams = {
+  /** Cursor sampling rate (Hz) for the precompute walk. */
+  sampleHz: number
+  /**
+   * The cursor may roam this fraction of the window's half-extent away from the
+   * frame centre before a reframe triggers. Larger = holds longer / fewer
+   * reframes (more stable); smaller = reframes sooner (cursor stays more
+   * centred). A reframe recentres the cursor, so this is also the roam budget
+   * before the *next* reframe — the hysteresis that prevents thrashing.
+   */
+  safeFraction: number
+  /** Eased duration (seconds) of a single reframe move. */
+  transitionSec: number
+}
+
+export const ZOOM_FOLLOW_DEFAULTS: ZoomFollowParams = {
+  sampleHz: 30,
+  safeFraction: 0.72,
+  transitionSec: 0.5,
+}
+
+// --- Reframe motion blur (directional) -----------------------------------
+//
+// A reframe pans the camera sideways (scale held). We smear the zoomed content
+// along the travel direction with a directional motion blur — the same look the
+// cursor sprite uses — proportional to the focus pan velocity. It is computed
+// from the follow path (a central difference on the eased focus), so it ramps in
+// and out on its own: the `smootherstep` reframe has zero slope at both ends, so
+// the blur fades up to a mid-reframe peak and back to zero. SUBTLE by default;
+// the cursor layer is excluded from it (it keeps only its own velocity blur).
+
+/** Shutter window (s): focus velocity × this = the per-shutter smear length. */
+const ZOOM_PAN_BLUR_SHUTTER_SECONDS = 1 / 30
+/** Overall strength. Lower = subtler. Tuned so a typical reframe peaks ~3-4%. */
+const ZOOM_PAN_BLUR_GAIN = 0.3
+/** Hard cap on the smear as a fraction of the artboard (bounds the worst case). */
+const ZOOM_PAN_BLUR_CAP = 0.05
+/** Below this fraction the smear is dropped (filter off — avoids a 1-tap no-op). */
+const ZOOM_PAN_BLUR_MIN = 1e-3
+/** Velocity sample half-window (s) for the central-difference focus velocity. */
+const ZOOM_PAN_BLUR_VELOCITY_DT = 1 / 240
+
+/** One timed focus keyframe on a clip's follow path (`fx`/`fy` are stored focus). */
+type ZoomFollowAnchor = { t: number; fx: number; fy: number }
+
+/**
+ * A precomputed cursor-follow path for one clip: the focus holds at each anchor
+ * and eases to the next over `transitionSec`. Always ≥2 anchors (a single-anchor
+ * path is indistinguishable from a fixed focus and is dropped to `null`).
+ */
+export type ZoomFollowPath = {
+  transitionSec: number
+  anchors: ZoomFollowAnchor[]
+}
+
+/** Per-clip follow paths, keyed by clip id. */
+export type ZoomFollowPaths = ReadonlyMap<string, ZoomFollowPath>
+
+/** Samples the recorded cursor's artboard-normalized focus at a timeline time. */
+export type CursorFocusSampler = (
+  timelineSeconds: number
+) => { x: number; y: number } | null
 
 // A clip resolved to its sampling-ready form: settled scale/focus, ease ramp
 // lengths, and the hold interval [holdStart, holdEnd] where it sits fully zoomed.
@@ -175,90 +253,222 @@ function resolveZoomClip(input: CanvasZoomClipInput): ResolvedZoomClip {
 }
 
 /** Build the camera transform from a resolved (scale, focus) state. */
-function cameraFromState(
-  scale: number,
-  fx: number,
-  fy: number,
-  radialBlur: number,
-  clipId: string,
-  artboard: ArtboardSize
-): ZoomCamera {
-  if (scale <= 1 + ZOOM_IDENTITY_EPSILON) return IDENTITY_ZOOM_CAMERA
+function cameraFromState(state: ZoomState, artboard: ArtboardSize): ZoomCamera {
+  if (state.scale <= 1 + ZOOM_IDENTITY_EPSILON) return IDENTITY_ZOOM_CAMERA
   return {
-    scale,
-    offsetX: fx * artboard.width * (1 - scale),
-    offsetY: fy * artboard.height * (1 - scale),
-    radialBlur: clampUnit(radialBlur),
-    radialBlurCenterX: fx,
-    radialBlurCenterY: fy,
+    scale: state.scale,
+    offsetX: state.fx * artboard.width * (1 - state.scale),
+    offsetY: state.fy * artboard.height * (1 - state.scale),
+    radialBlur: clampUnit(state.radialBlur),
+    radialBlurCenterX: state.fx,
+    radialBlurCenterY: state.fy,
     radialBlurSettings: ZOOM_RADIAL_BLUR_SHADER,
-    clipId,
+    panBlurX: state.panBlurX,
+    panBlurY: state.panBlurY,
+    clipId: state.clipId,
   }
 }
 
-// Intermediate camera state (scale + focus + blur amount) before the cursor
-// follow nudges the focus and the transform is built. `null` means identity.
+// Intermediate camera state (scale + focus + blur) before the transform is built.
+// `panBlurX/Y` are the directional reframe smear; `null` means identity.
 type ZoomState = {
   scale: number
   fx: number
   fy: number
   radialBlur: number
+  panBlurX: number
+  panBlurY: number
   clipId: string
 }
 
 /**
- * A clip's own ease ramp from/to identity — focus stays FIXED at the clip's
- * point while only the scale ramps (radial zoom around the anchor). This is the
- * single-clip behavior, unchanged.
+ * A clip's own ease ramp from/to identity — the scale ramps (radial zoom around
+ * the anchor) while the focus is held FIXED at `fx`/`fy`. Ease-in anchors on the
+ * clip's own focus; ease-out anchors on wherever the follow path settled, so the
+ * camera glides out from its final held frame rather than snapping back.
  */
 function easeState(
   clip: ResolvedZoomClip,
   progress: number,
-  velocity: number
+  velocity: number,
+  fx: number,
+  fy: number
 ): ZoomState | null {
   const scale = 1 + (clip.scale - 1) * progress
   if (scale <= 1 + ZOOM_IDENTITY_EPSILON) return null
   const scaleVelocity = (clip.scale - 1) * velocity
   const motion = clampUnit((scaleVelocity / scale) * ZOOM_BLUR_MOTION_GAIN)
-  return { scale, fx: clip.fx, fy: clip.fy, radialBlur: clip.blur * motion, clipId: clip.id }
+  // Ease ramps are zooms → radial blur only; no directional pan blur.
+  return {
+    scale,
+    fx,
+    fy,
+    radialBlur: clip.blur * motion,
+    panBlurX: 0,
+    panBlurY: 0,
+    clipId: clip.id,
+  }
+}
+
+function clampRange(value: number, lo: number, hi: number) {
+  return Math.min(hi, Math.max(lo, value))
 }
 
 /**
- * Shift one axis of the focus so the cursor stays inside the window's dead zone.
- * Returns the focus unchanged while the cursor is comfortably inside; once it
- * crosses the dead-zone boundary the focus moves to pin the cursor there. `inv`
- * is `1 - 1/scale` (> 0), `half` the window half-width `1/(2·scale)`.
+ * Precompute the hold + reframe-on-exit follow path for one resolved clip.
+ * Greedy walk over the clip's hold interval: hold the current frame until the
+ * cursor leaves its safe box, then drop a new anchor that recentres on the
+ * cursor and skip past the reframe so the catch-up frames can't immediately
+ * re-trigger. Returns `null` when there is no zoom, no usable cursor data, or
+ * the cursor never left the safe box (→ a plain fixed-focus zoom).
  */
-function followAxis(
-  focus: number,
-  cursor: number,
-  inv: number,
-  half: number,
-  deadHalf: number
-): number {
-  const center = focus * inv + half
-  let desired = center
-  if (cursor < center - deadHalf) desired = cursor + deadHalf
-  else if (cursor > center + deadHalf) desired = cursor - deadHalf
-  else return focus
-  return clampUnit((desired - half) / inv)
+function computeFollowPath(
+  clip: ResolvedZoomClip,
+  sampleCursor: CursorFocusSampler,
+  params: ZoomFollowParams
+): ZoomFollowPath | null {
+  if (clip.scale <= 1 + ZOOM_IDENTITY_EPSILON) return null
+  const inv = 1 - 1 / clip.scale
+  if (inv <= 0) return null
+  const span = clip.holdEnd - clip.holdStart
+  if (span <= 0) return null
+
+  const half = 1 / (2 * clip.scale)
+  const safeHalf = clampUnit(params.safeFraction) * half
+  // Centre range that keeps the window fully inside the artboard [0,1].
+  const minCenter = half
+  const maxCenter = 1 - half
+  const dt = 1 / Math.max(1, params.sampleHz)
+  const transition = Math.max(0, params.transitionSec)
+
+  const fx0 = clampUnit(clip.fx)
+  const fy0 = clampUnit(clip.fy)
+  const anchors: ZoomFollowAnchor[] = [{ t: clip.holdStart, fx: fx0, fy: fy0 }]
+  let centerX = fx0 * inv + half
+  let centerY = fy0 * inv + half
+
+  for (let t = clip.holdStart; t <= clip.holdEnd + 1e-9; t += dt) {
+    const c = sampleCursor(t)
+    if (!c) continue
+    const cx = clampUnit(c.x)
+    const cy = clampUnit(c.y)
+    // Inside the safe box → keep holding, camera perfectly still.
+    if (
+      Math.abs(cx - centerX) <= safeHalf &&
+      Math.abs(cy - centerY) <= safeHalf
+    ) {
+      continue
+    }
+    const nextCenterX = clampRange(cx, minCenter, maxCenter)
+    const nextCenterY = clampRange(cy, minCenter, maxCenter)
+    // Already as centred as the window can get (cursor near the artboard edge) —
+    // don't drop a no-op anchor that would just thrash in place.
+    if (
+      Math.abs(nextCenterX - centerX) < ZOOM_IDENTITY_EPSILON &&
+      Math.abs(nextCenterY - centerY) < ZOOM_IDENTITY_EPSILON
+    ) {
+      continue
+    }
+    centerX = nextCenterX
+    centerY = nextCenterY
+    anchors.push({
+      t,
+      fx: clampUnit((nextCenterX - half) / inv),
+      fy: clampUnit((nextCenterY - half) / inv),
+    })
+    // Skip past the reframe so its catch-up frames don't re-trigger a reframe.
+    t += transition
+  }
+
+  if (anchors.length < 2) return null
+  return { transitionSec: transition, anchors }
 }
 
-/** Keep the cursor inside the zoom window by nudging the focus (both axes). */
-function applyCursorFollow(
-  fx: number,
-  fy: number,
-  scale: number,
-  cursor: { x: number; y: number }
-): { x: number; y: number } {
-  const inv = 1 - 1 / scale
-  if (inv <= 0) return { x: fx, y: fy }
-  const half = 1 / (2 * scale)
-  const deadHalf = half * ZOOM_FOLLOW_DEAD_FRACTION
-  return {
-    x: followAxis(fx, clampUnit(cursor.x), inv, half, deadHalf),
-    y: followAxis(fy, clampUnit(cursor.y), inv, half, deadHalf),
+/**
+ * Precompute cursor-follow paths for every enabled clip. Call this OFF the hot
+ * path (only when clips / cursor track / artboard change) and pass the result
+ * to {@link sampleZoomCameraAtTime}. The editor preview and the exporter build
+ * it the same way from the same cursor mapping, so the two follow identically.
+ */
+export function computeZoomFollowPaths(
+  clips: readonly CanvasZoomClipInput[],
+  sampleCursor: CursorFocusSampler,
+  overrides?: Partial<ZoomFollowParams>
+): Map<string, ZoomFollowPath> {
+  const params = { ...ZOOM_FOLLOW_DEFAULTS, ...overrides }
+  const paths = new Map<string, ZoomFollowPath>()
+  for (const input of clips) {
+    if (input.enabled === false || input.end <= input.start) continue
+    const clip = resolveZoomClip(input)
+    const path = computeFollowPath(clip, sampleCursor, params)
+    if (path) paths.set(clip.id, path)
   }
+  return paths
+}
+
+/** Focus at time `t` along a follow path: hold each anchor, ease to the next. */
+function sampleFollowFocus(
+  path: ZoomFollowPath,
+  t: number
+): { fx: number; fy: number } {
+  const { anchors } = path
+  let i = 0
+  for (let k = 0; k < anchors.length; k++) {
+    if (anchors[k].t <= t) i = k
+    else break
+  }
+  const cur = anchors[i]
+  if (i === 0) return { fx: cur.fx, fy: cur.fy }
+  const prev = anchors[i - 1]
+  const u =
+    path.transitionSec > 0 ? clampUnit((t - cur.t) / path.transitionSec) : 1
+  const e = smootherstep(u)
+  return {
+    fx: prev.fx + (cur.fx - prev.fx) * e,
+    fy: prev.fy + (cur.fy - prev.fy) * e,
+  }
+}
+
+/** The clip's focus at `t`, following the precomputed path when one exists. */
+function followFocusFor(
+  clip: ResolvedZoomClip,
+  t: number,
+  paths: ZoomFollowPaths | null
+): { fx: number; fy: number } {
+  const path = paths?.get(clip.id)
+  if (!path) return { fx: clip.fx, fy: clip.fy }
+  return sampleFollowFocus(path, t)
+}
+
+/**
+ * Directional reframe blur at `t`: a signed smear vector (artboard fraction)
+ * from the follow path's focus velocity. Zero while holding (velocity ~0) and at
+ * both ends of a reframe; peaks mid-reframe. Returns `{0,0}` when the clip has no
+ * follow path. The content shifts by `Δfocus·(scale−1)` of the artboard, so the
+ * smear scales with both the pan speed and the zoom depth.
+ */
+function panBlurFor(
+  clip: ResolvedZoomClip,
+  t: number,
+  scale: number,
+  paths: ZoomFollowPaths | null
+): { x: number; y: number } {
+  const path = paths?.get(clip.id)
+  const depth = scale - 1
+  if (!path || depth <= 0) return { x: 0, y: 0 }
+  const dt = ZOOM_PAN_BLUR_VELOCITY_DT
+  const before = sampleFollowFocus(path, t - dt)
+  const after = sampleFollowFocus(path, t + dt)
+  const k = (depth * ZOOM_PAN_BLUR_SHUTTER_SECONDS * ZOOM_PAN_BLUR_GAIN) / (2 * dt)
+  return {
+    x: clampPanSmear((after.fx - before.fx) * k),
+    y: clampPanSmear((after.fy - before.fy) * k),
+  }
+}
+
+function clampPanSmear(value: number) {
+  const v = Math.max(-ZOOM_PAN_BLUR_CAP, Math.min(ZOOM_PAN_BLUR_CAP, value))
+  return Math.abs(v) < ZOOM_PAN_BLUR_MIN ? 0 : v
 }
 
 /** Whether two adjacent clips should weld into a continuous transition. */
@@ -324,16 +534,34 @@ export function getZoomVisibleWindow(
   }
 }
 
-/** The settled / transitioning camera state at `t`, before the cursor follow. */
+/**
+ * The settled / transitioning camera state at `t`. The held + ease-out + weld
+ * branches read the per-clip follow path (via {@link followFocusFor}) so the
+ * focus tracks the cursor's hold + reframe motion; with no path they use the
+ * clip's fixed focus and behave exactly as a plain zoom.
+ */
 function computeZoomState(
   resolved: readonly ResolvedZoomClip[],
-  t: number
+  t: number,
+  paths: ZoomFollowPaths | null
 ): ZoomState | null {
-  // 1. Held inside a clip's settle interval → full settled zoom, no blur.
+  // 1. Held inside a clip's settle interval → full settled zoom. The focus
+  //    follows the precomputed path (held still, eased reframes); a reframe pan
+  //    adds a directional motion blur (no radial blur — the scale is steady).
   for (const c of resolved) {
     if (t >= c.holdStart && t <= c.holdEnd && t < c.end) {
       if (c.scale <= 1 + ZOOM_IDENTITY_EPSILON) return null
-      return { scale: c.scale, fx: c.fx, fy: c.fy, radialBlur: 0, clipId: c.id }
+      const f = followFocusFor(c, t, paths)
+      const pan = panBlurFor(c, t, c.scale, paths)
+      return {
+        scale: c.scale,
+        fx: f.fx,
+        fy: f.fy,
+        radialBlur: 0,
+        panBlurX: pan.x,
+        panBlurY: pan.y,
+        clipId: c.id,
+      }
     }
   }
 
@@ -355,35 +583,53 @@ function computeZoomState(
     const slope = curveSlope(ZOOM_WELD_CURVE, raw) / windowDur
     const scaleVelocity = Math.abs(b.scale - a.scale) * slope
     const motion = clampUnit((scaleVelocity / Math.max(scale, 1e-6)) * ZOOM_BLUR_MOTION_GAIN)
+    // Weld between A's FINAL held frame and B's INITIAL frame, so a reframe that
+    // moved A's focus carries through the cross-clip glide.
+    const fa = followFocusFor(a, a.holdEnd, paths)
+    const fb = followFocusFor(b, b.holdStart, paths)
     return {
       scale,
-      fx: a.fx + (b.fx - a.fx) * u,
-      fy: a.fy + (b.fy - a.fy) * u,
+      fx: fa.fx + (fb.fx - fa.fx) * u,
+      fy: fa.fy + (fb.fy - fa.fy) * u,
       radialBlur: (a.blur + (b.blur - a.blur) * u) * motion,
+      // Welds keep their radial (zoom) blur; reframe pan blur is reframes-only.
+      panBlurX: 0,
+      panBlurY: 0,
       clipId: u < 0.5 ? a.id : b.id,
     }
   }
 
-  // 3. A clip's own (non-welded) ease-in from identity, focus fixed.
+  // 3. A clip's own (non-welded) ease-in from identity — focus anchored on the
+  //    clip's own point (the follow path's first anchor), scale ramping.
   for (const c of resolved) {
     if (t >= c.start && t < c.holdStart) {
       const easeIn = c.holdStart - c.start
       if (easeIn <= 0) continue
       const raw = (t - c.start) / easeIn
-      return easeState(c, transitionCurveValue(c.curve, raw), curveSlope(c.curve, raw) / easeIn)
+      return easeState(
+        c,
+        transitionCurveValue(c.curve, raw),
+        curveSlope(c.curve, raw) / easeIn,
+        c.fx,
+        c.fy
+      )
     }
   }
 
-  // 4. A clip's own (non-welded) ease-out to identity, focus fixed.
+  // 4. A clip's own (non-welded) ease-out to identity — focus anchored on the
+  //    final held frame the follow path settled on, scale ramping back down.
   for (const c of resolved) {
     if (t > c.holdEnd && t < c.end) {
       const easeOut = c.end - c.holdEnd
       if (easeOut <= 0) continue
       const raw = (t - c.holdEnd) / easeOut
+      const f = followFocusFor(c, c.holdEnd, paths)
       return easeState(
         c,
         1 - transitionCurveValue(c.curve, raw),
-        curveSlope(c.curve, raw) / easeOut
+        curveSlope(c.curve, raw) / easeOut,
+        f.fx,
+        f.fy
       )
     }
   }
@@ -396,16 +642,16 @@ function computeZoomState(
  * Sample the composition zoom camera at `compositionSeconds`. Shared by editor
  * preview, hover preview, and export.
  *
- * When `cursor` (the recorded cursor's artboard-normalized position at this
- * time) is provided, the camera follows it so the pointer never leaves the
- * zoomed window — a stateless dead-zone clamp on the focus. Pass `null` /
- * omit to disable following (identical to the prior behavior).
+ * `followPaths` are the precomputed per-clip cursor-follow paths (see
+ * {@link computeZoomFollowPaths}); when present the camera holds a stable frame
+ * and reframes only when the cursor is about to leave the window. Pass `null` /
+ * omit to render plain fixed-focus zooms (identical to no follow).
  */
 export function sampleZoomCameraAtTime(
   clips: readonly CanvasZoomClipInput[],
   artboard: ArtboardSize,
   compositionSeconds: number,
-  cursor?: { x: number; y: number } | null
+  followPaths?: ZoomFollowPaths | null
 ): ZoomCamera {
   // Resolve + sort enabled clips: welding needs neighbor order. Zoom tracks hold
   // a handful of clips, so this per-frame pass is cheap; if the track ever grows
@@ -416,16 +662,10 @@ export function sampleZoomCameraAtTime(
     .sort((a, b) => a.start - b.start || a.end - b.end)
   if (resolved.length === 0) return IDENTITY_ZOOM_CAMERA
 
-  const state = computeZoomState(resolved, compositionSeconds)
+  const state = computeZoomState(resolved, compositionSeconds, followPaths ?? null)
   if (!state) return IDENTITY_ZOOM_CAMERA
 
-  let { fx, fy } = state
-  if (cursor && state.scale > 1 + ZOOM_IDENTITY_EPSILON) {
-    const followed = applyCursorFollow(fx, fy, state.scale, cursor)
-    fx = followed.x
-    fy = followed.y
-  }
-  return cameraFromState(state.scale, fx, fy, state.radialBlur, state.clipId, artboard)
+  return cameraFromState(state, artboard)
 }
 
 export function zoomCamerasEqual(a: ZoomCamera, b: ZoomCamera) {
@@ -439,6 +679,8 @@ export function zoomCamerasEqual(a: ZoomCamera, b: ZoomCamera) {
     Math.abs(a.radialBlurCenterY - b.radialBlurCenterY) <
       ZOOM_IDENTITY_EPSILON &&
     zoomRadialBlurSettingsEqual(a.radialBlurSettings, b.radialBlurSettings) &&
+    Math.abs(a.panBlurX - b.panBlurX) < ZOOM_IDENTITY_EPSILON &&
+    Math.abs(a.panBlurY - b.panBlurY) < ZOOM_IDENTITY_EPSILON &&
     a.clipId === b.clipId
   )
 }

@@ -20,7 +20,11 @@ import type {
   ProjectTimelineClip,
 } from "@/types/api"
 import { exportResolutionPixels } from "@/lib/editor-project/export-settings"
-import { sampleZoomCameraAtTime } from "@/components/editor/canvas/zoom-scene"
+import {
+  computeZoomFollowPaths,
+  sampleZoomCameraAtTime,
+  type CursorFocusSampler,
+} from "@/components/editor/canvas/zoom-scene"
 import { sampleCursorArtboardFocus } from "@/components/editor/canvas/cursor-scene"
 import { formatToVideoCodec } from "./codec-probe"
 import { buildExportStage } from "./build-stage"
@@ -401,34 +405,49 @@ export async function runExport(options: RunExportOptions): Promise<void> {
       )
       const decodedSourceIds = new Set<string>()
 
+      // Precompute the cursor-follow paths ONCE up front — the same hold +
+      // reframe-on-exit engine the editor uses, fed by the SAME cursor mapping,
+      // so preview and export follow pixel-identically. The sampler maps a
+      // timeline time → the screen source time for that frame (export is
+      // frame-quantized) → the recorded cursor's artboard focus.
+      const followCursorSampler: CursorFocusSampler | null = handles.cursor
+        ? (time) => {
+            const cursor = handles.cursor
+            if (!cursor) return null
+            let idx = Math.round(time / frameDuration)
+            if (idx < 0) idx = 0
+            if (idx > totalFrames - 1) idx = totalFrames - 1
+            const activeAt = plan.framePlan[idx]
+            const screenEntry = activeAt?.find(
+              (entry) => entry.videoId === cursor.screenVideoId
+            )
+            if (!screenEntry) return null
+            return sampleCursorArtboardFocus(
+              cursor.track,
+              cursor.video,
+              screenEntry.sourceTimeSec,
+              state.artboard
+            )
+          }
+        : null
+      const zoomFollowPaths = followCursorSampler
+        ? computeZoomFollowPaths(state.zoomClips ?? [], followCursorSampler)
+        : null
+
       for (let frame = 0; frame < totalFrames; frame++) {
         throwIfAborted(signal)
 
         const t = frame * frameDuration
         const active = plan.framePlan[frame]
-        // Cursor follow: the recorded cursor's artboard focus this frame (if
-        // any), so the zoom camera keeps it inside the window — the SAME mapping
-        // the cursor sprite renders with, so preview and export follow identically.
-        let cursorFocus: { x: number; y: number } | null = null
-        if (handles.cursor) {
-          const screenEntry = active.find(
-            (entry) => entry.videoId === handles.cursor?.screenVideoId
-          )
-          if (screenEntry) {
-            cursorFocus = sampleCursorArtboardFocus(
-              handles.cursor.track,
-              handles.cursor.video,
-              screenEntry.sourceTimeSec,
-              state.artboard
-            )
-          }
-        }
+        // Cursor follow uses the precomputed hold + reframe paths (above), so the
+        // zoom camera holds a stable frame and reframes only when the cursor is
+        // about to leave the window — pixel-identical to the editor preview.
         handles.applyZoomCamera(
           sampleZoomCameraAtTime(
             state.zoomClips ?? [],
             state.artboard,
             t,
-            cursorFocus
+            zoomFollowPaths
           )
         )
 

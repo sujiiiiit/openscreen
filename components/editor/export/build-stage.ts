@@ -52,6 +52,10 @@ import {
   applyZoomBlur,
   createZoomBlurFilter,
 } from "@/components/editor/canvas/pixi/zoom-blur"
+import {
+  applyZoomPanBlur,
+  createZoomPanBlurFilter,
+} from "@/components/editor/canvas/pixi/zoom-pan-blur"
 import { rendererPreferenceChain } from "@/components/editor/canvas/pixi/renderer-preference"
 import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
 import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
@@ -153,6 +157,9 @@ export async function buildExportStage(
   const contentMask = new Graphics()
     .rect(0, 0, artboard.width, artboard.height)
     .fill(0xffffff)
+  const cursorMask = new Graphics()
+    .rect(0, 0, artboard.width, artboard.height)
+    .fill(0xffffff)
   backgroundCamera.mask = backgroundMask
   contentCamera.mask = contentMask
 
@@ -160,18 +167,28 @@ export async function buildExportStage(
   backgroundCamera.addChild(surface)
   const nodesLayer = new Container()
   contentCamera.addChild(nodesLayer)
-  // Wrap bg + content so the radial zoom blur filter acts on the whole
-  // composition (incl. the cursor) at once — same structure as the editor scene.
-  const composite = new Container()
-  composite.addChild(
+  // Cursor in its own camera (mirrors the content transform + clip) so the
+  // directional reframe pan blur — which acts on `zoomedContent` — skips it,
+  // while the radial zoom blur on the whole composite still includes it.
+  const cursorCamera = new Container()
+  cursorCamera.mask = cursorMask
+  // `zoomedContent` = the pan-blur target (bg + content, no cursor). `composite`
+  // = the radial-blur target (zoomed content + cursor). Same structure as the
+  // editor scene so preview and export blur identically.
+  const zoomedContent = new Container()
+  zoomedContent.addChild(
     backgroundCamera,
     backgroundMask,
     contentCamera,
     contentMask
   )
+  const composite = new Container()
+  composite.addChild(zoomedContent, cursorCamera, cursorMask)
   artboardContainer.addChild(composite)
   const zoomBlur = createZoomBlurFilter()
   let zoomBlurOn = false
+  const zoomPanBlur = createZoomPanBlurFilter()
+  let zoomPanBlurOn = false
 
   await buildExportSurface(surface, artboard)
 
@@ -184,12 +201,13 @@ export async function buildExportStage(
     nodesByVideoId.set(video.id, built.handle)
   }
 
-  // Cursor sits above the video nodes in the content camera (same z-order as the
-  // editor preview), so it zooms + clips with the content.
+  // Cursor sits in its own camera (mirrors the content transform + clip, same
+  // z-order as the editor preview), so it zooms + clips with the content but is
+  // excluded from the reframe pan blur.
   const cursor = await buildExportCursor(
     state,
     assetUrlsByVideoId,
-    contentCamera,
+    cursorCamera,
     projectPath
   )
 
@@ -198,11 +216,25 @@ export async function buildExportStage(
     backgroundCamera.position.set(camera.offsetX, camera.offsetY)
     contentCamera.scale.set(camera.scale)
     contentCamera.position.set(camera.offsetX, camera.offsetY)
-    // The export filter input is the output canvas, so center maps to output px.
+    cursorCamera.scale.set(camera.scale)
+    cursorCamera.position.set(camera.offsetX, camera.offsetY)
+    // The export filter input is the output canvas, so center/velocity map to
+    // output px. Radial blur on the whole composite, directional reframe pan
+    // blur on the zoomed content only (cursor excluded).
     const on = applyZoomBlur(zoomBlur, camera, outputSize.width, outputSize.height)
     if (on !== zoomBlurOn) {
       composite.filters = on ? [zoomBlur] : []
       zoomBlurOn = on
+    }
+    const panOn = applyZoomPanBlur(
+      zoomPanBlur,
+      camera,
+      outputSize.width,
+      outputSize.height
+    )
+    if (panOn !== zoomPanBlurOn) {
+      zoomedContent.filters = panOn ? [zoomPanBlur] : []
+      zoomPanBlurOn = panOn
     }
   }
 
@@ -210,6 +242,7 @@ export async function buildExportStage(
     nodesByVideoId.clear()
     cursor?.cursorSprite.destroy()
     zoomBlur.destroy()
+    zoomPanBlur.destroy()
     try {
       app.destroy({ removeView: true }, { children: true })
     } catch {

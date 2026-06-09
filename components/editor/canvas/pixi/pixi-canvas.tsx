@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Application } from "pixi.js"
 
 import { getPreviewFillTransform } from "@/lib/editor-canvas"
@@ -24,7 +24,11 @@ import {
 import { buildCursorTrack, projectFolderFromObjectUrl } from "../cursor-scene"
 import { registerSceneSnapshotProvider } from "../scene-snapshot"
 import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
-import { sampleZoomCameraAtTime } from "../zoom-scene"
+import {
+  computeZoomFollowPaths,
+  sampleZoomCameraAtTime,
+  type ZoomFollowPaths,
+} from "../zoom-scene"
 import { CursorController, type CursorState } from "./cursor-controller"
 import { canvasNodeFromVideo } from "./node-model"
 import { preferredRendererBackend } from "./renderer-preference"
@@ -246,6 +250,10 @@ export function PixiCanvas() {
   }, [primaryAudioVideoId])
   const zoomClipsRef = useRef(zoomClips)
   const committedTimeRef = useRef(timelineTime)
+  // Precomputed cursor-follow paths (hold + reframe-on-exit), one per zoom clip.
+  // Rebuilt off the hot path when clips / cursor track / artboard change; the
+  // per-frame camera sampling just reads this ref.
+  const followPathsRef = useRef<ZoomFollowPaths | null>(null)
   useEffect(() => {
     zoomClipsRef.current = zoomClips
   }, [zoomClips])
@@ -659,6 +667,39 @@ export function PixiCanvas() {
     videoControllerRef.current?.setPrimaryAudio(primaryAudioVideoId)
   }, [primaryAudioVideoId])
 
+  // Rebuild the precomputed cursor-follow paths from the current clips + cursor
+  // track. Pure + deterministic (samples the fixed recorded cursor at a fixed
+  // rate), so the same paths drive preview, hover, and export identically. Cheap
+  // (a handful of clips, ~30 Hz over each hold), and kept OFF the per-frame path.
+  const recomputeFollowPaths = useCallback(() => {
+    const controller = cursorControllerRef.current
+    const artboardSize = artboardSizeRef.current
+    if (!controller) {
+      followPathsRef.current = null
+      return
+    }
+    followPathsRef.current = computeZoomFollowPaths(
+      zoomClipsRef.current,
+      (time) => controller.getArtboardFocusAt(time, artboardSize)
+    )
+  }, [])
+
+  // Recompute follow paths whenever the clips, artboard geometry, or cursor
+  // inputs change, then re-apply the camera at the current time so the change is
+  // visible immediately while paused.
+  useEffect(() => {
+    recomputeFollowPaths()
+    const time = committedTimeRef.current
+    sceneRef.current?.applyZoomCamera(
+      sampleZoomCameraAtTime(
+        zoomClipsRef.current,
+        artboardSizeRef.current,
+        time,
+        followPathsRef.current
+      )
+    )
+  }, [zoomClips, artboard.width, artboard.height, cursorState, recomputeFollowPaths])
+
   // Composition zoom-clip camera: sample at the live playback tick / paused hover
   // / committed time and apply to the scene's content + background cameras.
   useEffect(() => {
@@ -667,11 +708,8 @@ export function PixiCanvas() {
         zoomClipsRef.current,
         artboardSizeRef.current,
         time,
-        // Follow the recorded cursor so it never leaves the zoomed window.
-        cursorControllerRef.current?.getArtboardFocusAt(
-          time,
-          artboardSizeRef.current
-        ) ?? null
+        // Hold + reframe-on-exit follow paths so the cursor stays in the window.
+        followPathsRef.current
       )
       sceneRef.current?.applyZoomCamera(camera)
       cursorControllerRef.current?.place(time)
@@ -693,10 +731,7 @@ export function PixiCanvas() {
         zoomClips,
         artboardSize,
         timelineTime,
-        cursorControllerRef.current?.getArtboardFocusAt(
-          timelineTime,
-          artboardSize
-        ) ?? null
+        followPathsRef.current
       )
     )
     cursorControllerRef.current?.place(timelineTime)
@@ -751,6 +786,17 @@ export function PixiCanvas() {
       cursorTrackRef.current = track
       cursorControllerRef.current?.setTrack(track)
       cursorControllerRef.current?.place(committedTimeRef.current)
+      // The follow paths depend on the recorded cursor — rebuild them now that
+      // the track has loaded and re-apply the camera at the committed time.
+      recomputeFollowPaths()
+      sceneRef.current?.applyZoomCamera(
+        sampleZoomCameraAtTime(
+          zoomClipsRef.current,
+          artboardSizeRef.current,
+          committedTimeRef.current,
+          followPathsRef.current
+        )
+      )
       // Track === null means the sidecar data was missing/corrupt/unusable
       // (main has already logged the precise reason).
       reportCursorTrackUnavailable(track === null)
@@ -764,6 +810,7 @@ export function PixiCanvas() {
     artboard.cursorSmoothingMode,
     project?.path,
     reportCursorTrackUnavailable,
+    recomputeFollowPaths,
   ])
 
   return (

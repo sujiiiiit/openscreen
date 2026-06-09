@@ -42,6 +42,7 @@ import {
 import { drawPixelGrid } from "./pixel-grid"
 import { applyVideoAppearance, type NodeAppearance } from "./video-appearance"
 import { applyZoomBlur, createZoomBlurFilter } from "./zoom-blur"
+import { applyZoomPanBlur, createZoomPanBlurFilter } from "./zoom-pan-blur"
 
 /**
  * A mounted video node. Sub-tree (bottom → top):
@@ -128,7 +129,17 @@ export class CanvasScene {
   private readonly nodesLayer = new Container({ label: "nodes" })
   /** Cursor overlay parent — above the video nodes, inside the artboard clip. */
   private readonly cursorLayer = new Container({ label: "cursor" })
-  /** Wraps the zoomed composition (bg + grid + content) for the radial zoom blur. */
+  /** Zoom camera for the cursor (mirrors the content camera transform). It sits
+   *  inside the composite (so the radial zoom blur still applies) but OUTSIDE the
+   *  zoomed-content wrapper, so a reframe's directional pan blur skips it — the
+   *  cursor keeps only its own velocity blur. */
+  private readonly cursorCamera = new Container({ label: "cursor-camera" })
+  private readonly cursorMask = new Graphics({ label: "cursor-mask" })
+  /** Wraps the zoomed bg + grid + video content. The directional reframe pan
+   *  blur acts on THIS (cursor excluded); the radial zoom blur acts on the whole
+   *  composite below (cursor included). */
+  private readonly zoomedContent = new Container({ label: "zoomed-content" })
+  /** Wraps the zoomed composition (zoomed content + cursor) for the radial blur. */
   private readonly composite = new Container({ label: "composite" })
 
   private readonly gridGfx = new Graphics({ label: "grid" })
@@ -158,6 +169,8 @@ export class CanvasScene {
   private lastZoomCamera: ZoomCamera = IDENTITY_ZOOM_CAMERA
   private readonly zoomBlur = createZoomBlurFilter()
   private zoomBlurOn = false
+  private readonly zoomPanBlur = createZoomPanBlurFilter()
+  private zoomPanBlurOn = false
 
   // Selection / hover overlay state (drawn in screen space on the stage).
   private hoveredNode: CanvasNode | null = null
@@ -198,21 +211,35 @@ export class CanvasScene {
     this.contentCamera.mask = this.contentMask
     this.contentMask.eventMode = "none"
     this.cursorLayer.eventMode = "none"
-    this.contentCamera.addChild(this.nodesLayer, this.cursorLayer)
+    // Cursor lives in its own camera (mirrors the content transform + clip), so
+    // it can be excluded from the directional reframe pan blur while still
+    // sharing the radial zoom blur of the composite below.
+    this.contentCamera.addChild(this.nodesLayer)
+    this.cursorCamera.mask = this.cursorMask
+    this.cursorCamera.eventMode = "none"
+    this.cursorMask.eventMode = "none"
+    this.cursorCamera.addChild(this.cursorLayer)
 
     this.borderGfx.eventMode = "none"
 
-    // Paint order (first child = bottom): bg fill → grid → content → border.
-    // The composite holds everything the composition zoom + radial blur act on
-    // (bg fill/grain, grid, video nodes, cursor). The artboard border stays
-    // outside it so the 1px edge never blurs.
-    this.composite.addChild(
+    // Paint order (first child = bottom): bg fill → grid → content → cursor →
+    // border. `zoomedContent` holds everything the reframe pan blur acts on (bg
+    // fill/grain, grid, video nodes); the cursor camera sits beside it so the
+    // pan blur skips it. The whole composite (zoomed content + cursor) takes the
+    // radial zoom blur. The artboard border stays outside so the 1px edge never
+    // blurs.
+    this.zoomedContent.addChild(
       this.backgroundCamera,
       this.backgroundMask,
       this.gridGfx,
       this.gridMask,
       this.contentCamera,
       this.contentMask
+    )
+    this.composite.addChild(
+      this.zoomedContent,
+      this.cursorCamera,
+      this.cursorMask
     )
     this.artboard.addChild(this.composite, this.borderGfx)
     this.world.addChild(this.artboard)
@@ -263,22 +290,33 @@ export class CanvasScene {
     this.backgroundCamera.position.set(camera.offsetX, camera.offsetY)
     this.contentCamera.scale.set(camera.scale)
     this.contentCamera.position.set(camera.offsetX, camera.offsetY)
+    this.cursorCamera.scale.set(camera.scale)
+    this.cursorCamera.position.set(camera.offsetX, camera.offsetY)
     this.applyZoomBlurFilter(camera)
     this.requestRender()
   }
 
-  /** Attach/update the radial zoom-blur filter on the composite (during ease). */
+  /** Attach/update the radial zoom-blur (whole composite) + directional reframe
+   *  pan-blur (zoomed content only, cursor excluded). Both use a filter-input
+   *  size of artboard × current viewport scale. */
   private applyZoomBlurFilter(camera: ZoomCamera) {
     const scale = this.lastView.scale || 1
-    const on = applyZoomBlur(
-      this.zoomBlur,
-      camera,
-      this.artboardSize.width * scale,
-      this.artboardSize.height * scale
-    )
+    const inputWidth = this.artboardSize.width * scale
+    const inputHeight = this.artboardSize.height * scale
+    const on = applyZoomBlur(this.zoomBlur, camera, inputWidth, inputHeight)
     if (on !== this.zoomBlurOn) {
       this.composite.filters = on ? [this.zoomBlur] : []
       this.zoomBlurOn = on
+    }
+    const panOn = applyZoomPanBlur(
+      this.zoomPanBlur,
+      camera,
+      inputWidth,
+      inputHeight
+    )
+    if (panOn !== this.zoomPanBlurOn) {
+      this.zoomedContent.filters = panOn ? [this.zoomPanBlur] : []
+      this.zoomPanBlurOn = panOn
     }
   }
 
@@ -305,7 +343,10 @@ export class CanvasScene {
     this.backgroundCamera.position.set(0, 0)
     this.contentCamera.scale.set(1)
     this.contentCamera.position.set(0, 0)
+    this.cursorCamera.scale.set(1)
+    this.cursorCamera.position.set(0, 0)
     if (this.zoomBlurOn) this.composite.filters = []
+    if (this.zoomPanBlurOn) this.zoomedContent.filters = []
     this.gridGfx.visible = false
     try {
       return this.app.renderer.extract.canvas({
@@ -319,7 +360,10 @@ export class CanvasScene {
       this.backgroundCamera.position.set(camera.offsetX, camera.offsetY)
       this.contentCamera.scale.set(camera.scale)
       this.contentCamera.position.set(camera.offsetX, camera.offsetY)
+      this.cursorCamera.scale.set(camera.scale)
+      this.cursorCamera.position.set(camera.offsetX, camera.offsetY)
       if (this.zoomBlurOn) this.composite.filters = [this.zoomBlur]
+      if (this.zoomPanBlurOn) this.zoomedContent.filters = [this.zoomPanBlur]
       this.gridGfx.visible = gridWasVisible
       // The restored values are identical, but the mutations dirtied the
       // transforms — schedule one frame so Pixi settles deterministically.
@@ -776,6 +820,7 @@ export class CanvasScene {
 
     this.backgroundMask.clear().rect(0, 0, width, height).fill(0xffffff)
     this.contentMask.clear().rect(0, 0, width, height).fill(0xffffff)
+    this.cursorMask.clear().rect(0, 0, width, height).fill(0xffffff)
     this.gridMask.clear().rect(0, 0, width, height).fill(0xffffff)
     this.redrawBorder()
 
