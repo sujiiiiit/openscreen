@@ -8,7 +8,30 @@
 // only has to be appended to the track — the ordering/sanitizing is centralized.
 
 import { clampUnit } from "./geometry"
-import type { InteractionEvent, InteractionTrack, MoveSample } from "./types"
+import type {
+  InteractionEvent,
+  InteractionTrack,
+  MoveSample,
+  NormRect,
+} from "./types"
+
+function sanitizeRect(rect: NormRect | undefined): NormRect | undefined {
+  if (!rect) return undefined
+  if (
+    !Number.isFinite(rect.x) ||
+    !Number.isFinite(rect.y) ||
+    !Number.isFinite(rect.width) ||
+    !Number.isFinite(rect.height)
+  ) {
+    return undefined
+  }
+  const x = clampUnit(rect.x)
+  const y = clampUnit(rect.y)
+  const width = Math.min(Math.max(rect.width, 0), 1 - x)
+  const height = Math.min(Math.max(rect.height, 0), 1 - y)
+  if (width <= 0 || height <= 0) return undefined
+  return { x, y, width, height }
+}
 
 function sanitizeMove(move: MoveSample): MoveSample | null {
   if (!Number.isFinite(move.t)) return null
@@ -27,7 +50,7 @@ function sanitizeEvent(event: InteractionEvent): InteractionEvent | null {
   const pos = event.pos
     ? { x: clampUnit(event.pos.x), y: clampUnit(event.pos.y) }
     : undefined
-  return { ...event, pos }
+  return { ...event, pos, rect: sanitizeRect(event.rect) }
 }
 
 /** Sort + sanitize a raw track into the clean, time-ordered form stages expect. */

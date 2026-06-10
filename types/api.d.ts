@@ -314,6 +314,15 @@ export interface ProjectZoomClip {
   }
   /** Legacy preset field. New saves prefer explicit `transition`. */
   easePreset?: "smooth" | "snappy" | "slow"
+  /**
+   * Detected content rects (artboard-normalized) keyed by interaction time, from
+   * auto-zoom frame-analysis (or, later, Accessibility). Additive + optional;
+   * drives the predictive follow's zoom-out-to-fit reveal in preview and export.
+   */
+  engagedRects?: Array<{
+    t: number
+    rect: { x: number; y: number; width: number; height: number }
+  }>
 }
 
 export interface ProjectStateV1 {

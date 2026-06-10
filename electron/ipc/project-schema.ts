@@ -176,6 +176,15 @@ export interface ProjectZoomClip {
   }
   // Legacy preset field. New saves prefer explicit `transition`.
   easePreset?: "smooth" | "snappy" | "slow"
+  // Detected content rects (a menu/popover's artboard-normalized bounds) keyed
+  // by interaction time, from auto-zoom frame-analysis (or, later, Accessibility).
+  // Optional + additive (no version bump): legacy clips simply have none. The
+  // predictive cursor-follow planner reads these at render time to drive the
+  // zoom-out-to-fit reveal, so they must persist to reach the export window.
+  engagedRects?: Array<{
+    t: number
+    rect: { x: number; y: number; width: number; height: number }
+  }>
 }
 
 export interface ProjectStateV1 {
@@ -600,6 +609,34 @@ function parseZoomClip(value: unknown): ProjectZoomClip | null {
     ? (value["easePreset"] as (typeof ZOOM_EASE_PRESETS)[number])
     : undefined
 
+  // Tolerant: drop malformed entries and clamp each rect inside the artboard,
+  // mirroring the other optional zoom-clip fields. Absent → undefined (omitted).
+  const engagedRects = (() => {
+    const raw = value["engagedRects"]
+    if (!Array.isArray(raw)) return undefined
+    const out: NonNullable<ProjectZoomClip["engagedRects"]> = []
+    for (const item of raw) {
+      if (!isRecord(item) || !isFiniteNumber(item["t"])) continue
+      const r = item["rect"]
+      if (!isRecord(r)) continue
+      if (
+        !isFiniteNumber(r["x"]) ||
+        !isFiniteNumber(r["y"]) ||
+        !isFiniteNumber(r["width"]) ||
+        !isFiniteNumber(r["height"])
+      ) {
+        continue
+      }
+      const x = clampUnit(r["x"] as number)
+      const y = clampUnit(r["y"] as number)
+      const width = clampRange(r["width"] as number, 0, 1 - x)
+      const height = clampRange(r["height"] as number, 0, 1 - y)
+      if (width <= 0 || height <= 0) continue
+      out.push({ t: item["t"] as number, rect: { x, y, width, height } })
+    }
+    return out.length > 0 ? out : undefined
+  })()
+
   return {
     id: value["id"] as string,
     start,
@@ -613,6 +650,7 @@ function parseZoomClip(value: unknown): ProjectZoomClip | null {
     ...(radialBlurSettings ? { radialBlurSettings } : {}),
     ...(transition ? { transition } : {}),
     ...(easePreset ? { easePreset } : {}),
+    ...(engagedRects ? { engagedRects } : {}),
   }
 }
 

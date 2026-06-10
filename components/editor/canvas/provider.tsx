@@ -89,6 +89,7 @@ import {
   projectFolderFromObjectUrl,
 } from "@/components/editor/canvas/cursor-scene"
 import { autoZoomTrackFromCursorData } from "@/components/editor/canvas/auto-zoom-scene"
+import { detectClickRects } from "@/components/editor/canvas/auto-zoom-frames"
 import { buildAutoZoomClipsFromTrack } from "@/lib/auto-zoom/zoom-detect"
 import {
   ARTBOARD_PADDING_MAX,
@@ -2364,12 +2365,43 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         .filter((clip) => clip.videoId === screen.id)
         .sort((a, b) => a.start - b.start || a.end - b.end)
       if (screenClips.length === 0) return null
+
+      // Best-effort, bounded, offline frame-analysis: around each click, detect
+      // the bounds of any content that appeared (a menu/popover) so the planner
+      // can zoom out to reveal it. Failures degrade to pure cursor geometry, so
+      // any error here must NOT abort generation.
+      let frameRects: ReadonlyMap<number, import("@/lib/auto-zoom/types").NormRect> | undefined
+      try {
+        const downClicks = data.clicks
+          .filter((c) => {
+            const type = (c.type ?? "").toLowerCase()
+            return type === "mousedown" || type === "down"
+          })
+          .map((c) => ({
+            key: c.processTimeMs,
+            sourceSec: (c.processTimeMs - data.processTimeStartMs) / 1000,
+          }))
+        if (downClicks.length > 0 && screen.intrinsicWidth > 0) {
+          frameRects = await detectClickRects({
+            url: screen.objectUrl,
+            intrinsicWidth: screen.intrinsicWidth,
+            intrinsicHeight: screen.intrinsicHeight,
+            durationSec: screen.durationMs / 1000,
+            clicks: downClicks,
+          })
+        }
+        if (hydratedProjectIdRef.current !== activeProject.id) return null
+      } catch (error) {
+        console.warn("[provider] auto-zoom frame analysis failed:", error)
+      }
+
       const track = autoZoomTrackFromCursorData(
         data,
         screen,
         screenClips,
         { width: artboardRef.current.width, height: artboardRef.current.height },
-        getTimelineDurationForClips(timelineClipsRef.current)
+        getTimelineDurationForClips(timelineClipsRef.current),
+        frameRects
       )
       return buildAutoZoomClipsFromTrack(track)
     } catch (error) {

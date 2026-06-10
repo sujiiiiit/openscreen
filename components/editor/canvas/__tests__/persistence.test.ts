@@ -730,3 +730,74 @@ describe("parseProjectState imported-video tolerance", () => {
     })
   })
 })
+
+describe("engaged content rects persistence", () => {
+  const LEGACY_ARTBOARD = {
+    presetId: "wide",
+    width: 1920,
+    height: 1080,
+    background: null,
+    padding: 0,
+    grain: 0,
+  }
+
+  it("round-trips engagedRects on a zoom clip through JSON + the validator", () => {
+    const clip = withZoomClipDefaults({
+      id: "z1",
+      start: 1,
+      end: 5,
+      scale: 2.4,
+      engagedRects: [
+        { t: 2, rect: { x: 0.5, y: 0.4, width: 0.4, height: 0.3 } },
+        { t: 3.5, rect: { x: 0.1, y: 0.1, width: 0.2, height: 0.2 } },
+      ],
+    })
+    const parsed = roundTrip(
+      serializeProjectState(ARTBOARD, [canvasVideo({ id: "a" })], [], [], [clip])
+    )
+    expect(parsed).not.toBeNull()
+    const restored = projectZoomClipToCanvasClip(parsed!.zoomClips![0])
+    expect(restored.engagedRects.length).toBe(2)
+    expect(restored.engagedRects[0].t).toBeCloseTo(2)
+    expect(restored.engagedRects[0].rect.width).toBeCloseTo(0.4)
+    expect(restored.engagedRects[1].rect.x).toBeCloseTo(0.1)
+  })
+
+  it("omits the field when empty and hydrates a legacy clip to []", () => {
+    const empty = serializeZoomClip(
+      withZoomClipDefaults({ id: "z1", start: 1, end: 5, scale: 2 })
+    )
+    expect("engagedRects" in empty).toBe(false)
+    // A legacy project.json clip with no such field loads with [].
+    expect(
+      projectZoomClipToCanvasClip({ id: "z1", start: 1, end: 5 }).engagedRects
+    ).toEqual([])
+  })
+
+  it("drops malformed engagedRects entries on parse", () => {
+    const parsed = parseProjectState({
+      version: 1,
+      artboard: LEGACY_ARTBOARD,
+      videos: [],
+      timelineClips: [],
+      zoomClips: [
+        {
+          id: "z1",
+          start: 1,
+          end: 5,
+          engagedRects: [
+            { t: 2, rect: { x: 0.5, y: 0.4, width: 0.4, height: 0.3 } }, // valid
+            { t: 3, rect: { x: 0.5 } }, // missing fields
+            { rect: { x: 0, y: 0, width: 0.2, height: 0.2 } }, // missing t
+            "nope",
+          ],
+        },
+      ],
+      updatedAtUnixMs: 0,
+    })
+    expect(parsed).not.toBeNull()
+    expect(parsed!.zoomClips![0].engagedRects).toEqual([
+      { t: 2, rect: { x: 0.5, y: 0.4, width: 0.4, height: 0.3 } },
+    ])
+  })
+})

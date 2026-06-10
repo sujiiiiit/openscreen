@@ -235,6 +235,18 @@ export type CanvasZoomEasePreset = "smooth" | "snappy" | "slow"
  * session-only (provider `selectedZoomClipId`), not part of this persisted
  * shape.
  */
+/**
+ * A detected content rect (a menu/popover's artboard-normalized bounds, top-left
+ * origin) at an interaction time. Produced by frame-analysis at auto-zoom
+ * generation (or, later, Accessibility) and persisted on the clip.
+ */
+export type CanvasZoomEngagedRect = {
+  /** Timeline (composition) seconds of the interaction the rect belongs to. */
+  t: number
+  /** Artboard-normalized bounds [0,1]. */
+  rect: { x: number; y: number; width: number; height: number }
+}
+
 export type CanvasZoomClip = {
   id: string
   start: number
@@ -247,6 +259,13 @@ export type CanvasZoomClip = {
   radialBlurSettings: CanvasZoomRadialBlurSettings
   transition: CanvasZoomTransitionSettings
   easePreset: CanvasZoomEasePreset
+  /**
+   * Engaged-content rects keyed by interaction time. The predictive cursor-follow
+   * planner widens a dwell's region by the rect active around it, driving the
+   * zoom-out-to-fit reveal for content larger than the frame. Empty when no
+   * content was detected. Persisted so preview and export reveal identically.
+   */
+  engagedRects: readonly CanvasZoomEngagedRect[]
 }
 
 export type CanvasZoomClipPatch = Partial<

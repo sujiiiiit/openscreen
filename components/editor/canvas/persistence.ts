@@ -158,6 +158,10 @@ function serializeZoomTransition(
 // centerSharpness for the symmetric shader. The Pixi-style ZoomBlurFilter path
 // now bakes the inner radius at 2%; all radialBlurSettings fields are legacy
 // hydration fields and are no longer written by new saves.
+// Round normalized values for tidy, stable JSON (frame-analysis rects are
+// already deterministic; this just trims float noise from the serialized form).
+const round4 = (value: number) => Math.round(value * 1e4) / 1e4
+
 export function serializeZoomClip(clip: CanvasZoomClip): ProjectZoomClip {
   const normalized = withZoomClipDefaults(clip)
   const transition = serializeZoomTransition(normalized.transition)
@@ -177,6 +181,21 @@ export function serializeZoomClip(clip: CanvasZoomClip): ProjectZoomClip {
       ? { radialBlur: normalized.radialBlur }
       : {}),
     ...(transition ? { transition } : {}),
+    // Omitted when empty so legacy `project.json` files (and clips with no
+    // detected content) stay byte-identical.
+    ...(normalized.engagedRects.length > 0
+      ? {
+          engagedRects: normalized.engagedRects.map((r) => ({
+            t: round4(r.t),
+            rect: {
+              x: round4(r.rect.x),
+              y: round4(r.rect.y),
+              width: round4(r.rect.width),
+              height: round4(r.rect.height),
+            },
+          })),
+        }
+      : {}),
   }
 }
 
@@ -276,5 +295,6 @@ export function projectZoomClipToCanvasClip(
     radialBlurSettings: clip.radialBlurSettings,
     transition: clip.transition,
     easePreset: clip.easePreset,
+    engagedRects: clip.engagedRects,
   })
 }

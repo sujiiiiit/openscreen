@@ -21,6 +21,7 @@ import type {
   InteractionEvent,
   InteractionTrack,
   MoveSample,
+  NormRect,
 } from "@/lib/auto-zoom/zoom-detect"
 import type { CanvasZoomFocus } from "@/types/editor-canvas"
 
@@ -93,7 +94,50 @@ function buildMappers(
     return clampZoomFocus({ x: mapped.x / aw, y: mapped.y / ah })
   }
 
-  return { mapTime, mapPos }
+  // Map a FRAME-normalized rect (frame-analysis output, [0,1] of the recording
+  // frame) into artboard-normalized bounds. A frame-normalized fx corresponds to
+  // source pixel fx·intrinsic, which `displayPointToArtboard` reaches when fed
+  // displayX = fx·displayWidth; we map all four corners (handles rotation) and
+  // take their bbox.
+  const mapFrameRect = (rect: NormRect): NormRect | null => {
+    const corners: ReadonlyArray<readonly [number, number]> = [
+      [rect.x, rect.y],
+      [rect.x + rect.width, rect.y],
+      [rect.x, rect.y + rect.height],
+      [rect.x + rect.width, rect.y + rect.height],
+    ]
+    let minX = Infinity
+    let minY = Infinity
+    let maxX = -Infinity
+    let maxY = -Infinity
+    for (const [fx, fy] of corners) {
+      const mapped = displayPointToArtboard(
+        fx * data.displayWidth,
+        fy * data.displayHeight,
+        screenVideo,
+        data.displayWidth,
+        data.displayHeight
+      )
+      const ax = clamp01(mapped.x / aw)
+      const ay = clamp01(mapped.y / ah)
+      if (ax < minX) minX = ax
+      if (ay < minY) minY = ay
+      if (ax > maxX) maxX = ax
+      if (ay > maxY) maxY = ay
+    }
+    const x = minX
+    const y = minY
+    const width = maxX - minX
+    const height = maxY - minY
+    if (!(width > 0) || !(height > 0)) return null
+    return { x, y, width, height }
+  }
+
+  return { mapTime, mapPos, mapFrameRect }
+}
+
+function clamp01(value: number): number {
+  return value < 0 ? 0 : value > 1 ? 1 : value
 }
 
 /**
@@ -145,9 +189,18 @@ export function autoZoomTrackFromCursorData(
   screenVideo: CursorVideoGeometry,
   screenClips: readonly AutoZoomScreenClip[],
   artboard: { width: number; height: number },
-  durationSeconds: number
+  durationSeconds: number,
+  // Optional frame-analysis output: FRAME-normalized content rects keyed by the
+  // click's `processTimeMs`. Attached (mapped to artboard space) to the matching
+  // click-down event's `rect`, which drives the zoom-out-to-fit reveal.
+  frameRects?: ReadonlyMap<number, NormRect>
 ): InteractionTrack {
-  const { mapTime, mapPos } = buildMappers(data, screenVideo, screenClips, artboard)
+  const { mapTime, mapPos, mapFrameRect } = buildMappers(
+    data,
+    screenVideo,
+    screenClips,
+    artboard
+  )
 
   const events: InteractionEvent[] = []
   for (const click of data.clicks) {
@@ -157,12 +210,18 @@ export function autoZoomTrackFromCursorData(
     if (t === null) continue
     const pos = mapPos(click.x, click.y)
     if (!pos) continue
+    let rect: NormRect | undefined
+    if (type === "down" && frameRects) {
+      const frameRect = frameRects.get(click.processTimeMs)
+      if (frameRect) rect = mapFrameRect(frameRect) ?? undefined
+    }
     events.push({
       t,
       kind: type === "down" ? "click-down" : "click-up",
       pos,
       cursorId: click.cursorId,
       button: normalizeButton(click.button),
+      ...(rect ? { rect } : {}),
     })
   }
 

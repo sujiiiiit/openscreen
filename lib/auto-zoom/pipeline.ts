@@ -85,8 +85,14 @@ export function buildAutoZoomClipsFromTrack(
     unifySceneScales(framings)
   }
 
-  const clips = framings.map(({ win, focus, scale }) =>
-    withZoomClipDefaults({
+  const clips = framings.map(({ win, focus, scale }) => {
+    // Carry the content rects of interactions inside this window onto the clip
+    // (persisted). The clip's STATIC framing stays tight; these drive only the
+    // DYNAMIC in-hold zoom-out-to-fit reveal at render time, so the camera holds
+    // the tight zoom and only zooms out when a menu/popover larger than the frame
+    // is engaged — the tight → reveal → tight beat of the reference.
+    const engagedRects = collectEngagedRects(track.events, win.start, win.end)
+    return withZoomClipDefaults({
       id: deterministicClipId(win.start, focus),
       start: win.start,
       end: win.end,
@@ -98,12 +104,39 @@ export function buildAutoZoomClipsFromTrack(
         durationMs: params.hybridEaseMs,
         curve: ZOOM_TRANSITION_CURVE_DEFAULT,
       },
+      ...(engagedRects.length > 0 ? { engagedRects } : {}),
     })
-  )
+  })
 
   // Final safety net: guarantee the single non-overlapping lane invariant the
   // rest of the manual zoom system assumes.
   return normalizeZoomClips(clips, track.durationSeconds)
+}
+
+/** Content rects of the interactions inside a window, in window-time order. */
+function collectEngagedRects(
+  events: InteractionTrack["events"],
+  start: number,
+  end: number
+): Array<{ t: number; rect: { x: number; y: number; width: number; height: number } }> {
+  const out: Array<{
+    t: number
+    rect: { x: number; y: number; width: number; height: number }
+  }> = []
+  for (const e of events) {
+    if (!e.rect) continue
+    if (e.t < start || e.t > end) continue
+    out.push({
+      t: e.t,
+      rect: {
+        x: e.rect.x,
+        y: e.rect.y,
+        width: e.rect.width,
+        height: e.rect.height,
+      },
+    })
+  }
+  return out
 }
 
 interface WindowFraming {

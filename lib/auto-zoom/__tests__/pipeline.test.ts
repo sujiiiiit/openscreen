@@ -419,3 +419,50 @@ describe("compareDetectors", () => {
     }
   })
 })
+
+describe("engaged content rects (frame-analysis → clip)", () => {
+  const build = (t: InteractionTrack) =>
+    buildAutoZoomClipsFromTrack(t, { detector: "hybrid-stabilized" })
+
+  it("carries an in-window interaction's content rect onto the clip", () => {
+    const clips = build(
+      track({
+        moves: dwell(2, 2, 0.5, 0.5),
+        events: [
+          down(3, 0.5, 0.5, {
+            rect: { x: 0.5, y: 0.45, width: 0.45, height: 0.4 },
+          }),
+          up(3.05, 0.5, 0.5),
+        ],
+      })
+    )
+    const carrier = clips.find((c) => c.engagedRects.length > 0)
+    expect(carrier).toBeTruthy()
+    expect(carrier!.engagedRects[0].t).toBeCloseTo(3)
+    expect(carrier!.engagedRects[0].rect.width).toBeCloseTo(0.45)
+    // The STATIC framing stays tight; the rect drives only the dynamic reveal.
+    expect(carrier!.scale).toBeGreaterThan(1)
+  })
+
+  it("emits no engagedRects when interactions carry none", () => {
+    const clips = build(
+      track({
+        moves: dwell(2, 2, 0.4, 0.4),
+        events: [down(3, 0.4, 0.4), up(3.05, 0.4, 0.4)],
+      })
+    )
+    expect(clips.length).toBeGreaterThan(0)
+    for (const c of clips) expect(c.engagedRects).toEqual([])
+  })
+
+  it("is deterministic with rects (same track yields identical clips)", () => {
+    const t = track({
+      moves: dwell(2, 2, 0.3, 0.3),
+      events: [
+        down(3, 0.3, 0.3, { rect: { x: 0.3, y: 0.3, width: 0.4, height: 0.3 } }),
+        up(3.05, 0.3, 0.3),
+      ],
+    })
+    expect(build(t)).toEqual(build(t))
+  })
+})

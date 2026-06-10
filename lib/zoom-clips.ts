@@ -2,6 +2,7 @@ import type {
   CanvasZoomClip,
   CanvasZoomClipPatch,
   CanvasZoomEasePreset,
+  CanvasZoomEngagedRect,
   CanvasZoomFocus,
   CanvasZoomRadialBlurSettings,
   CanvasZoomTransitionCurve,
@@ -141,6 +142,7 @@ export type CanvasZoomClipInput = Pick<CanvasZoomClip, "id" | "start" | "end"> &
   > & {
     radialBlurSettings?: Partial<CanvasZoomRadialBlurSettings>
     transition?: Partial<CanvasZoomTransitionSettings>
+    engagedRects?: readonly CanvasZoomEngagedRect[]
   }
 
 let zoomClipIdCounter = 0
@@ -341,6 +343,37 @@ export function zoomRadialBlurSettingsEqual(
   )
 }
 
+/**
+ * Sanitize engaged-content rects: drop non-finite / empty entries and clamp each
+ * rect inside the artboard [0,1]. Keeps a clip's persisted rects well-formed
+ * regardless of source (frame-analysis, Accessibility, or a hand-edited file).
+ */
+export function clampZoomEngagedRects(
+  rects: readonly CanvasZoomEngagedRect[] | undefined
+): CanvasZoomEngagedRect[] {
+  if (!rects || rects.length === 0) return []
+  const out: CanvasZoomEngagedRect[] = []
+  for (const r of rects) {
+    if (!r || !Number.isFinite(r.t) || !r.rect) continue
+    const { x, y, width, height } = r.rect
+    if (
+      !Number.isFinite(x) ||
+      !Number.isFinite(y) ||
+      !Number.isFinite(width) ||
+      !Number.isFinite(height)
+    ) {
+      continue
+    }
+    const cx = clamp(x, 0, 1)
+    const cy = clamp(y, 0, 1)
+    const w = clamp(width, 0, 1 - cx)
+    const h = clamp(height, 0, 1 - cy)
+    if (w <= 0 || h <= 0) continue
+    out.push({ t: r.t, rect: { x: cx, y: cy, width: w, height: h } })
+  }
+  return out
+}
+
 export function withZoomClipDefaults(
   clip: CanvasZoomClipInput
 ): CanvasZoomClip {
@@ -364,6 +397,7 @@ export function withZoomClipDefaults(
     radialBlurSettings: clampZoomRadialBlurSettings(clip.radialBlurSettings),
     transition,
     easePreset: legacyPreset,
+    engagedRects: clampZoomEngagedRects(clip.engagedRects),
   }
 }
 

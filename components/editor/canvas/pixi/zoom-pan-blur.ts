@@ -13,9 +13,11 @@ function toOddKernelSize(kernelSize: number): number {
  * velocity vector, so it tracks the smear length to stay well-sampled, but a
  * long smear is bounded here so a worst-case reframe (a big pan at deep zoom on
  * a 4K export) can't blow up the per-pixel cost of the whole-composite pass. The
- * pan blur is only ever active for the ~0.5 s of a reframe.
+ * pan blur is only ever active for the ~0.3-0.5 s of a reframe. Raised from 51 so
+ * the high-ceiling pan smear (a fast flick now reaches ~14% of the artboard, up
+ * from ~5%) stays smooth instead of banding at the top end.
  */
-const ZOOM_PAN_BLUR_MAX_KERNEL = 51
+const ZOOM_PAN_BLUR_MAX_KERNEL = 81
 
 export function createZoomPanBlurFilter(): MotionBlurFilter {
   const filter = new MotionBlurFilter()

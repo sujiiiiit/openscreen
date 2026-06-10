@@ -31,10 +31,13 @@ system, unchanged — a generated clip is indistinguishable from a hand-made one
 4. **Wide only on genuine idle.** Fast scroll/transit and real idle (no activity)
    are the *only* things that return the camera to identity (1×). Everything else
    stays engaged.
-5. **Always keep the subject in frame.** During a hold the focus is fixed, but
+5. **Always keep the subject in frame, and follow it predictively.** A hold's
    focus + scale keep the subject visible — a point uses the (confidence-scaled)
-   base scale; a large selection/cluster scales *down* to fit the whole region.
-   (Full in-hold pan/follow-cam is deferred.)
+   base scale; a large selection/cluster scales *down* to fit. *Within* a hold the
+   camera is no longer static: it follows the cursor **predictively** (see
+   [Predictive in-hold follow](#predictive-in-hold-follow-reveal-modes)) — holding
+   rock-steady while the engaged content stays in frame, and committing one
+   anticipatory move (pan, or zoom-out-to-fit-then-return) only when it leaves.
 6. **Deterministic & pure.** No `Date.now()` / `Math.random()` / DOM. The same
    input always yields byte-identical clips (ids included), so re-running never
    churns the autosave fingerprint and every stage is exhaustively unit-testable.
@@ -187,6 +190,58 @@ framed (it can only zoom *less* than a window asked for, never crop), so
 magnification never bounces while the camera tiles across a scene; confidence still
 sets the scale *between* scenes. Scale does not enter the deterministic id, so this
 never churns the autosave fingerprint.
+
+## Predictive in-hold follow (reveal modes)
+
+The stages above pick **when / where / how much** and emit one `(focus, scale)`
+per clip. The cursor-follow *within* a hold is a separate, **render-time**
+concern that the editor preview and the exporter compute identically from the
+same recorded cursor (`components/editor/canvas/zoom-scene.ts` →
+`computeZoomFollowPaths`). It is **predictive, not reactive**: generation is
+offline, so the whole cursor track is known up front.
+
+- **Dwells, not crossings.** The hold is sampled (`predictionHz`) and segmented
+  into **dwells** (settle points; the same idea as kinematics fixations) and
+  transits. The camera holds rock-steady while the *next dwell's engaged region*
+  sits inside a generous inner safe box (`safeFraction`), and commits a move only
+  when it pokes past that box by `commitMargin` (hysteresis → no thrashing).
+- **Anticipatory timing.** A committed move targets the **destination dwell**, not
+  the cursor's transient position, and is timed to run in lockstep with the
+  cursor's travel (begin as it departs, arrive as it settles). The ramp is
+  velocity-matched between `minMoveSec`/`maxMoveSec`; a fast flick is one clean
+  move instead of a chasing series of reframes.
+- **Reveal mode is AUTO.** The smallest disorienting move wins: **PAN** (focus
+  only) when a slide brings the engaged region into frame at the held zoom;
+  **ZOOM-OUT-to-fit then RETURN** when it can't. The fit scale reuses the framing
+  solver's math (`1 / (regMax·(1 + fitMargin))`).
+- **Engaged region = dwell ∪ content rect.** A bare dwell is tiny → always PANs.
+  The region is widened by the **content rect** of an interaction active around
+  the dwell — which is what forces a zoom-out reveal of a menu/popover larger than
+  the frame (the Screen-Studio submenu beat).
+- **Motion blur.** A reframe carries a velocity-scaled directional pan blur with a
+  **high ceiling** (subtle for gentle moves, a strong smear only on the fastest
+  flicks); an in-hold zoom-out also gets radial blur from its scale velocity. Both
+  are pure functions of the follow path (preview == export).
+
+Knobs live in `ZOOM_FOLLOW_DEFAULTS` (render-time, parity-shared), not
+`AUTO_ZOOM_DEFAULTS`. The follow path is recomputed deterministically, never
+persisted.
+
+### Content bounds via frame-analysis (`lib/auto-zoom/content-bounds/`)
+
+We don't yet capture Accessibility element bounds, so "what the cursor is engaging"
+is recovered by **analysing the recorded frames**. At generation, for each click
+(bounded, offline) we grab a frame just before and just after and diff them
+(`frame-diff.ts`: a lightweight luma difference + grid-cell vote + box-density
+guard — deliberately not OpenCV/ML for a bounding-box-of-an-appeared-rectangle
+task); the changed-region bbox is the engaged content's extent. The decode is a
+bounded hidden-`<video>` seek pass (`components/editor/canvas/auto-zoom-frames.ts`),
+best-effort: any failure degrades to pure cursor geometry. The frame-normalized
+rect is mapped to artboard space (same cover-crop chain as the cursor overlay),
+attached to the click event's `rect`, and emitted on the clip as **`engagedRects`**
+(persisted — it must reach the separate export window). This sits behind the
+swappable `ContentBoundsProvider` seam, so an Accessibility-backed provider can
+replace frame-diff later without touching the pipeline.
 
 ## Parameters (`params.ts` → `AUTO_ZOOM_DEFAULTS`)
 

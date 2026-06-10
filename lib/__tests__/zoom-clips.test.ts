@@ -36,6 +36,7 @@ describe("withZoomClipDefaults", () => {
       radialBlurSettings: ZOOM_RADIAL_BLUR_SETTINGS_DEFAULT,
       transition: ZOOM_TRANSITION_DEFAULT,
       easePreset: ZOOM_EASE_PRESET_DEFAULT,
+      engagedRects: [],
     })
   })
 
