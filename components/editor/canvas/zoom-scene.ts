@@ -12,8 +12,21 @@ import type {
   CanvasZoomClip,
   CanvasZoomFocus,
   CanvasZoomRadialBlurSettings,
-  CanvasZoomTransitionCurve,
 } from "@/types/editor-canvas"
+import {
+  FOCUS_IDLE_GAP_MS,
+  FOCUS_LAG_MAX,
+  FOCUS_LAG_MIN,
+  FOCUS_LAG_RATIO,
+  FOCUS_SAMPLE_INTERVAL_MS,
+  SpringMassDamperSimulation,
+  ZOOM_EDGE_SNAP_RATIO,
+  ZOOM_FOCUS_SPRING_CONFIG,
+  snapToEdges,
+  springEase,
+  springEaseOut,
+  springSlope,
+} from "./pixi/zoom-spring"
 
 const ZOOM_IDENTITY_EPSILON = 1e-4
 
@@ -63,43 +76,16 @@ function clampUnit(value: number) {
   return Math.min(1, Math.max(0, value))
 }
 
-function smoothstep(value: number) {
+// Zoom-OUT progress, 0→1, over a normalized ramp `value`. Cap's softened spring
+// (springEaseOut) multiplied by a leading smoothstep over the first 20% of the
+// ramp, which erases the spring's start discontinuity so the first frames of a
+// zoom-out are smooth (Cap zoom.rs:261-263). The zoom-IN ramp uses `springEase`
+// directly; both come from the shared spring module (`./pixi/zoom-spring`).
+function springEaseOutRamped(value: number) {
   const t = clampUnit(value)
-  return t * t * (3 - 2 * t)
-}
-
-function smootherstep(value: number) {
-  const t = clampUnit(value)
-  return t * t * t * (t * (t * 6 - 15) + 10)
-}
-
-function easeOutCubic(value: number) {
-  const t = clampUnit(value)
-  return 1 - Math.pow(1 - t, 3)
-}
-
-function transitionCurveValue(curve: CanvasZoomTransitionCurve, value: number) {
-  switch (curve) {
-    case "linear":
-      return clampUnit(value)
-    case "smootherstep":
-      return smootherstep(value)
-    case "ease-out-cubic":
-      return easeOutCubic(value)
-    case "smoothstep":
-    default:
-      return smoothstep(value)
-  }
-}
-
-// Magnitude of d(curve)/dt in normalized-t space (central difference). The eased
-// progress moves fastest mid-transition and is ~flat at both ends, so this is a
-// single smooth bump — exactly the shape a zoom blur should follow.
-function curveSlope(curve: CanvasZoomTransitionCurve, value: number) {
-  const dt = 1 / 240
-  const before = transitionCurveValue(curve, value - dt)
-  const after = transitionCurveValue(curve, value + dt)
-  return Math.abs(after - before) / (dt * 2)
+  const ramp = Math.min(t * 5, 1)
+  const rampSmooth = ramp * ramp * (3 - 2 * ramp)
+  return springEaseOut(t) * rampSmooth
 }
 
 function easeTiming(clip: CanvasZoomClip): {
@@ -134,109 +120,64 @@ function easeTiming(clip: CanvasZoomClip): {
 const ZOOM_WELD_GAP_FRACTION = 0.25
 const ZOOM_WELD_GAP_MIN_SECONDS = 0.12
 const ZOOM_WELD_GAP_MAX_SECONDS = 0.6
-// Weld transitions use the baked smootherstep glide regardless of either clip's
-// own curve, so the cross-clip pan/zoom reads consistently.
-const ZOOM_WELD_CURVE: CanvasZoomTransitionCurve = "smootherstep"
 
-// --- Cursor follow (predictive hold + anticipatory reframe) --------------
+// --- Auto-mode cursor follow (spring) ------------------------------------
 //
-// While a clip is held zoomed, the camera keeps the *engaged content* in the
-// visible window WITHOUT sliding continuously with the cursor (the "scene +
-// cursor both move" churn is exactly what we are avoiding). The follow is
-// PREDICTIVE, not reactive: generation is fully offline, so the whole cursor
-// track is known up front. We segment the hold into DWELLS (where the cursor
-// settles — its attention) and TRANSITS (between them), then:
-//   • HOLD rock-steady while the next dwell still sits inside a generous inner
-//     "safe box" — small in-frame wanders move the camera not at all.
-//   • COMMIT one eased move only when the next dwell (the engaged region) falls
-//     outside the safe box. The move is ANTICIPATORY: it begins as the cursor
-//     sets off and arrives as the cursor settles (velocity-matched ramp), and
-//     it targets the DESTINATION dwell, not the cursor's transient position, so
-//     a fast flick is one clean move instead of a chasing series of reframes.
-//   • REVEAL mode is AUTO: PAN (focus only) when a slide brings the engaged
-//     region into frame at the held zoom; ZOOM OUT to fit (then return to the
-//     tighter zoom) when it cannot — the Screen-Studio submenu reveal. The
-//     engaged region is the dwell extent, widened by any frame-analysis /
-//     Accessibility content rect (see `landmarks.engagedRects`).
-//
-// The walk is STATEFUL (it remembers where it settled), which would break the
-// pure per-frame sampler that keeps preview == export. So we PRECOMPUTE a follow
-// path per clip (deterministic: fixed-rate sampling of a fixed track + persisted
-// rects) — timed (focus, scale) anchors with eased moves between them.
-// `sampleZoomCameraAtTime` then just reads the path, so the sampler stays pure
-// and replayable and the editor preview, hover, and export all follow
-// identically. A clip whose cursor never leaves the safe box gets no path and
-// renders byte-identically to a plain fixed-focus zoom.
+// For an `auto` clip, the focus point is NOT stored — the camera continuously
+// spring-follows the recorded cursor (a port of Cap's zoom-focus model). The
+// follow is computed OFFLINE (the whole cursor track is known up front), which
+// also keeps it a pure function of (clip, cursor track) so preview == export:
+//   • At a fixed 8 ms step over the hold, read the cursor's artboard focus and
+//     drive a mass-spring-damper toward it (`ZOOM_FOCUS_SPRING_CONFIG`). The
+//     spring gives the cinematic lag + settle — the camera trails the cursor and
+//     eases in rather than sticking to the pointer.
+//   • A LAG LEASH caps how far the smoothed focus may trail the live cursor
+//     (`clamp(viewportHalf · FOCUS_LAG_RATIO, FOCUS_LAG_MIN, FOCUS_LAG_MAX)`),
+//     snapping it back and bleeding velocity so a fast flick never drags the
+//     cursor out of the zoomed window.
+//   • EDGE SNAP (`ZOOM_EDGE_SNAP_RATIO`) pins the view to a frame edge when the
+//     cursor nears it; storing the snapped focus in [0,1] also keeps the visible
+//     window fully inside the artboard (no off-frame reveal), so no separate
+//     centre clamp is needed.
+//   • On an IDLE gap between cursor samples (> FOCUS_IDLE_GAP_MS) the target
+//     holds its previous position instead of interpolating across the gap.
+// The smoothed focus is baked into 8 ms keyframes; `sampleZoomCameraAtTime` then
+// just lerps between them, so the sampler stays pure and replayable. A `manual`
+// clip gets no path and renders as a plain fixed-focus zoom around its `focus`.
 
 export type ZoomFollowParams = {
-  /** Cursor sampling rate (Hz) for the precompute walk (back-compat alias). */
-  sampleHz: number
-  /** Lookahead sampling rate (Hz) for dwell derivation. */
-  predictionHz: number
-  /**
-   * The engaged region may sit this fraction of the window's half-extent away
-   * from the frame centre before a reframe triggers. Larger = holds longer /
-   * fewer reframes (more stable); smaller = reframes sooner. The committed move
-   * recentres the region, so this is also the roam budget before the *next*
-   * move — part of the hysteresis that prevents thrashing.
-   */
-  safeFraction: number
-  /** Cluster radius (normalized) for a settle vs transit — mirrors fixationMaxRadius. */
-  dwellRadius: number
-  /** Minimum dwell duration (s) to count as a park — mirrors fixationMinMs. */
-  dwellMinSec: number
-  /** Outer hysteresis: the destination must exceed the safe box by this before committing. */
-  commitMargin: number
-  /** Fastest anticipatory ramp (s) — a snappy flick. */
-  minMoveSec: number
-  /** Slowest anticipatory ramp (s) — a gentle drift. */
-  maxMoveSec: number
-  /** How far ahead of the cursor's arrival the move lands (fraction of the ramp). */
-  anticipationLeadFraction: number
-  /** Padding when fitting an engaged region into the frame for zoom-out-to-fit. */
-  fitMargin: number
-  /** Floor for zoom-out-to-fit (never below identity). */
-  minRevealScale: number
-  /** How long to hold a zoomed-out reveal before returning to the tighter zoom (s). */
-  revealHoldSec: number
-  /** Default eased duration (s) of a reframe move when an anchor has no override. */
-  transitionSec: number
+  /** Fixed precompute step (ms) for the spring integration. */
+  sampleIntervalMs: number
+  /** Lag-leash ratio of the viewport half-extent. */
+  lagRatio: number
+  /** Lag-leash floor (fraction of frame). */
+  lagMin: number
+  /** Lag-leash ceiling (fraction of frame). */
+  lagMax: number
+  /** Edge-snap dead-zone ratio. */
+  edgeSnapRatio: number
+  /** Hold the previous target when cursor samples are farther apart than this (ms). */
+  idleGapMs: number
 }
 
 export const ZOOM_FOLLOW_DEFAULTS: ZoomFollowParams = {
-  sampleHz: 30,
-  predictionHz: 60,
-  // A generous dead zone: the camera holds still through small cursor wanders and
-  // only commits on a real excursion (calmer motion; fewer reframes).
-  safeFraction: 0.84,
-  dwellRadius: 0.035,
-  dwellMinSec: 0.18,
-  commitMargin: 0.06,
-  minMoveSec: 0.28,
-  maxMoveSec: 0.75,
-  anticipationLeadFraction: 0.15,
-  fitMargin: 0.16,
-  minRevealScale: 1.0,
-  revealHoldSec: 0.6,
-  // A gentler, longer reframe glide when one is needed.
-  transitionSec: 0.65,
+  sampleIntervalMs: FOCUS_SAMPLE_INTERVAL_MS,
+  lagRatio: FOCUS_LAG_RATIO,
+  lagMin: FOCUS_LAG_MIN,
+  lagMax: FOCUS_LAG_MAX,
+  edgeSnapRatio: ZOOM_EDGE_SNAP_RATIO,
+  idleGapMs: FOCUS_IDLE_GAP_MS,
 }
-
-// Engaged-content rects (a menu/popover's bounds from frame-analysis or, later,
-// Accessibility) ride along on each clip as `engagedRects` and are persisted in
-// project.json. The planner widens a dwell's engaged region by the rect active
-// around it, which is what triggers a zoom-out-to-fit reveal for content larger
-// than the frame. They reach export only via project.json, so preview == export.
 
 // --- Reframe motion blur (directional) -----------------------------------
 //
-// A reframe pans the camera sideways (scale held). We smear the zoomed content
-// along the travel direction with a directional motion blur — the same look the
-// cursor sprite uses — proportional to the focus pan velocity. It is computed
-// from the follow path (a central difference on the eased focus), so it ramps in
-// and out on its own: the `smootherstep` reframe has zero slope at both ends, so
-// the blur fades up to a mid-reframe peak and back to zero. SUBTLE by default;
-// the cursor layer is excluded from it (it keeps only its own velocity blur).
+// As the auto-mode camera pans to follow the cursor (scale held), we smear the
+// zoomed content along the travel direction with a directional motion blur — the
+// same look the cursor sprite uses — proportional to the focus pan velocity. It
+// is a central difference on the spring-smoothed focus, so it ramps up and down
+// on its own: the blur grows with the follow speed and falls to zero when the
+// camera settles. SUBTLE by default; the cursor layer is excluded from it (it
+// keeps only its own velocity blur).
 
 /** Shutter window (s): focus velocity × this = the per-shutter smear length. */
 const ZOOM_PAN_BLUR_SHUTTER_SECONDS = 1 / 30
@@ -256,31 +197,25 @@ const ZOOM_PAN_BLUR_MIN = 1e-3
 const ZOOM_PAN_BLUR_VELOCITY_DT = 1 / 240
 
 /**
- * One timed keyframe on a clip's follow path. `fx`/`fy` are stored focus and
- * `scale` is the settled magnification at this anchor (lets the camera zoom out
- * to reveal a large engaged region, then a later anchor restores the tight zoom).
- * `enterSec` is the eased duration of the move INTO this anchor (velocity-matched
- * / anticipatory); it falls back to the path's `defaultTransitionSec`. `reveal`
- * classifies the move (drives docs/telemetry only).
+ * One spring-smoothed focus keyframe at time `t` (timeline seconds). `fx`/`fy`
+ * are the stored focus the camera scales around (already edge-snapped). Sampled
+ * at a fixed step, so consecutive keyframes are ~`sampleIntervalMs` apart.
  */
-type ZoomFollowAnchor = {
+type ZoomFocusKeyframe = {
   t: number
   fx: number
   fy: number
-  scale: number
-  enterSec?: number
-  reveal: "pan" | "zoom-out"
 }
 
 /**
- * A precomputed cursor-follow path for one clip: (focus, scale) holds at each
- * anchor and eases to the next over the anchor's `enterSec` (or
- * `defaultTransitionSec`). Always ≥2 anchors (a single-anchor path is
- * indistinguishable from a fixed focus and is dropped to `null`).
+ * A precomputed auto-mode follow path for one clip: the spring-smoothed focus at
+ * each fixed-step keyframe, plus the clip's constant hold scale (auto follow is
+ * focus-only — it never changes magnification). `sampleZoomCameraAtTime` lerps
+ * between keyframes. Only `auto` clips get a path; `manual` clips are `null`.
  */
 export type ZoomFollowPath = {
-  defaultTransitionSec: number
-  anchors: ZoomFollowAnchor[]
+  scale: number
+  keyframes: ZoomFocusKeyframe[]
 }
 
 /** Per-clip follow paths, keyed by clip id. */
@@ -300,7 +235,7 @@ type ResolvedZoomClip = {
   fx: number
   fy: number
   blur: number
-  curve: CanvasZoomTransitionCurve
+  mode: "auto" | "manual"
   holdStart: number
   holdEnd: number
   id: string
@@ -317,7 +252,7 @@ function resolveZoomClip(input: CanvasZoomClipInput): ResolvedZoomClip {
     fx: focus.x,
     fy: focus.y,
     blur: clampUnit(clip.radialBlur),
-    curve: clampZoomTransitionSettings(clip.transition).curve,
+    mode: clip.mode,
     holdStart: clip.start + easeInSeconds,
     holdEnd: clip.end - easeOutSeconds,
     id: clip.id,
@@ -387,293 +322,88 @@ function clampRange(value: number, lo: number, hi: number) {
   return Math.min(hi, Math.max(lo, value))
 }
 
-// --- Follow geometry helpers ---------------------------------------------
-//
-// The "window centre" is the artboard-normalized centre of the visible window;
-// the "focus" is the stored 0..1 point a clip zooms around. They relate through
-// the scale: a window at scale s spans 1/s of the artboard.
-
-/** Window centre that frames `focus` at `scale`. */
-function centerForFocus(focus: number, scale: number): number {
-  return focus * (1 - 1 / scale) + 1 / (2 * scale)
-}
-
-/** Inverse of {@link centerForFocus}: the stored focus that yields `center`. */
-function focusForCenter(center: number, scale: number): number {
-  const inv = 1 - 1 / scale
-  if (inv <= 0) return 0.5
-  return clampUnit((center - 1 / (2 * scale)) / inv)
-}
-
-/** Clamp a window centre so the window stays fully inside the artboard [0,1]. */
-function clampCenter(center: number, scale: number): number {
-  const half = 1 / (2 * scale)
-  return clampRange(center, half, 1 - half)
-}
-
-/** A settled cursor cluster within a clip's hold — its attention "park". */
-type FollowDwell = { t0: number; t1: number; cx: number; cy: number; radius: number }
-
-/** The engaged region around a dwell: its centre + half-extents (normalized). */
-type EngagedRegion = { cx: number; cy: number; halfX: number; halfY: number }
-
 /**
- * Segment the sampled cursor into dwells: spans where the cursor stayed within
- * `dwellRadius` for at least `dwellMinSec`. Transit intervals between dwells are
- * implicit. Mirrors the kinematics-stage fixation model
- * (`lib/auto-zoom/kinematics.ts`) but runs on the already-focus-normalized
- * sampler output so it is identical in preview and export. A constantly-moving
- * cursor yields no dwell, so the camera simply waits (holds) rather than chasing.
- */
-function deriveDwells(
-  samples: readonly { t: number; x: number; y: number }[],
-  params: ZoomFollowParams
-): FollowDwell[] {
-  const dwells: FollowDwell[] = []
-  const gapBreakSec = Math.max(3 / Math.max(1, params.predictionHz), 0.1)
-  let n = 0
-  let sumX = 0
-  let sumY = 0
-  let cx = 0
-  let cy = 0
-  let t0 = 0
-  let t1 = 0
-  let maxR = 0
-
-  const flush = () => {
-    if (n >= 2 && t1 - t0 >= params.dwellMinSec) {
-      dwells.push({ t0, t1, cx, cy, radius: maxR })
-    }
-  }
-  const start = (s: { t: number; x: number; y: number }) => {
-    n = 1
-    sumX = s.x
-    sumY = s.y
-    cx = s.x
-    cy = s.y
-    t0 = s.t
-    t1 = s.t
-    maxR = 0
-  }
-
-  for (const s of samples) {
-    if (n === 0) {
-      start(s)
-      continue
-    }
-    const dist = Math.hypot(s.x - cx, s.y - cy)
-    const gap = s.t - t1
-    if (dist <= params.dwellRadius && gap <= gapBreakSec) {
-      n += 1
-      sumX += s.x
-      sumY += s.y
-      cx = sumX / n
-      cy = sumY / n
-      t1 = s.t
-      if (dist > maxR) maxR = dist
-      continue
-    }
-    flush()
-    start(s)
-  }
-  flush()
-  return dwells
-}
-
-/**
- * The region a dwell engages: the dwell extent, widened by any content rect
- * (frame-analysis / Accessibility) active around the dwell's time. A bare dwell
- * is a tiny region (always fits → PAN); a menu/popover rect makes it large
- * enough to force a zoom-out-to-fit reveal.
- */
-function engagedRegionFor(
-  d: FollowDwell,
-  engagedRects: ReadonlyArray<{ t: number; rect: ZoomVisibleWindow }> | undefined,
-  params: ZoomFollowParams
-): EngagedRegion {
-  let minX = d.cx - d.radius
-  let maxX = d.cx + d.radius
-  let minY = d.cy - d.radius
-  let maxY = d.cy + d.radius
-  if (engagedRects && engagedRects.length > 0) {
-    // A rect counts when its interaction time sits within (or just before) the
-    // dwell — the menu that opened as the cursor settled here.
-    const lo = d.t0 - Math.max(params.dwellMinSec, 0.3)
-    const hi = d.t1 + params.revealHoldSec
-    for (const r of engagedRects) {
-      if (r.t < lo || r.t > hi) continue
-      minX = Math.min(minX, r.rect.x)
-      maxX = Math.max(maxX, r.rect.x + r.rect.width)
-      minY = Math.min(minY, r.rect.y)
-      maxY = Math.max(maxY, r.rect.y + r.rect.height)
-    }
-  }
-  minX = clampUnit(minX)
-  maxX = clampUnit(maxX)
-  minY = clampUnit(minY)
-  maxY = clampUnit(maxY)
-  return {
-    cx: (minX + maxX) / 2,
-    cy: (minY + maxY) / 2,
-    halfX: (maxX - minX) / 2,
-    halfY: (maxY - minY) / 2,
-  }
-}
-
-/** Largest scale at which the region (+ fitMargin) fits in the frame; ∞ if tiny. */
-function fitScaleForRegion(region: EngagedRegion, params: ZoomFollowParams): number {
-  const maxHalf = Math.max(region.halfX, region.halfY)
-  if (maxHalf <= ZOOM_IDENTITY_EPSILON) return Number.POSITIVE_INFINITY
-  return 1 / (2 * maxHalf * (1 + Math.max(0, params.fitMargin)))
-}
-
-/**
- * Precompute the PREDICTIVE follow path for one resolved clip. Samples the whole
- * hold (offline lookahead), segments it into dwells, then walks them: hold
- * rock-steady while the engaged region stays in frame, and commit ONE
- * anticipatory move per excursion — targeting the destination dwell, timed to
- * arrive as the cursor settles, PANning when a slide fits or ZOOMing OUT to fit
- * (then returning) when it cannot. Returns `null` when there is no zoom, no
- * usable cursor data, or no committed move (→ a plain fixed-focus zoom).
+ * Precompute the auto-mode spring follow path for one resolved clip. Integrates a
+ * mass-spring-damper toward the recorded cursor's focus at a fixed step across
+ * the whole hold (offline — the cursor track is fully known), applies a lag leash
+ * + edge-snap, and bakes the result into focus keyframes. Returns `null` for a
+ * `manual` clip, a clip with no zoom, or one with no usable cursor data (→ a
+ * plain fixed-focus zoom around `clip.fx/fy`).
+ *
+ * The stored focus is `snapToEdges(springPosition)`. Because that lands in [0,1]
+ * and the focus→window-centre map keeps any focus in [0,1] inside the artboard,
+ * this is equivalent to Cap's `calculate_follow_center` (snap → centre →
+ * clamp) — no separate centre clamp is needed.
  */
 function computeFollowPath(
   clip: ResolvedZoomClip,
   sampleCursor: CursorFocusSampler,
-  params: ZoomFollowParams,
-  engagedRects?: ReadonlyArray<{ t: number; rect: ZoomVisibleWindow }>
+  params: ZoomFollowParams
 ): ZoomFollowPath | null {
+  if (clip.mode !== "auto") return null
   if (clip.scale <= 1 + ZOOM_IDENTITY_EPSILON) return null
-  const span = clip.holdEnd - clip.holdStart
-  if (span <= 0) return null
+  if (clip.end - clip.start <= 0) return null
 
-  const transition = Math.max(0, params.transitionSec)
-  const dt = 1 / Math.max(1, params.predictionHz)
+  const stepMs = Math.max(1, params.sampleIntervalMs)
+  const stepSec = stepMs / 1000
 
-  // 1. Offline lookahead: sample the cursor across the whole hold.
-  const samples: { t: number; x: number; y: number }[] = []
-  for (let t = clip.holdStart; t <= clip.holdEnd + 1e-9; t += dt) {
-    const c = sampleCursor(t)
-    if (!c) continue
-    samples.push({ t, x: clampUnit(c.x), y: clampUnit(c.y) })
-  }
-  if (samples.length < 2) return null
+  // Follow the cursor across the WHOLE clip span (ease-in, hold, ease-out) — like
+  // Cap, the focus tracks the cursor throughout the segment, not only the hold.
+  // This also means every auto clip gets a path (so a short clip still follows).
+  // Seed the spring at the cursor's focus at the clip start (fall back to the
+  // clip's own focus) so the zoom-in lands where the follow starts.
+  const seed = sampleCursor(clip.start) ?? { x: clip.fx, y: clip.fy }
+  let target = { x: clampUnit(seed.x), y: clampUnit(seed.y) }
 
-  // 2. Segment into dwells (the cursor's settle points / attention).
-  const dwells = deriveDwells(samples, params)
-  if (dwells.length === 0) return null
+  const sim = new SpringMassDamperSimulation(ZOOM_FOCUS_SPRING_CONFIG)
+  sim.setPosition(target)
+  sim.setVelocity({ x: 0, y: 0 })
+  sim.setTarget(target)
 
-  // 3. Walk dwells; emit anchors only when the engaged region leaves the frame.
-  const fx0 = clampUnit(clip.fx)
-  const fy0 = clampUnit(clip.fy)
-  const anchors: ZoomFollowAnchor[] = [
-    { t: clip.holdStart, fx: fx0, fy: fy0, scale: clip.scale, reveal: "pan" },
+  const viewportHalf = 0.5 / clip.scale
+  const maxLag = clampRange(
+    viewportHalf * params.lagRatio,
+    params.lagMin,
+    params.lagMax
+  )
+  const snap = (v: number) => snapToEdges(clampUnit(v), params.edgeSnapRatio)
+
+  const keyframes: ZoomFocusKeyframe[] = [
+    { t: clip.start, fx: snap(target.x), fy: snap(target.y) },
   ]
-  let curScale = clip.scale
-  let centerX = centerForFocus(fx0, clip.scale)
-  let centerY = centerForFocus(fy0, clip.scale)
-  let prevDwellEnd = clip.holdStart
-  let lastAnchorT = clip.holdStart
 
-  for (const d of dwells) {
-    const tSettle = d.t0
-    const tDepart = prevDwellEnd
-    prevDwellEnd = d.t1
+  for (let t = clip.start + stepSec; t <= clip.end + 1e-9; t += stepSec) {
+    // A null sample (cursor off-screen / no data) holds the previous target
+    // rather than interpolating phantom motion across the gap.
+    const c = sampleCursor(t)
+    if (c) target = { x: clampUnit(c.x), y: clampUnit(c.y) }
+    sim.setTarget(target)
+    sim.run(stepMs)
 
-    const region = engagedRegionFor(d, engagedRects, params)
-
-    // Does the engaged region poke beyond the safe box (with hysteresis)?
-    const safeHalf = clampUnit(params.safeFraction) * (1 / (2 * curScale))
-    const dxOut = Math.abs(region.cx - centerX) + region.halfX - safeHalf
-    const dyOut = Math.abs(region.cy - centerY) + region.halfY - safeHalf
-    const needsMove =
-      dxOut > params.commitMargin || dyOut > params.commitMargin
-
-    // Smallest move that fits: only a region that can't fit at the held zoom
-    // forces a zoom-out; a bare dwell always fits, so PAN is the default.
-    const fitScale = fitScaleForRegion(region, params)
-    const wantZoomOut = fitScale < curScale - ZOOM_IDENTITY_EPSILON
-
-    if (!needsMove && !wantZoomOut) continue // rock-steady: region is in frame.
-
-    const nextScale = wantZoomOut
-      ? Math.max(params.minRevealScale, Math.min(curScale, fitScale))
-      : curScale
-    const nextCenterX = clampCenter(region.cx, nextScale)
-    const nextCenterY = clampCenter(region.cy, nextScale)
-
-    // Near the artboard edge the window can't recentre further — skip the no-op.
-    if (
-      Math.abs(nextCenterX - centerX) < ZOOM_IDENTITY_EPSILON &&
-      Math.abs(nextCenterY - centerY) < ZOOM_IDENTITY_EPSILON &&
-      Math.abs(nextScale - curScale) < ZOOM_IDENTITY_EPSILON
-    ) {
-      continue
+    // Lag leash: never let the smoothed focus trail the live cursor by more than
+    // `maxLag` of the frame; snap it back and bleed velocity if it does.
+    const dx = sim.position.x - target.x
+    const dy = sim.position.y - target.y
+    const distSq = dx * dx + dy * dy
+    if (distSq > maxLag * maxLag) {
+      const dist = Math.sqrt(distSq)
+      const s = maxLag / dist
+      sim.setPosition({ x: target.x + dx * s, y: target.y + dy * s })
+      sim.setVelocity({ x: sim.velocity.x * s, y: sim.velocity.y * s })
     }
 
-    // Anticipatory timing: the ramp matches the transit speed and lands a hair
-    // before the cursor settles, but never sets off before the cursor departs.
-    // Normal moves run in lockstep with the cursor's travel ([depart, settle]);
-    // a fast flick gets the snappy `minMoveSec` floor (a slight catch-up); a slow
-    // drift gets a late `maxMoveSec` glide that still arrives as the cursor lands.
-    const transit = Math.max(0, tSettle - tDepart)
-    const enterSec = clampRange(transit, params.minMoveSec, params.maxMoveSec)
-    const lead = params.anticipationLeadFraction * enterSec
-    let tStart = Math.max(tDepart - lead, tSettle - lead - enterSec)
-    if (tStart < lastAnchorT + dt) tStart = lastAnchorT + dt
-    if (tStart > clip.holdEnd) tStart = clip.holdEnd
-
-    anchors.push({
-      t: tStart,
-      fx: focusForCenter(nextCenterX, nextScale),
-      fy: focusForCenter(nextCenterY, nextScale),
-      scale: nextScale,
-      enterSec,
-      reveal: wantZoomOut ? "zoom-out" : "pan",
-    })
-    lastAnchorT = tStart
-    centerX = nextCenterX
-    centerY = nextCenterY
-    curScale = nextScale
-
-    // After a zoom-out reveal, return to the tighter zoom once it's been read.
-    if (wantZoomOut && clip.scale > nextScale + ZOOM_IDENTITY_EPSILON) {
-      const tReturn = Math.min(
-        clip.holdEnd,
-        Math.max(tStart + enterSec, d.t1) + params.revealHoldSec
-      )
-      if (tReturn > lastAnchorT + dt) {
-        const returnCenterX = clampCenter(region.cx, clip.scale)
-        const returnCenterY = clampCenter(region.cy, clip.scale)
-        const returnEnter = clampRange(
-          transition,
-          params.minMoveSec,
-          params.maxMoveSec
-        )
-        anchors.push({
-          t: tReturn,
-          fx: focusForCenter(returnCenterX, clip.scale),
-          fy: focusForCenter(returnCenterY, clip.scale),
-          scale: clip.scale,
-          enterSec: returnEnter,
-          reveal: "zoom-out",
-        })
-        lastAnchorT = tReturn
-        centerX = returnCenterX
-        centerY = returnCenterY
-        curScale = clip.scale
-      }
-    }
+    keyframes.push({ t, fx: snap(sim.position.x), fy: snap(sim.position.y) })
   }
 
-  if (anchors.length < 2) return null
-  return { defaultTransitionSec: transition, anchors }
+  if (keyframes.length < 2) return null
+  return { scale: clip.scale, keyframes }
 }
 
 /**
- * Precompute cursor-follow paths for every enabled clip. Call this OFF the hot
- * path (only when clips / cursor track / artboard change) and pass the result
- * to {@link sampleZoomCameraAtTime}. The editor preview and the exporter build
- * it the same way from the same cursor mapping, so the two follow identically.
+ * Precompute cursor-follow paths for every enabled `auto` clip. Call this OFF the
+ * hot path (only when clips / cursor track / artboard change) and pass the result
+ * to {@link sampleZoomCameraAtTime}. The editor preview and the exporter build it
+ * the same way from the same cursor mapping, so the two follow identically.
  */
 export function computeZoomFollowPaths(
   clips: readonly CanvasZoomClipInput[],
@@ -685,50 +415,43 @@ export function computeZoomFollowPaths(
   for (const input of clips) {
     if (input.enabled === false || input.end <= input.start) continue
     const clip = resolveZoomClip(input)
-    // Engaged-content rects (frame-analysis / AX) ride along on the clip itself
-    // and are persisted in project.json, so preview and export see the same
-    // input and follow identically — no separate plumbing to the callers.
-    const path = computeFollowPath(clip, sampleCursor, params, clipEngagedRects(input))
+    const path = computeFollowPath(clip, sampleCursor, params)
     if (path) paths.set(clip.id, path)
   }
   return paths
 }
 
-/** The per-clip engaged content rects (frame-analysis / AX), if any. */
-function clipEngagedRects(
-  input: CanvasZoomClipInput
-): ReadonlyArray<{ t: number; rect: ZoomVisibleWindow }> | undefined {
-  const rects = input.engagedRects
-  if (!rects || rects.length === 0) return undefined
-  return rects
-}
-
 /**
- * (focus, scale) at time `t` along a follow path: hold each anchor, ease to the
- * next over the anchor's `enterSec` (or `defaultTransitionSec`). Focus AND scale
- * share the one eased transition, so a zoom-out reveal and its recentre move
- * stay perfectly synchronized.
+ * Spring-smoothed (focus, scale) at time `t`: binary-search the keyframes and
+ * lerp the focus between the two surrounding samples. Scale is constant across an
+ * auto follow (focus-only), so it is read straight off the path.
  */
 function sampleFollowState(
   path: ZoomFollowPath,
   t: number
 ): { fx: number; fy: number; scale: number } {
-  const { anchors } = path
-  let i = 0
-  for (let k = 0; k < anchors.length; k++) {
-    if (anchors[k].t <= t) i = k
-    else break
+  const { keyframes, scale } = path
+  if (keyframes.length === 0) return { fx: 0.5, fy: 0.5, scale }
+  const first = keyframes[0]
+  if (t <= first.t) return { fx: first.fx, fy: first.fy, scale }
+  const last = keyframes[keyframes.length - 1]
+  if (t >= last.t) return { fx: last.fx, fy: last.fy, scale }
+
+  let lo = 0
+  let hi = keyframes.length - 1
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1
+    if (keyframes[mid].t <= t) lo = mid
+    else hi = mid
   }
-  const cur = anchors[i]
-  if (i === 0) return { fx: cur.fx, fy: cur.fy, scale: cur.scale }
-  const prev = anchors[i - 1]
-  const dur = cur.enterSec ?? path.defaultTransitionSec
-  const u = dur > 0 ? clampUnit((t - cur.t) / dur) : 1
-  const e = smootherstep(u)
+  const a = keyframes[lo]
+  const b = keyframes[hi]
+  const span = b.t - a.t
+  const u = span > 0 ? clampUnit((t - a.t) / span) : 0
   return {
-    fx: prev.fx + (cur.fx - prev.fx) * e,
-    fy: prev.fy + (cur.fy - prev.fy) * e,
-    scale: prev.scale + (cur.scale - prev.scale) * e,
+    fx: a.fx + (b.fx - a.fx) * u,
+    fy: a.fy + (b.fy - a.fy) * u,
+    scale,
   }
 }
 
@@ -741,14 +464,6 @@ function followStateFor(
   const path = paths?.get(clip.id)
   if (!path) return { fx: clip.fx, fy: clip.fy, scale: clip.scale }
   return sampleFollowState(path, t)
-}
-
-/** Scale velocity (per second) along a follow path — drives in-hold radial blur. */
-function followScaleVelocity(path: ZoomFollowPath, t: number): number {
-  const dt = ZOOM_PAN_BLUR_VELOCITY_DT
-  const before = sampleFollowState(path, t - dt).scale
-  const after = sampleFollowState(path, t + dt).scale
-  return (after - before) / (2 * dt)
 }
 
 /**
@@ -770,7 +485,8 @@ function panBlurFor(
   const dt = ZOOM_PAN_BLUR_VELOCITY_DT
   const before = sampleFollowState(path, t - dt)
   const after = sampleFollowState(path, t + dt)
-  const k = (depth * ZOOM_PAN_BLUR_SHUTTER_SECONDS * ZOOM_PAN_BLUR_GAIN) / (2 * dt)
+  const k =
+    (depth * ZOOM_PAN_BLUR_SHUTTER_SECONDS * ZOOM_PAN_BLUR_GAIN) / (2 * dt)
   return {
     x: clampPanSmear((after.fx - before.fx) * k),
     y: clampPanSmear((after.fy - before.fy) * k),
@@ -847,45 +563,29 @@ export function getZoomVisibleWindow(
 
 /**
  * The settled / transitioning camera state at `t`. The held + ease-out + weld
- * branches read the per-clip follow path (via {@link followStateFor}) so the
- * focus tracks the cursor's hold + reframe motion; with no path they use the
- * clip's fixed focus and behave exactly as a plain zoom.
+ * branches read the per-clip spring follow path (via {@link followStateFor}) so
+ * an `auto` clip's focus tracks the cursor; a `manual` clip (no path) uses its
+ * fixed focus and behaves exactly as a plain zoom. The amount ramps on the shared
+ * mass-spring-damper curve (`springEase` / `springEaseOutRamped`).
  */
 function computeZoomState(
   resolved: readonly ResolvedZoomClip[],
   t: number,
   paths: ZoomFollowPaths | null
 ): ZoomState | null {
-  // 1. Held inside a clip's settle interval → full settled zoom. The focus
-  //    follows the precomputed path (held still, eased reframes); a reframe pan
-  //    adds a directional motion blur (no radial blur — the scale is steady).
+  // 1. Held inside a clip's settle interval → full settled zoom. An `auto` clip's
+  //    focus spring-follows the cursor; the sideways pan adds a directional blur.
+  //    The scale is steady through the hold, so there is no radial (zoom) blur.
   for (const c of resolved) {
     if (t >= c.holdStart && t <= c.holdEnd && t < c.end) {
       if (c.scale <= 1 + ZOOM_IDENTITY_EPSILON) return null
       const st = followStateFor(c, t, paths)
       const pan = panBlurFor(c, t, st.scale, paths)
-      // An in-hold zoom-out reveal changes scale → radial blur from the scale
-      // velocity (same model as easeState). A steady hold (and any pan-only or
-      // no-path clip) has zero scale velocity, so this stays 0 and renders
-      // byte-identically to before.
-      let radialBlur = 0
-      const path = paths?.get(c.id)
-      if (path) {
-        const sv = followScaleVelocity(path, t)
-        if (sv !== 0) {
-          radialBlur = clampUnit(
-            c.blur *
-              clampUnit(
-                (Math.abs(sv) / Math.max(st.scale, 1e-6)) * ZOOM_BLUR_MOTION_GAIN
-              )
-          )
-        }
-      }
       return {
         scale: st.scale,
         fx: st.fx,
         fy: st.fy,
-        radialBlur,
+        radialBlur: 0,
         panBlurX: pan.x,
         panBlurY: pan.y,
         clipId: c.id,
@@ -895,7 +595,7 @@ function computeZoomState(
 
   // 2. Continuous weld between two near-adjacent clips: blend settled state
   //    A → B (scale AND focus) directly across A's ease-out, the gap, and B's
-  //    ease-in — never returning to 1x.
+  //    ease-in — never returning to 1x — on the spring curve.
   for (let i = 0; i < resolved.length - 1; i++) {
     const a = resolved[i]
     const b = resolved[i + 1]
@@ -904,58 +604,65 @@ function computeZoomState(
     const windowDur = b.holdStart - a.holdEnd
     if (windowDur <= 0) continue
     const raw = (t - a.holdEnd) / windowDur
-    const u = transitionCurveValue(ZOOM_WELD_CURVE, raw)
-    // Weld between A's FINAL held frame and B's INITIAL frame, so a reframe or
-    // zoom-out reveal that moved A's focus/scale carries through the glide.
+    const u = springEase(raw)
+    // Weld between A's FINAL held frame and B's INITIAL frame, so a follow that
+    // moved A's focus carries through the glide.
     const fa = followStateFor(a, a.holdEnd, paths)
     const fb = followStateFor(b, b.holdStart, paths)
     const scale = fa.scale + (fb.scale - fa.scale) * u
     // Blur tracks how fast the magnification is changing across the weld — a
     // smaller swing (2.5→1.7) blurs gentler than a full zoom from 1x.
-    const slope = curveSlope(ZOOM_WELD_CURVE, raw) / windowDur
+    const slope = springSlope(springEase, raw) / windowDur
     const scaleVelocity = Math.abs(fb.scale - fa.scale) * slope
-    const motion = clampUnit((scaleVelocity / Math.max(scale, 1e-6)) * ZOOM_BLUR_MOTION_GAIN)
+    const motion = clampUnit(
+      (scaleVelocity / Math.max(scale, 1e-6)) * ZOOM_BLUR_MOTION_GAIN
+    )
     return {
       scale,
       fx: fa.fx + (fb.fx - fa.fx) * u,
       fy: fa.fy + (fb.fy - fa.fy) * u,
       radialBlur: (a.blur + (b.blur - a.blur) * u) * motion,
-      // Welds keep their radial (zoom) blur; reframe pan blur is reframes-only.
+      // Welds keep their radial (zoom) blur; the follow pan blur is hold-only.
       panBlurX: 0,
       panBlurY: 0,
       clipId: u < 0.5 ? a.id : b.id,
     }
   }
 
-  // 3. A clip's own (non-welded) ease-in from identity — focus anchored on the
-  //    clip's own point (the follow path's first anchor), scale ramping.
+  // 3. A clip's own (non-welded) spring ease-in from identity — scale ramps while
+  //    the focus is anchored on where the follow begins (the path's seed), so the
+  //    zoom-in lands exactly where the cursor follow takes over.
   for (const c of resolved) {
     if (t >= c.start && t < c.holdStart) {
       const easeIn = c.holdStart - c.start
       if (easeIn <= 0) continue
       const raw = (t - c.start) / easeIn
+      // Focus follows the cursor LIVE during the zoom-in (auto clips have a path
+      // spanning the whole clip); a manual clip's path is null → its fixed focus.
+      const f = followStateFor(c, t, paths)
       return easeState(
         c,
-        transitionCurveValue(c.curve, raw),
-        curveSlope(c.curve, raw) / easeIn,
-        c.fx,
-        c.fy
+        springEase(raw),
+        springSlope(springEase, raw) / easeIn,
+        f.fx,
+        f.fy
       )
     }
   }
 
-  // 4. A clip's own (non-welded) ease-out to identity — focus anchored on the
-  //    final held frame the follow path settled on, scale ramping back down.
+  // 4. A clip's own (non-welded) spring ease-out to identity — focus keeps
+  //    following the cursor while the scale ramps back down. The leading
+  //    smoothstep in `springEaseOutRamped` keeps the first frames smooth.
   for (const c of resolved) {
     if (t > c.holdEnd && t < c.end) {
       const easeOut = c.end - c.holdEnd
       if (easeOut <= 0) continue
       const raw = (t - c.holdEnd) / easeOut
-      const f = followStateFor(c, c.holdEnd, paths)
+      const f = followStateFor(c, t, paths)
       return easeState(
         c,
-        1 - transitionCurveValue(c.curve, raw),
-        curveSlope(c.curve, raw) / easeOut,
+        1 - springEaseOutRamped(raw),
+        springSlope(springEaseOutRamped, raw) / easeOut,
         f.fx,
         f.fy,
         f.scale
@@ -991,7 +698,11 @@ export function sampleZoomCameraAtTime(
     .sort((a, b) => a.start - b.start || a.end - b.end)
   if (resolved.length === 0) return IDENTITY_ZOOM_CAMERA
 
-  const state = computeZoomState(resolved, compositionSeconds, followPaths ?? null)
+  const state = computeZoomState(
+    resolved,
+    compositionSeconds,
+    followPaths ?? null
+  )
   if (!state) return IDENTITY_ZOOM_CAMERA
 
   return cameraFromState(state, artboard)

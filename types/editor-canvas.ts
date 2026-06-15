@@ -194,6 +194,14 @@ export type CanvasZoomFocus = {
   y: number
 }
 
+/**
+ * How a zoom clip resolves its focus point.
+ * - `"auto"`  — the camera spring-follows the recorded cursor at render time
+ *   (the clip's stored `focus` is only the ease-in anchor). The default.
+ * - `"manual"` — the camera holds the fixed stored `focus` point.
+ */
+export type CanvasZoomMode = "auto" | "manual"
+
 export type CanvasZoomTransitionCurve =
   | "linear"
   | "smoothstep"
@@ -252,8 +260,14 @@ export type CanvasZoomClip = {
   start: number
   end: number
   enabled: boolean
-  /** User-picked anchor point; the zoom scales around this fixed artboard point. */
+  /**
+   * In `manual` mode the fixed artboard point the zoom scales around. In `auto`
+   * mode the camera spring-follows the cursor and this is only the ease-in
+   * anchor (where the zoom-in lands before the follow takes over).
+   */
   focus: CanvasZoomFocus
+  /** Auto (cursor-follow) vs manual (fixed `focus`). Defaults to `auto`. */
+  mode: CanvasZoomMode
   scale: number
   radialBlur: number
   radialBlurSettings: CanvasZoomRadialBlurSettings
@@ -271,7 +285,7 @@ export type CanvasZoomClip = {
 export type CanvasZoomClipPatch = Partial<
   Pick<
     CanvasZoomClip,
-    "enabled" | "focus" | "scale" | "radialBlur" | "easePreset"
+    "enabled" | "focus" | "mode" | "scale" | "radialBlur" | "easePreset"
   >
 > & {
   radialBlurSettings?: Partial<CanvasZoomRadialBlurSettings>

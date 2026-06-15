@@ -4,6 +4,7 @@ import type {
   CanvasZoomEasePreset,
   CanvasZoomEngagedRect,
   CanvasZoomFocus,
+  CanvasZoomMode,
   CanvasZoomRadialBlurSettings,
   CanvasZoomTransitionCurve,
   CanvasZoomTransitionSettings,
@@ -78,6 +79,13 @@ export const ZOOM_RADIAL_BLUR_SHADER: CanvasZoomRadialBlurSettings = {
 // Dark Recordings".
 export const ZOOM_BLUR_MOTION_GAIN = 0.05
 export const ZOOM_FOCUS_DEFAULT: CanvasZoomFocus = { x: 0.5, y: 0.5 }
+// Default zoom mode. `auto` (cursor-follow) matches the historical behavior —
+// before the mode field existed, every clip's camera followed the cursor — so
+// legacy clips with no persisted `mode` keep following after this change. New
+// hand-added clips are created as `manual` (a fixed point where the user
+// dropped them); auto-generated clips are created as `auto`.
+export const ZOOM_MODE_DEFAULT: CanvasZoomMode = "auto"
+export const ZOOM_MODES: CanvasZoomMode[] = ["auto", "manual"]
 export const ZOOM_EASE_PRESET_DEFAULT: CanvasZoomEasePreset = "smooth"
 export const ZOOM_EASE_PRESETS: CanvasZoomEasePreset[] = [
   "smooth",
@@ -99,7 +107,11 @@ export const ZOOM_TRANSITION_FRACTION_MIN = 0
 export const ZOOM_TRANSITION_FRACTION_MAX = 0.75
 export const ZOOM_TRANSITION_DURATION_MS_MIN = 150
 export const ZOOM_TRANSITION_DURATION_MS_MAX = 2000
-export const ZOOM_TRANSITION_DURATION_MS_DEFAULT = 600
+// Default ramp duration. Matches Cap's `ZOOM_DURATION` (1.0 s): the spring amount
+// ramp (`pixi/zoom-spring.ts`) is fit into this window, so a default clip eases in
+// / out over ~1 s exactly like Cap. (Was 600 ms, which read noticeably snappier
+// than Cap.)
+export const ZOOM_TRANSITION_DURATION_MS_DEFAULT = 1000
 export const ZOOM_TRANSITION_DEFAULT: CanvasZoomTransitionSettings = {
   easeIn: 0.3,
   easeOut: 0.3,
@@ -137,7 +149,7 @@ export type CanvasZoomClipInput = Pick<CanvasZoomClip, "id" | "start" | "end"> &
   Partial<
     Pick<
       CanvasZoomClip,
-      "enabled" | "focus" | "scale" | "radialBlur" | "easePreset"
+      "enabled" | "focus" | "mode" | "scale" | "radialBlur" | "easePreset"
     >
   > & {
     radialBlurSettings?: Partial<CanvasZoomRadialBlurSettings>
@@ -212,6 +224,12 @@ export function clampZoomEasePreset(preset: unknown): CanvasZoomEasePreset {
   return ZOOM_EASE_PRESETS.includes(preset as CanvasZoomEasePreset)
     ? (preset as CanvasZoomEasePreset)
     : ZOOM_EASE_PRESET_DEFAULT
+}
+
+export function clampZoomMode(mode: unknown): CanvasZoomMode {
+  return ZOOM_MODES.includes(mode as CanvasZoomMode)
+    ? (mode as CanvasZoomMode)
+    : ZOOM_MODE_DEFAULT
 }
 
 export function clampZoomTransitionCurve(
@@ -390,6 +408,7 @@ export function withZoomClipDefaults(
     end: clip.end,
     enabled: clip.enabled ?? true,
     focus: clampZoomFocus(clip.focus ?? ZOOM_FOCUS_DEFAULT),
+    mode: clampZoomMode(clip.mode),
     scale: clampZoomScale(clip.scale ?? ZOOM_SCALE_DEFAULT),
     radialBlur: clampZoomRadialBlur(
       clip.radialBlur ?? ZOOM_RADIAL_BLUR_DEFAULT
@@ -407,6 +426,7 @@ export function sanitizeZoomClipPatch(
   const next: CanvasZoomClipPatch = {}
   if (typeof patch.enabled === "boolean") next.enabled = patch.enabled
   if (patch.focus) next.focus = clampZoomFocus(patch.focus)
+  if (patch.mode) next.mode = clampZoomMode(patch.mode)
   if (typeof patch.scale === "number") next.scale = clampZoomScale(patch.scale)
   if (typeof patch.radialBlur === "number") {
     next.radialBlur = clampZoomRadialBlur(patch.radialBlur)
@@ -603,7 +623,8 @@ export function getZoomGapBounds(
     } else if (clip.start >= refEnd - ZOOM_CLIP_EPSILON_SECONDS) {
       hi = Math.min(hi, clip.start)
     } else if (
-      clip.start + clip.end <= refStart + refEnd // midpoint comparison ×2
+      clip.start + clip.end <=
+      refStart + refEnd // midpoint comparison ×2
     ) {
       lo = Math.max(lo, clip.end)
     } else {

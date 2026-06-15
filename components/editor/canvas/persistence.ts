@@ -13,6 +13,7 @@ import type {
 } from "@/types/editor-canvas"
 import {
   ZOOM_FOCUS_DEFAULT,
+  ZOOM_MODE_DEFAULT,
   ZOOM_RADIAL_BLUR_DEFAULT,
   ZOOM_SCALE_DEFAULT,
   ZOOM_TRANSITION_DEFAULT,
@@ -174,6 +175,9 @@ export function serializeZoomClip(clip: CanvasZoomClip): ProjectZoomClip {
     normalized.focus.y !== ZOOM_FOCUS_DEFAULT.y
       ? { focus: { x: normalized.focus.x, y: normalized.focus.y } }
       : {}),
+    // Omitted when default so legacy `project.json` files stay byte-identical
+    // until a clip's mode is changed away from the default.
+    ...(normalized.mode !== ZOOM_MODE_DEFAULT ? { mode: normalized.mode } : {}),
     ...(normalized.scale !== ZOOM_SCALE_DEFAULT
       ? { scale: normalized.scale }
       : {}),
@@ -290,6 +294,7 @@ export function projectZoomClipToCanvasClip(
     end: clip.end,
     enabled: clip.enabled,
     focus: clip.focus,
+    mode: clip.mode,
     scale: clip.scale,
     radialBlur: clip.radialBlur,
     radialBlurSettings: clip.radialBlurSettings,

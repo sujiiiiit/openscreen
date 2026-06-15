@@ -300,9 +300,41 @@ export function ZoomPanel() {
 
       <div className="flex w-full flex-col gap-9">
         <div className="space-y-2">
+          <div
+            className={cn(
+              "space-y-1 transition-opacity select-none",
+              clipDisabled && "opacity-50"
+            )}
+          >
+            <h4 className="text-xs font-semibold">Focus</h4>
+            <p className="text-xs text-muted-foreground">
+              Auto follows the cursor; Manual holds a fixed point.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-1 rounded-md bg-muted/40 p-1">
+            {(["auto", "manual"] as const).map((m) => (
+              <Button
+                key={m}
+                type="button"
+                size="sm"
+                variant={selectedClip.mode === m ? "secondary" : "ghost"}
+                className={cn(
+                  "h-7 capitalize",
+                  selectedClip.mode === m && "shadow-sm"
+                )}
+                disabled={clipDisabled}
+                onClick={() => updateZoomClip(selectedClip.id, { mode: m })}
+              >
+                {m}
+              </Button>
+            ))}
+          </div>
+        </div>
+
+        <div className="space-y-2">
           <ZoomFocusPreview
             clip={selectedClip}
-            disabled={clipDisabled}
+            disabled={clipDisabled || selectedClip.mode === "auto"}
             onFocusChange={(focus) =>
               updateZoomClip(selectedClip.id, { focus })
             }
@@ -313,7 +345,9 @@ export function ZoomPanel() {
               clipDisabled && "opacity-50"
             )}
           >
-            Drag the dot to set the point the zoom centers on.
+            {selectedClip.mode === "auto"
+              ? "The zoom follows the cursor automatically. Switch to Manual to pin a point."
+              : "Drag the dot to set the point the zoom centers on."}
           </p>
         </div>
 

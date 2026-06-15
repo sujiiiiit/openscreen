@@ -292,8 +292,10 @@ export interface ProjectZoomClip {
   start: number
   end: number
   enabled?: boolean
-  /** Normalized full-artboard anchor point; zoom scales around this fixed point. */
+  /** Normalized full-artboard anchor point; in manual mode the zoom scales around it. */
   focus?: { x: number; y: number }
+  /** Auto (cursor-follow) vs manual (fixed focus). Optional; defaults to auto. */
+  mode?: "auto" | "manual"
   scale?: number
   radialBlur?: number
   /** Legacy optional zoom-blur settings; new saves no longer write this object. */

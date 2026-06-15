@@ -12,7 +12,13 @@ import { ZOOM_RADIAL_BLUR_SHADER, withZoomClipDefaults } from "@/lib/zoom-clips"
 
 const artboard = { width: 1000, height: 500 }
 
-describe("manual zoom camera", () => {
+// The visible normalized window for a given stored focus + scale.
+const cursorInWindow = (focusN: number, scale: number, c: number) => {
+  const left = focusN * (1 - 1 / scale)
+  return c >= left - 1e-9 && c <= left + 1 / scale + 1e-9
+}
+
+describe("zoom camera (fixed focus / no follow path)", () => {
   it("returns identity outside zoom clips", () => {
     const clip = withZoomClipDefaults({ id: "z", start: 1, end: 5 })
     expect(sampleZoomCameraAtTime([clip], artboard, 0.5)).toEqual(
@@ -51,6 +57,7 @@ describe("manual zoom camera", () => {
       id: "z",
       start: 0,
       end: 4,
+      mode: "manual",
       focus: { x: 1, y: 0 },
       scale: 2,
     })
@@ -68,6 +75,7 @@ describe("manual zoom camera", () => {
       id: "z",
       start: 0,
       end: 4,
+      mode: "manual",
       focus: { x: 0, y: 1 },
       scale: 2,
       radialBlur: 1,
@@ -84,6 +92,7 @@ describe("manual zoom camera", () => {
       id: "z",
       start: 0,
       end: 4,
+      mode: "manual",
       focus: { x: 0.12, y: 0.82 },
       scale: 2,
       radialBlur: 1,
@@ -114,6 +123,7 @@ describe("manual zoom camera", () => {
       id: "z",
       start: 0,
       end: 4,
+      mode: "manual",
       focus: { x: 0.5, y: 0.5 },
       scale: 2,
       radialBlur: 0.5,
@@ -141,6 +151,7 @@ describe("manual zoom camera", () => {
       id: "z",
       start: 0,
       end: 4,
+      mode: "manual",
       scale: 2,
       radialBlurSettings: {
         strength: 1.4,
@@ -152,9 +163,7 @@ describe("manual zoom camera", () => {
 
     const camera = sampleZoomCameraAtTime([clip], artboard, 0.3)
     expect(camera.radialBlur).toBeGreaterThan(0)
-    expect(camera.radialBlurSettings).toEqual({
-      ...ZOOM_RADIAL_BLUR_SHADER,
-    })
+    expect(camera.radialBlurSettings).toEqual({ ...ZOOM_RADIAL_BLUR_SHADER })
   })
 
   it("blurs more for a snappier (shorter) ease", () => {
@@ -162,17 +171,19 @@ describe("manual zoom camera", () => {
       id: "z",
       start: 0,
       end: 4,
+      mode: "manual",
       scale: 2,
       radialBlur: 1,
-      transition: { durationMs: 300, curve: "smootherstep" },
+      transition: { durationMs: 300 },
     })
     const slow = withZoomClipDefaults({
       id: "z",
       start: 0,
       end: 4,
+      mode: "manual",
       scale: 2,
       radialBlur: 1,
-      transition: { durationMs: 1000, curve: "smootherstep" },
+      transition: { durationMs: 1000 },
     })
 
     // Sample each at the midpoint of its ease-in ramp (peak velocity).
@@ -186,23 +197,19 @@ describe("manual zoom camera", () => {
       id: "long",
       start: 0,
       end: 4,
+      mode: "manual",
       scale: 2,
       radialBlur: 1,
-      transition: {
-        durationMs: 1000,
-        curve: "smootherstep",
-      },
+      transition: { durationMs: 1000 },
     })
     const short = withZoomClipDefaults({
       id: "short",
       start: 0,
       end: 4,
+      mode: "manual",
       scale: 2,
       radialBlur: 1,
-      transition: {
-        durationMs: 300,
-        curve: "smootherstep",
-      },
+      transition: { durationMs: 300 },
     })
 
     const longMidRamp = sampleZoomCameraAtTime([long], artboard, 0.5)
@@ -220,17 +227,19 @@ describe("manual zoom camera", () => {
       id: "two",
       start: 0,
       end: 4,
+      mode: "manual",
       scale: 2,
       radialBlur: 1,
-      transition: { durationMs: 600, curve: "smootherstep" },
+      transition: { durationMs: 600 },
     })
     const fourX = withZoomClipDefaults({
       id: "four",
       start: 0,
       end: 4,
+      mode: "manual",
       scale: 4,
       radialBlur: 1,
-      transition: { durationMs: 600, curve: "smootherstep" },
+      transition: { durationMs: 600 },
     })
 
     const twoXPeak = sampleZoomCameraAtTime([twoX], artboard, 0.3)
@@ -253,11 +262,36 @@ describe("manual zoom camera", () => {
   })
 })
 
+describe("spring zoom transition", () => {
+  it("zoom-out early frames are smooth (no jump at the start of the ramp)", () => {
+    // The leading smoothstep in `springEaseOutRamped` erases the spring's start
+    // kink, so the very first frames of the zoom-out barely move (a hard cut /
+    // un-guarded spring would step a large fraction of the scale in one frame).
+    const c = withZoomClipDefaults({
+      id: "z",
+      start: 0,
+      end: 4,
+      mode: "manual",
+      scale: 2,
+      radialBlur: 0,
+      transition: { durationMs: 600 },
+    })
+    // holdEnd = 4 - 0.6 = 3.4.
+    const s0 = sampleZoomCameraAtTime([c], artboard, 3.4).scale // held boundary (2)
+    const s1 = sampleZoomCameraAtTime([c], artboard, 3.4 + 1 / 120).scale
+    const s2 = sampleZoomCameraAtTime([c], artboard, 3.4 + 2 / 120).scale
+    expect(s0).toBeCloseTo(2)
+    expect(Math.abs(s1 - s0)).toBeLessThan(0.01)
+    expect(Math.abs(s2 - s1)).toBeLessThan(0.02)
+  })
+})
+
 describe("continuous zoom (welding adjacent clips)", () => {
   const A = withZoomClipDefaults({
     id: "a",
     start: 0,
     end: 4,
+    mode: "manual",
     scale: 2.5,
     focus: { x: 0.2, y: 0.2 },
   })
@@ -265,26 +299,29 @@ describe("continuous zoom (welding adjacent clips)", () => {
     id: "b",
     start: 4, // abutting A (gap 0)
     end: 8,
+    mode: "manual",
     scale: 1.7,
     focus: { x: 0.8, y: 0.8 },
   })
 
   it("transitions directly between the two settled zooms — never dropping to 1x", () => {
     // At the shared boundary the camera is mid-weld: scale sits between the two
-    // targets (2.5 ↔ 1.7), NOT near 1, and the focus has panned halfway.
+    // targets (2.5 ↔ 1.7), NOT near 1, and the focus has panned A→B.
     const mid = sampleZoomCameraAtTime([A, B], artboard, 4)
-    expect(mid.scale).toBeGreaterThan(1.7 - 1e-6)
-    expect(mid.scale).toBeLessThan(2.5 + 1e-6)
+    expect(mid.scale).toBeGreaterThan(1.69)
+    expect(mid.scale).toBeLessThan(2.51)
     expect(mid.scale).toBeGreaterThan(1.5) // clearly NOT a return to 1x
-    expect(mid.radialBlurCenterX).toBeCloseTo(0.5, 1) // focus panned A→B
+    // Focus has panned off A (0.2) toward B (0.8) — strictly between.
+    expect(mid.radialBlurCenterX).toBeGreaterThan(0.2 + 1e-3)
+    expect(mid.radialBlurCenterX).toBeLessThan(0.8)
   })
 
   it("never dips to identity anywhere across the welded boundary", () => {
     // Sample densely through A's ease-out, the boundary, and B's ease-in.
     for (let t = 3.3; t <= 4.7; t += 0.05) {
       const cam = sampleZoomCameraAtTime([A, B], artboard, t)
-      expect(cam.scale).toBeGreaterThan(1.7 - 1e-6)
-      expect(cam.scale).toBeLessThan(2.5 + 1e-6)
+      expect(cam.scale).toBeGreaterThan(1.69)
+      expect(cam.scale).toBeLessThan(2.51)
     }
   })
 
@@ -298,114 +335,94 @@ describe("continuous zoom (welding adjacent clips)", () => {
       id: "b",
       start: 9, // 5 s gap after A — far beyond the weld threshold
       end: 13,
+      mode: "manual",
       scale: 1.7,
       focus: { x: 0.8, y: 0.8 },
     })
-    // Mid-gap returns fully wide, exactly as before.
+    // Mid-gap returns fully wide.
     expect(sampleZoomCameraAtTime([A, far], artboard, 6.5)).toEqual(
       IDENTITY_ZOOM_CAMERA
     )
   })
 })
 
-describe("cursor follow (hold + reframe-on-exit)", () => {
+describe("auto-mode cursor follow (spring)", () => {
   const clip = withZoomClipDefaults({
     id: "z",
     start: 0,
     end: 8,
     scale: 2,
+    mode: "auto",
     focus: { x: 0.5, y: 0.5 },
   })
-  // The visible normalized window for a given stored focus + scale.
-  const cursorInWindow = (focusN: number, scale: number, c: number) => {
-    const left = focusN * (1 - 1 / scale)
-    return c >= left - 1e-9 && c <= left + 1 / scale + 1e-9
-  }
 
-  it("produces no path and holds perfectly still while the cursor stays put", () => {
-    const paths = computeZoomFollowPaths([clip], () => ({ x: 0.52, y: 0.48 }))
-    // Cursor never leaves the safe box → no follow path → plain fixed-focus zoom.
-    expect(paths.size).toBe(0)
-    const a = sampleZoomCameraAtTime([clip], artboard, 2, paths)
-    const b = sampleZoomCameraAtTime([clip], artboard, 6, paths)
-    expect(b.offsetX).toBeCloseTo(a.offsetX)
-    expect(b.offsetY).toBeCloseTo(a.offsetY)
-    // …and identical to sampling with no follow at all.
-    expect(a.offsetX).toBeCloseTo(
-      sampleZoomCameraAtTime([clip], artboard, 2).offsetX
-    )
-  })
-
-  it("holds through a small in-frame wander, commits only past the hysteresis margin", () => {
-    // scale 2 → visible half-extent 0.25; the safe box is 0.84*0.25 = 0.21 from
-    // centre. A destination dwell at 0.70 is 0.20 away — inside the safe box +
-    // commit margin → the camera holds perfectly still (no path).
-    const wander = (t: number) =>
-      t < 3 ? { x: 0.5, y: 0.5 } : { x: 0.7, y: 0.5 }
-    expect(computeZoomFollowPaths([clip], wander).size).toBe(0)
-    // A dwell clearly past the safe box + commitMargin (0.21 + 0.06 = 0.27 from
-    // centre) → exactly one committed move.
-    const excursion = (t: number) =>
+  it("produces a spring follow path with focus keyframes for an auto clip", () => {
+    const paths = computeZoomFollowPaths([clip], (t) =>
       t < 3 ? { x: 0.5, y: 0.5 } : { x: 0.85, y: 0.5 }
-    const paths = computeZoomFollowPaths([clip], excursion)
+    )
     expect(paths.size).toBe(1)
-    expect(paths.get(clip.id)?.anchors.length).toBe(2)
-  })
-
-  it("anticipates: the move tracks the cursor's travel and arrives as it settles", () => {
-    // Dwell centred [<2], drift right over [2, 2.6], dwell at 0.9 [>2.6].
-    const sampleCursor = (t: number) => {
-      if (t < 2) return { x: 0.5, y: 0.5 }
-      if (t > 2.6) return { x: 0.9, y: 0.5 }
-      return { x: 0.5 + 0.4 * ((t - 2) / 0.6), y: 0.5 }
-    }
-    const path = computeZoomFollowPaths([clip], sampleCursor).get(clip.id)
+    const path = paths.get(clip.id)
     expect(path).toBeTruthy()
-    expect(path!.anchors.length).toBe(2)
-    const move = path!.anchors[1]
-    const enter = move.enterSec ?? path!.defaultTransitionSec
-    // Sets off as the cursor departs (~2.0), not after it has fully arrived…
-    expect(move.t).toBeGreaterThan(1.7)
-    expect(move.t).toBeLessThan(2.3)
-    // …and lands as the cursor settles (~2.6), so they move in lockstep.
-    expect(move.t + enter).toBeGreaterThan(2.3)
-    expect(move.t + enter).toBeLessThan(2.8)
+    expect(path!.keyframes.length).toBeGreaterThan(1)
+    expect(path!.scale).toBeCloseTo(2)
   })
 
-  it("reframes onto a new region with an eased (not jumped) move", () => {
-    // Cursor sits centred, then jumps right and stays.
+  it("produces NO path for a manual clip (fixed focus)", () => {
+    const manual = withZoomClipDefaults({
+      id: "m",
+      start: 0,
+      end: 8,
+      scale: 2,
+      mode: "manual",
+      focus: { x: 0.3, y: 0.3 },
+    })
+    expect(
+      computeZoomFollowPaths([manual], () => ({ x: 0.9, y: 0.9 })).size
+    ).toBe(0)
+    const cam = sampleZoomCameraAtTime([manual], artboard, 4)
+    expect(cam.radialBlurCenterX).toBeCloseTo(0.3)
+    expect(cam.radialBlurCenterY).toBeCloseTo(0.3)
+  })
+
+  it("follows the cursor: late in a move the cursor is in the window", () => {
     const sampleCursor = (t: number) =>
-      t < 3 ? { x: 0.5, y: 0.5 } : { x: 0.9, y: 0.5 }
+      t < 2 ? { x: 0.5, y: 0.5 } : { x: 0.9, y: 0.5 }
     const paths = computeZoomFollowPaths([clip], sampleCursor)
-    expect(paths.size).toBe(1)
-
-    // Early: held at the clip focus, the centred cursor is in view.
     const early = sampleZoomCameraAtTime([clip], artboard, 1, paths)
-    expect(early.radialBlurCenterX).toBeCloseTo(0.5)
-
-    // Late (after the reframe + transition): the cursor at 0.9 is in the window.
-    const late = sampleZoomCameraAtTime([clip], artboard, 6, paths)
+    expect(cursorInWindow(early.radialBlurCenterX, early.scale, 0.5)).toBe(true)
+    const late = sampleZoomCameraAtTime([clip], artboard, 7, paths)
     expect(late.radialBlurCenterX).toBeGreaterThan(early.radialBlurCenterX)
     expect(cursorInWindow(late.radialBlurCenterX, late.scale, 0.9)).toBe(true)
+  })
 
-    // The reframe is continuous — an eased glide, never a hard cut. The move is
-    // now velocity-matched (a fast hop gets the snappy minMoveSec ramp), so the
-    // per-frame focus step is larger than the old gentle 0.65 s reframe but still
-    // smooth: a cut would jump ~0.5 in a single frame.
-    let prev = sampleZoomCameraAtTime([clip], artboard, 2.6, paths)
-      .radialBlurCenterX
-    let maxStep = 0
-    for (let t = 2.6; t <= 4.5; t += 1 / 60) {
-      const cur = sampleZoomCameraAtTime([clip], artboard, t, paths)
-        .radialBlurCenterX
-      maxStep = Math.max(maxStep, Math.abs(cur - prev))
-      prev = cur
-    }
-    expect(maxStep).toBeLessThan(0.1)
+  it("lags the cursor (the spring trails the target, catching up over time)", () => {
+    const paths = computeZoomFollowPaths([clip], (t) =>
+      t < 3 ? { x: 0.5, y: 0.5 } : { x: 0.9, y: 0.5 }
+    )
+    const start = sampleZoomCameraAtTime(
+      [clip],
+      artboard,
+      2.9,
+      paths
+    ).radialBlurCenterX
+    const justAfter = sampleZoomCameraAtTime(
+      [clip],
+      artboard,
+      3.1,
+      paths
+    ).radialBlurCenterX
+    const settled = sampleZoomCameraAtTime(
+      [clip],
+      artboard,
+      6,
+      paths
+    ).radialBlurCenterX
+    expect(justAfter).toBeGreaterThan(start)
+    expect(justAfter).toBeLessThan(settled + 1e-9)
+    expect(settled).toBeGreaterThan(start)
   })
 
   it("keeps the cursor in the window as it steps across the artboard", () => {
-    // Dwell at each stop long enough for the reframe to settle.
     const stops = [0.5, 0.7, 0.9, 0.95]
     const sampleCursor = (t: number) => {
       const i = Math.min(stops.length - 1, Math.floor(t / 1.5))
@@ -413,19 +430,21 @@ describe("cursor follow (hold + reframe-on-exit)", () => {
     }
     const paths = computeZoomFollowPaths([clip], sampleCursor)
     for (let i = 0; i < stops.length; i++) {
-      const t = i * 1.5 + 1.3 // late in each dwell
+      const t = i * 1.5 + 1.3 // late in each dwell (spring settled)
       const cam = sampleZoomCameraAtTime([clip], artboard, t, paths)
-      expect(cursorInWindow(cam.radialBlurCenterX, cam.scale, stops[i])).toBe(true)
-      expect(cursorInWindow(cam.radialBlurCenterY, cam.scale, stops[i])).toBe(true)
+      expect(cursorInWindow(cam.radialBlurCenterX, cam.scale, stops[i])).toBe(
+        true
+      )
+      expect(cursorInWindow(cam.radialBlurCenterY, cam.scale, stops[i])).toBe(
+        true
+      )
     }
   })
 
-  it("eases out from the reframed frame, not back to the clip focus", () => {
+  it("eases out from the followed frame, not back to the clip focus", () => {
     const sampleCursor = (t: number) =>
       t < 2 ? { x: 0.5, y: 0.5 } : { x: 0.9, y: 0.5 }
     const paths = computeZoomFollowPaths([clip], sampleCursor)
-    // Mid ease-out (clip ends at 8, holds until 7.4): scale relaxing toward 1
-    // while the focus stays on the reframed right side, not the clip's 0.5.
     const easeOut = sampleZoomCameraAtTime([clip], artboard, 7.7, paths)
     expect(easeOut.scale).toBeGreaterThan(1)
     expect(easeOut.scale).toBeLessThan(2)
@@ -447,62 +466,54 @@ describe("cursor follow (hold + reframe-on-exit)", () => {
   })
 })
 
-describe("reframe motion blur (directional pan blur)", () => {
+describe("follow motion blur (directional pan blur)", () => {
   const clip = withZoomClipDefaults({
     id: "z",
     start: 0,
     end: 8,
     scale: 2,
+    mode: "auto",
     focus: { x: 0.5, y: 0.5 },
   })
 
-  it("has no pan blur while the camera holds still", () => {
-    // Cursor never leaves the safe box → no path → no pan blur.
+  it("has no pan blur while the cursor is still", () => {
     const paths = computeZoomFollowPaths([clip], () => ({ x: 0.5, y: 0.5 }))
     const held = sampleZoomCameraAtTime([clip], artboard, 4, paths)
-    expect(held.panBlurX).toBe(0)
-    expect(held.panBlurY).toBe(0)
+    expect(Math.abs(held.panBlurX)).toBeLessThan(1e-6)
+    expect(Math.abs(held.panBlurY)).toBeLessThan(1e-6)
   })
 
-  it("smears along the pan axis during a reframe, fading to zero at the ends", () => {
-    // Cursor jumps right (x only) at t=3 → a horizontal reframe over ~[3.0, 3.5].
+  it("smears along the motion axis during a follow, fading to zero once settled", () => {
     const paths = computeZoomFollowPaths([clip], (t) =>
-      t < 3 ? { x: 0.5, y: 0.5 } : { x: 0.95, y: 0.5 }
+      t < 3 ? { x: 0.2, y: 0.5 } : { x: 0.9, y: 0.5 }
     )
-
-    // Before the reframe: holding, no smear.
     expect(sampleZoomCameraAtTime([clip], artboard, 1, paths).panBlurX).toBe(0)
 
-    // Across the reframe window: a horizontal smear appears, never a vertical
-    // one (the pan is pure-x). Scanned so the assertion is robust to the exact
-    // anticipatory move timing.
     let maxPanX = 0
-    for (let t = 2.9; t <= 3.4; t += 1 / 120) {
+    for (let t = 2.95; t <= 3.6; t += 1 / 120) {
       const cam = sampleZoomCameraAtTime([clip], artboard, t, paths)
       maxPanX = Math.max(maxPanX, Math.abs(cam.panBlurX))
       expect(Math.abs(cam.panBlurY)).toBeLessThan(1e-6)
     }
     expect(maxPanX).toBeGreaterThan(0)
 
-    // After it settles: no smear.
     const settled = sampleZoomCameraAtTime([clip], artboard, 6, paths)
-    expect(settled.panBlurX).toBe(0)
-    expect(settled.panBlurY).toBe(0)
+    expect(Math.abs(settled.panBlurX)).toBeLessThan(1e-6)
+    expect(Math.abs(settled.panBlurY)).toBeLessThan(1e-6)
   })
 
-  it("never exceeds the smear cap, even for a big reframe at deep zoom", () => {
+  it("never exceeds the smear cap, even for a fast deep-zoom follow", () => {
     const deep = withZoomClipDefaults({
       id: "z",
       start: 0,
       end: 8,
       scale: 2.6,
+      mode: "auto",
       focus: { x: 0.1, y: 0.1 },
     })
     const paths = computeZoomFollowPaths([deep], (t) =>
       t < 3 ? { x: 0.1, y: 0.1 } : { x: 0.95, y: 0.95 }
     )
-    // The high ceiling: a fast reframe at deep zoom may smear strongly, but the
-    // signed smear is hard-capped at ZOOM_PAN_BLUR_CAP (0.14 of the artboard).
     for (let t = 2.9; t <= 4.2; t += 1 / 120) {
       const cam = sampleZoomCameraAtTime([deep], artboard, t, paths)
       expect(Math.abs(cam.panBlurX)).toBeLessThanOrEqual(0.14 + 1e-9)
@@ -510,61 +521,16 @@ describe("reframe motion blur (directional pan blur)", () => {
     }
   })
 
-  it("does not pan-blur zoom eases (those keep radial blur only)", () => {
+  it("does not pan-blur the zoom eases (those keep radial blur only)", () => {
     const paths = computeZoomFollowPaths([clip], (t) =>
       t < 2 ? { x: 0.5, y: 0.5 } : { x: 0.9, y: 0.5 }
     )
-    // Ease-out near the end: scale relaxing, but no directional pan blur.
     const easeOut = sampleZoomCameraAtTime([clip], artboard, 7.7, paths)
     expect(easeOut.scale).toBeLessThan(2)
     expect(easeOut.panBlurX).toBe(0)
     expect(easeOut.panBlurY).toBe(0)
-    // Ease-in at the very start: zoom ramp, no pan blur.
     const easeIn = sampleZoomCameraAtTime([clip], artboard, 0.3, paths)
     expect(easeIn.panBlurX).toBe(0)
     expect(easeIn.panBlurY).toBe(0)
-  })
-})
-
-describe("zoom-out-to-fit reveal (engaged content rect)", () => {
-  const baseClip = (
-    engagedRects: ReadonlyArray<{
-      t: number
-      rect: { x: number; y: number; width: number; height: number }
-    }>
-  ) =>
-    withZoomClipDefaults({
-      id: "z",
-      start: 0,
-      end: 8,
-      scale: 2.6,
-      focus: { x: 0.5, y: 0.5 },
-      engagedRects,
-    })
-  // Cursor parks on the click point for the whole hold.
-  const centred = () => ({ x: 0.5, y: 0.5 })
-
-  it("zooms out below the tight scale to fit a too-large menu, then returns", () => {
-    const clip = baseClip([
-      { t: 3, rect: { x: 0.4, y: 0.4, width: 0.5, height: 0.45 } },
-    ])
-    const paths = computeZoomFollowPaths([clip], centred)
-    const path = paths.get(clip.id)
-    expect(path).toBeTruthy()
-    const scales = path!.anchors.map((a) => a.scale)
-    // The reveal zooms OUT below the clip's tight 2.6×…
-    expect(Math.min(...scales)).toBeLessThan(2.6 - 0.05)
-    expect(path!.anchors.some((a) => a.reveal === "zoom-out")).toBe(true)
-    // …and a later anchor RETURNS to the tight zoom.
-    expect(scales[scales.length - 1]).toBeCloseTo(2.6, 1)
-    // The reveal actually renders: mid-clip the camera sits zoomed OUT of 2.6×.
-    const mid = sampleZoomCameraAtTime([clip], artboard, 4, paths)
-    expect(mid.scale).toBeLessThan(2.6 - 0.05)
-    expect(mid.scale).toBeGreaterThan(1)
-  })
-
-  it("the rect is what triggers the reveal — the same cursor holds still without one", () => {
-    // No engaged rect: the centred cursor stays in frame → no path, no zoom-out.
-    expect(computeZoomFollowPaths([baseClip([])], centred).size).toBe(0)
   })
 })

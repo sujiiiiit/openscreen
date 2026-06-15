@@ -151,9 +151,13 @@ export interface ProjectZoomClip {
   start: number
   end: number
   enabled?: boolean
-  // Normalized full-artboard anchor point. Preview/export scale around this
-  // fixed point instead of panning toward a separately clamped center.
+  // Normalized full-artboard anchor point. In `manual` mode the camera scales
+  // around this fixed point; in `auto` mode it is the ease-in anchor and the
+  // camera then spring-follows the recorded cursor.
   focus?: { x: number; y: number }
+  // Auto (cursor-follow) vs manual (fixed `focus`). Optional + additive: legacy
+  // clips have none and default to `auto` (their historical follow behavior).
+  mode?: "auto" | "manual"
   scale?: number
   radialBlur?: number
   // Legacy zoom-blur knobs. New saves no longer write this object; these fields
@@ -554,6 +558,10 @@ function parseZoomClip(value: unknown): ProjectZoomClip | null {
       y: clampUnit(raw["y"] as number),
     }
   })()
+  const mode =
+    value["mode"] === "auto" || value["mode"] === "manual"
+      ? (value["mode"] as "auto" | "manual")
+      : undefined
   const scale = isFiniteNumber(value["scale"])
     ? Math.min(4, Math.max(1, value["scale"] as number))
     : undefined
@@ -645,6 +653,7 @@ function parseZoomClip(value: unknown): ProjectZoomClip | null {
       ? { enabled: value["enabled"] as boolean }
       : {}),
     ...(focus ? { focus } : {}),
+    ...(mode ? { mode } : {}),
     ...(typeof scale === "number" ? { scale } : {}),
     ...(typeof radialBlur === "number" ? { radialBlur } : {}),
     ...(radialBlurSettings ? { radialBlurSettings } : {}),
