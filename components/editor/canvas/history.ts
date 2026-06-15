@@ -28,6 +28,7 @@ export type HistoryCommitTag =
   | "cursor-smoothing"
   | "cursor-click-press-scale"
   | "cursor-always-use-pointer"
+  | "cursor-type-stabilization"
   | "cursor-motion-rotation"
   | "cursor-motion-blur"
   | "cursor-motion-blur-backend"

@@ -94,6 +94,9 @@ export interface ProjectArtboard {
   // Force every captured cursor id to render as the themed pointer. Optional +
   // defaulted to false for old project.json files.
   cursorAlwaysUsePointer?: boolean
+  // Debounce brief cursor-shape flickers at track-build time. Optional +
+  // defaulted to false for old project.json files.
+  cursorTypeStabilization?: boolean
 }
 
 export type ProjectVideoRole = "screen" | "camera" | "media"
@@ -354,6 +357,7 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     return Math.min(1, Math.max(0.5, raw))
   })()
   const cursorAlwaysUsePointer = value["cursorAlwaysUsePointer"] === true
+  const cursorTypeStabilization = value["cursorTypeStabilization"] === true
 
   return {
     presetId: presetId as ProjectArtboardPresetId,
@@ -372,6 +376,7 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     cursorSmoothingMode,
     cursorClickPressScale,
     cursorAlwaysUsePointer,
+    cursorTypeStabilization,
   }
 }
 

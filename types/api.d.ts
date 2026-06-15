@@ -241,6 +241,8 @@ export interface ProjectArtboard {
   // When true, every captured cursor id resolves to the themed pointer asset.
   // Optional on disk; validator defaults to false for old projects.
   cursorAlwaysUsePointer?: boolean
+  // Optional on disk; validator defaults to false for old projects.
+  cursorTypeStabilization?: boolean
 }
 
 export type ProjectVideoRole = "screen" | "camera" | "media"

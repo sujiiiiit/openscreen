@@ -114,6 +114,7 @@ const DEFAULT_ARTBOARD: EditorArtboard = {
   cursorSmoothingMode: CURSOR_SMOOTHING_MODE_DEFAULT,
   cursorClickPressScale: CURSOR_CLICK_PRESS_SCALE_DEFAULT,
   cursorAlwaysUsePointer: false,
+  cursorTypeStabilization: false,
 }
 const DEFAULT_VIEW_TRANSFORM = getFitViewTransform(
   DEFAULT_VIEWPORT_SIZE,
@@ -244,6 +245,7 @@ type EditorCanvasContextValue = {
   setCursorSmoothingMode: (mode: CursorSmoothingMode) => void
   setCursorClickPressScale: (scale: number) => void
   setCursorAlwaysUsePointer: (enabled: boolean) => void
+  setCursorTypeStabilization: (enabled: boolean) => void
   setCursorMotionRotation: (amount: number) => void
   setCursorMotionBlur: (intensity: number) => void
   setViewportSize: (size: CanvasSize) => ViewTransform
@@ -346,6 +348,7 @@ type EditorCanvasActionsContextValue = Pick<
   | "setCursorSmoothingMode"
   | "setCursorClickPressScale"
   | "setCursorAlwaysUsePointer"
+  | "setCursorTypeStabilization"
   | "setCursorMotionRotation"
   | "setCursorMotionBlur"
   | "setViewportSize"
@@ -2540,6 +2543,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         artboardRef.current.cursorClickPressScale
       const prevCursorAlwaysUsePointer =
         artboardRef.current.cursorAlwaysUsePointer
+      const prevCursorTypeStabilization =
+        artboardRef.current.cursorTypeStabilization
       let nextArtboard: EditorArtboard
       if (id === AUTO_ARTBOARD_PRESET_ID) {
         // Screen-source dims when hydration captured them, else the on-canvas
@@ -2564,6 +2569,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           cursorSmoothingMode: prevCursorSmoothingMode,
           cursorClickPressScale: prevCursorClickPressScale,
           cursorAlwaysUsePointer: prevCursorAlwaysUsePointer,
+          cursorTypeStabilization: prevCursorTypeStabilization,
         }
       } else {
         const preset = getArtboardPreset(id)
@@ -2583,6 +2589,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           cursorSmoothingMode: prevCursorSmoothingMode,
           cursorClickPressScale: prevCursorClickPressScale,
           cursorAlwaysUsePointer: prevCursorAlwaysUsePointer,
+          cursorTypeStabilization: prevCursorTypeStabilization,
         }
       }
 
@@ -3112,6 +3119,19 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     setArtboard(nextArtboard)
   }, [])
 
+  const setCursorTypeStabilization = useCallback((enabled: boolean) => {
+    const current = artboardRef.current
+    const nextEnabled = Boolean(enabled)
+    if (current.cursorTypeStabilization === nextEnabled) return
+    historyCommitTagRef.current = "cursor-type-stabilization"
+    const nextArtboard: EditorArtboard = {
+      ...current,
+      cursorTypeStabilization: nextEnabled,
+    }
+    artboardRef.current = nextArtboard
+    setArtboard(nextArtboard)
+  }, [])
+
   // Cursor motion-rotation amount (0..1). Shared placement math derives the
   // tilt from the trailing horizontal velocity, so preview/export stay in sync
   // without adding per-frame React state.
@@ -3413,6 +3433,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         ),
         cursorAlwaysUsePointer:
           savedState.artboard.cursorAlwaysUsePointer === true,
+        cursorTypeStabilization:
+          savedState.artboard.cursorTypeStabilization === true,
       }
       const toCanvasVideo = (video: ProjectStateV1["videos"][number]) =>
         projectVideoToCanvasVideo(
@@ -3654,6 +3676,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setCursorSmoothingMode,
       setCursorClickPressScale,
       setCursorAlwaysUsePointer,
+      setCursorTypeStabilization,
       setCursorMotionRotation,
       setCursorMotionBlur,
       setViewportSize,
@@ -3680,6 +3703,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setCursorSmoothingMode,
       setCursorClickPressScale,
       setCursorAlwaysUsePointer,
+      setCursorTypeStabilization,
       setCursorMotionRotation,
       setCursorMotionBlur,
       setViewportSize,
@@ -3879,6 +3903,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         ),
         cursorAlwaysUsePointer:
           savedState.artboard.cursorAlwaysUsePointer === true,
+        cursorTypeStabilization:
+          savedState.artboard.cursorTypeStabilization === true,
       }
       artboardRef.current = savedArtboard
       // Hydration is a one-shot synchronization from disk into React state —
@@ -4044,6 +4070,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         artboardRef.current.cursorClickPressScale
       const previousCursorAlwaysUsePointer =
         artboardRef.current.cursorAlwaysUsePointer
+      const previousCursorTypeStabilization =
+        artboardRef.current.cursorTypeStabilization
       const nextArtboard: EditorArtboard = useAuto
         ? (() => {
             const auto = resolveAutoArtboard(sourceVideoDimsRef.current)
@@ -4064,6 +4092,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               cursorSmoothingMode: previousCursorSmoothingMode,
               cursorClickPressScale: previousCursorClickPressScale,
               cursorAlwaysUsePointer: previousCursorAlwaysUsePointer,
+              cursorTypeStabilization: previousCursorTypeStabilization,
             }
           })()
         : (() => {
@@ -4085,6 +4114,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               cursorSmoothingMode: previousCursorSmoothingMode,
               cursorClickPressScale: previousCursorClickPressScale,
               cursorAlwaysUsePointer: previousCursorAlwaysUsePointer,
+              cursorTypeStabilization: previousCursorTypeStabilization,
             }
           })()
       artboardRef.current = nextArtboard

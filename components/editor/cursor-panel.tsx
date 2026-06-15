@@ -304,11 +304,13 @@ export function CursorPanel() {
     setCursorSmoothingMode,
     setCursorClickPressScale,
     setCursorAlwaysUsePointer,
+    setCursorTypeStabilization,
     setCursorMotionRotation,
     setCursorMotionBlur,
   } = useEditorCanvasActions()
   const customRenderingSwitchId = useId()
   const alwaysUsePointerSwitchId = useId()
+  const typeStabilizationSwitchId = useId()
 
   // The recorded cursor is drawn over the screen recording, so the control is
   // meaningless without one — disable it rather than move a slider that does
@@ -356,6 +358,7 @@ export function CursorPanel() {
   const customRenderingEnabled = artboard.cursorCustomRenderingEnabled
   const cursorControlsDisabled = !hasScreenVideo || !customRenderingEnabled
   const alwaysUsePointer = artboard.cursorAlwaysUsePointer
+  const typeStabilization = artboard.cursorTypeStabilization
   const cursorSetId = artboard.cursorSetId
 
   return (
@@ -413,6 +416,25 @@ export function CursorPanel() {
             checked={alwaysUsePointer}
             onCheckedChange={setCursorAlwaysUsePointer}
             disabled={cursorControlsDisabled}
+          />
+        </div>
+
+        <div className="flex w-full items-center justify-between gap-3">
+          <label
+            htmlFor={typeStabilizationSwitchId}
+            className={cn(
+              "text-xs font-semibold transition-opacity select-none",
+              (cursorControlsDisabled || alwaysUsePointer) && "opacity-50"
+            )}
+          >
+            Stabilize cursor type
+          </label>
+          <Switch
+            id={typeStabilizationSwitchId}
+            size="sm"
+            checked={typeStabilization}
+            onCheckedChange={setCursorTypeStabilization}
+            disabled={cursorControlsDisabled || alwaysUsePointer}
           />
         </div>
 

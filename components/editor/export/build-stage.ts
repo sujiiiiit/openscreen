@@ -221,7 +221,12 @@ export async function buildExportStage(
     // The export filter input is the output canvas, so center/velocity map to
     // output px. Radial blur on the whole composite, directional reframe pan
     // blur on the zoomed content only (cursor excluded).
-    const on = applyZoomBlur(zoomBlur, camera, outputSize.width, outputSize.height)
+    const on = applyZoomBlur(
+      zoomBlur,
+      camera,
+      outputSize.width,
+      outputSize.height
+    )
     if (on !== zoomBlurOn) {
       composite.filters = on ? [zoomBlur] : []
       zoomBlurOn = on
@@ -281,13 +286,18 @@ async function buildExportCursor(
   const smoothingMode = clampCursorSmoothingMode(
     state.artboard.cursorSmoothingMode ?? CURSOR_SMOOTHING_MODE_DEFAULT
   )
-  const track = buildCursorTrack(data ?? null, { smoothingMode })
+  const track = buildCursorTrack(data ?? null, {
+    smoothingMode,
+    stabilizeCursorType: state.artboard.cursorTypeStabilization === true,
+  })
   if (!track) return null
 
   const alwaysUsePointer = state.artboard.cursorAlwaysUsePointer === true
   const cursorSetId = clampCursorSetId(state.artboard.cursorSetId)
   const urls = new Set<string>()
-  const cursorIds = alwaysUsePointer ? [CURSOR_POINTER_CURSOR_ID] : track.cursorIds
+  const cursorIds = alwaysUsePointer
+    ? [CURSOR_POINTER_CURSOR_ID]
+    : track.cursorIds
   for (const cursorId of cursorIds) {
     const asset = resolveCursorAsset(cursorId, cursorSetId, CURSOR_SET_DEFAULT)
     if (asset) urls.add(asset.url)
@@ -327,7 +337,14 @@ async function buildExportCursor(
     state.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT
   )
 
-  return { cursorSprite, track, video, screenVideoId: screenVideo.id, options, motionBlur }
+  return {
+    cursorSprite,
+    track,
+    video,
+    screenVideoId: screenVideo.id,
+    options,
+    motionBlur,
+  }
 }
 
 function appearanceOf(video: ProjectVideo): NodeAppearance {

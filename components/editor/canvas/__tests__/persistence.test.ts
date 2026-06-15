@@ -27,6 +27,7 @@ const ARTBOARD: EditorArtboard = {
   cursorSmoothingMode: "default",
   cursorClickPressScale: 0.88,
   cursorAlwaysUsePointer: false,
+  cursorTypeStabilization: false,
 }
 
 function canvasVideo(
@@ -492,6 +493,51 @@ describe("cursor pointer override persistence", () => {
   })
 })
 
+describe("cursor type stabilization persistence", () => {
+  it("preserves the stabilize-cursor-type setting through a round-trip", () => {
+    const parsed = roundTrip(
+      serializeProjectState(
+        { ...ARTBOARD, cursorTypeStabilization: true },
+        [canvasVideo({ id: "a" })],
+        []
+      )
+    )
+
+    expect(parsed).not.toBeNull()
+    expect(parsed!.artboard.cursorTypeStabilization).toBe(true)
+  })
+
+  it("defaults missing/non-true values to false for legacy/hand-edited projects", () => {
+    const base = {
+      presetId: "wide",
+      width: 1920,
+      height: 1080,
+      background: null,
+      padding: 0,
+      grain: 0,
+    }
+    const legacy = parseProjectState({
+      version: 1,
+      artboard: base,
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+    const invalid = parseProjectState({
+      version: 1,
+      artboard: { ...base, cursorTypeStabilization: "yes" },
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+
+    expect(legacy).not.toBeNull()
+    expect(legacy!.artboard.cursorTypeStabilization).toBe(false)
+    expect(invalid).not.toBeNull()
+    expect(invalid!.artboard.cursorTypeStabilization).toBe(false)
+  })
+})
+
 describe("parseProjectState onCanvas tolerance", () => {
   it("treats a legacy record with no onCanvas field as on-canvas (undefined)", () => {
     const legacy = roundTrip(
@@ -681,9 +727,9 @@ describe("fingerprintProjectState zoomClips normalization", () => {
   const base = serializeProjectState(ARTBOARD, [canvasVideo({ id: "a" })], [])
 
   it("hashes absent and empty zoomClips identically", () => {
-    expect(
-      fingerprintProjectState({ ...base, zoomClips: undefined })
-    ).toBe(fingerprintProjectState({ ...base, zoomClips: [] }))
+    expect(fingerprintProjectState({ ...base, zoomClips: undefined })).toBe(
+      fingerprintProjectState({ ...base, zoomClips: [] })
+    )
   })
 
   it("changes when a zoom clip exists", () => {
@@ -753,7 +799,13 @@ describe("engaged content rects persistence", () => {
       ],
     })
     const parsed = roundTrip(
-      serializeProjectState(ARTBOARD, [canvasVideo({ id: "a" })], [], [], [clip])
+      serializeProjectState(
+        ARTBOARD,
+        [canvasVideo({ id: "a" })],
+        [],
+        [],
+        [clip]
+      )
     )
     expect(parsed).not.toBeNull()
     const restored = projectZoomClipToCanvasClip(parsed!.zoomClips![0])

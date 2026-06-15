@@ -76,6 +76,7 @@ export function serializeArtboard(artboard: EditorArtboard): ProjectArtboard {
     cursorSmoothingMode: artboard.cursorSmoothingMode,
     cursorClickPressScale: artboard.cursorClickPressScale,
     cursorAlwaysUsePointer: artboard.cursorAlwaysUsePointer,
+    cursorTypeStabilization: artboard.cursorTypeStabilization,
   }
 }
 

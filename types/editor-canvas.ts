@@ -55,6 +55,10 @@ export type EditorArtboard = CanvasSize & {
   // When true, every captured cursor id resolves to the themed pointer asset.
   // Useful when text/resize cursors are distracting. Shared by preview/export.
   cursorAlwaysUsePointer: boolean
+  // When true, brief cursor-SHAPE flickers (a type that changes and reverts
+  // faster than ~150 ms) are debounced out at track-build time, so the rendered
+  // cursor type stays steady. Shared by preview/export.
+  cursorTypeStabilization: boolean
 }
 
 export const ARTBOARD_SELECTION_ID = "__artboard__"

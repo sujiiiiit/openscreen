@@ -803,6 +803,7 @@ export function PixiCanvas() {
       if (cancelled) return
       const track = buildCursorTrack(data ?? null, {
         smoothingMode: artboard.cursorSmoothingMode,
+        stabilizeCursorType: artboard.cursorTypeStabilization,
       })
       cursorTrackRef.current = track
       cursorControllerRef.current?.setTrack(track)
@@ -829,6 +830,7 @@ export function PixiCanvas() {
     screenVideo,
     artboard.cursorCustomRenderingEnabled,
     artboard.cursorSmoothingMode,
+    artboard.cursorTypeStabilization,
     project?.path,
     reportCursorTrackUnavailable,
     recomputeFollowPaths,

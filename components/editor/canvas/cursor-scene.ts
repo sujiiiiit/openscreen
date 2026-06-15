@@ -7,10 +7,12 @@ import type {
 import type { MotionBlurOptions } from "@/lib/motion-blur/types"
 import { isCursorSetId, resolveCursorAsset } from "@/lib/cursors/cursor-set"
 import {
+  CURSOR_TYPE_STABILIZE_MS,
   buildSmoothedTrack,
   clickEventsFromClicks,
   rawSamplesFromMoves,
   sampleCursorAtTime,
+  stabilizeCursorIds,
   type CursorSmoothingParams,
   type SmoothedCursorTrack,
 } from "@/lib/cursors/cursor-track"
@@ -222,7 +224,8 @@ function cursorClickScaleAt(
   // Press/release timing + overshoot follow the same smoothing preset as the
   // path glide; `clampCursorSmoothingMode` defaults to "default" for omitted or
   // bad input, so callers that don't pass a mode keep the previous feel.
-  const timing = CURSOR_CLICK_PRESS_PARAMS[clampCursorSmoothingMode(smoothingMode)]
+  const timing =
+    CURSOR_CLICK_PRESS_PARAMS[clampCursorSmoothingMode(smoothingMode)]
   let lo = 0
   let hi = clicks.length - 1
   if (tMs < clicks[0].t) return 1
@@ -246,21 +249,27 @@ function cursorClickScaleAt(
   const p = Math.min(1, Math.max(0, dt / timing.releaseMs))
   const base = targetScale + depth * easeOutCubic(p)
   const rebound =
-    Math.min(timing.overshoot, depth * 0.75) *
-    Math.sin(Math.PI * p) *
-    (1 - p)
+    Math.min(timing.overshoot, depth * 0.75) * Math.sin(Math.PI * p) * (1 - p)
   return base + rebound
 }
 
 /** Build the time-indexed cursor track from raw IPC data, applying the shared
- * smoothing choice. Returns null when there's no usable cursor data. */
+ * smoothing choice. When `stabilizeCursorType` is set, brief cursor-SHAPE
+ * flickers are debounced out (held to the surrounding shape). Returns null when
+ * there's no usable cursor data. */
 export function buildCursorTrack(
   data: CursorTrackData | null,
-  options: { smoothingMode?: CursorSmoothingMode } = {}
+  options: {
+    smoothingMode?: CursorSmoothingMode
+    stabilizeCursorType?: boolean
+  } = {}
 ): SmoothedCursorTrack | null {
   if (!data || data.moves.length === 0) return null
-  const samples = rawSamplesFromMoves(data.moves, data.processTimeStartMs)
+  let samples = rawSamplesFromMoves(data.moves, data.processTimeStartMs)
   if (samples.length === 0) return null
+  if (options.stabilizeCursorType) {
+    samples = stabilizeCursorIds(samples, CURSOR_TYPE_STABILIZE_MS)
+  }
   const clicks = clickEventsFromClicks(
     data.clicks ?? [],
     data.processTimeStartMs
