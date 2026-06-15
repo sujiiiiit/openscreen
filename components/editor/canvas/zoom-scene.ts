@@ -350,9 +350,24 @@ function computeFollowPath(
   // Follow the cursor across the WHOLE clip span (ease-in, hold, ease-out) — like
   // Cap, the focus tracks the cursor throughout the segment, not only the hold.
   // This also means every auto clip gets a path (so a short clip still follows).
-  // Seed the spring at the cursor's focus at the clip start (fall back to the
-  // clip's own focus) so the zoom-in lands where the follow starts.
-  const seed = sampleCursor(clip.start) ?? { x: clip.fx, y: clip.fy }
+  //
+  // Seed the spring ON THE CURSOR — at the clip start, or (if the cursor is
+  // off-screen exactly there) the first on-screen sample in the clip. The
+  // fallback is screen CENTRE (Cap's fallback), NEVER the clip's stored `focus`:
+  // in auto mode that focus is meaningless and may be a leftover from manual
+  // editing, so seeding from it would make the follow start at / drift from a
+  // stale point instead of the cursor.
+  let seedPos = sampleCursor(clip.start)
+  if (!seedPos) {
+    for (let t = clip.start + stepSec; t <= clip.end + 1e-9; t += stepSec) {
+      const c = sampleCursor(t)
+      if (c) {
+        seedPos = c
+        break
+      }
+    }
+  }
+  const seed = seedPos ?? { x: 0.5, y: 0.5 }
   let target = { x: clampUnit(seed.x), y: clampUnit(seed.y) }
 
   const sim = new SpringMassDamperSimulation(ZOOM_FOCUS_SPRING_CONFIG)

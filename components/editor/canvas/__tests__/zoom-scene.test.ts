@@ -367,6 +367,27 @@ describe("auto-mode cursor follow (spring)", () => {
     expect(path!.scale).toBeCloseTo(2)
   })
 
+  it("seeds the follow from the cursor, NOT a stale stored focus", () => {
+    // A clip toggled manual→auto can carry a leftover dragged focus (here a
+    // corner). The auto follow must seed on the cursor (or, if it's off-screen
+    // exactly at the start, the first on-screen sample), never the stored focus.
+    const stale = withZoomClipDefaults({
+      id: "z",
+      start: 0,
+      end: 8,
+      scale: 2,
+      mode: "auto",
+      focus: { x: 0.95, y: 0.95 }, // stale manual point near the corner
+    })
+    const sampleCursor = (t: number) => (t < 0.2 ? null : { x: 0.3, y: 0.3 })
+    const path = computeZoomFollowPaths([stale], sampleCursor).get(stale.id)
+    expect(path).toBeTruthy()
+    // First keyframe sits on the cursor (~0.3 → edge-snapped low), not the
+    // stored corner (~0.95 → snapped to 1).
+    expect(path!.keyframes[0].fx).toBeLessThan(0.6)
+    expect(path!.keyframes[0].fy).toBeLessThan(0.6)
+  })
+
   it("produces NO path for a manual clip (fixed focus)", () => {
     const manual = withZoomClipDefaults({
       id: "m",
