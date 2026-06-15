@@ -698,7 +698,13 @@ export function PixiCanvas() {
         followPathsRef.current
       )
     )
-  }, [zoomClips, artboard.width, artboard.height, cursorState, recomputeFollowPaths])
+  }, [
+    zoomClips,
+    artboard.width,
+    artboard.height,
+    cursorState,
+    recomputeFollowPaths,
+  ])
 
   // Composition zoom-clip camera: sample at the live playback tick / paused hover
   // / committed time and apply to the scene's content + background cameras.
@@ -749,7 +755,22 @@ export function PixiCanvas() {
     cursorStateRef.current = cursorState
     cursorControllerRef.current?.setState(cursorState)
     cursorControllerRef.current?.place(committedTimeRef.current)
-  }, [cursorState])
+    // The auto-follow sampler reads the controller's state (custom-rendering /
+    // screenVideo / source mapping), so the follow paths MUST be rebuilt AFTER
+    // that state is applied — otherwise the recompute effect above (which runs
+    // earlier in the commit) sampled a stale/empty state and baked a static
+    // path, so a post-refresh auto clip would hold its seed instead of
+    // following. Re-apply the camera so the change is visible immediately.
+    recomputeFollowPaths()
+    sceneRef.current?.applyZoomCamera(
+      sampleZoomCameraAtTime(
+        zoomClipsRef.current,
+        artboardSizeRef.current,
+        committedTimeRef.current,
+        followPathsRef.current
+      )
+    )
+  }, [cursorState, recomputeFollowPaths])
 
   // Load the recorded cursor track when the screen recording / smoothing changes.
   useEffect(() => {
