@@ -117,7 +117,9 @@ export class CursorController {
     artboard: { width: number; height: number }
   ): { x: number; y: number } | null {
     const { state, track } = this
-    if (!state || !state.customRenderingEnabled || !state.screenVideo || !track) {
+    // Auto-zoom follows the recorded cursor metadata even when the custom
+    // cursor overlay is hidden; the render switch only controls the sprite.
+    if (!state || !state.screenVideo || !track) {
       return null
     }
     const sourceSeconds = this.getSourceSeconds(timelineSeconds, state)

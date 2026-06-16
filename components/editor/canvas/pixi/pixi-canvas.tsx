@@ -287,6 +287,39 @@ export function PixiCanvas() {
     registerTimelineVideoFps,
   ])
 
+  // Rebuild the precomputed cursor-follow paths from the current clips + cursor
+  // track. Pure + deterministic (samples the fixed recorded cursor at a fixed
+  // rate), so the same paths drive preview, hover, and export identically. Cheap
+  // (a handful of clips, ~30 Hz over each hold), and kept OFF the per-frame path.
+  const recomputeFollowPaths = useCallback(() => {
+    const controller = cursorControllerRef.current
+    const artboardSize = artboardSizeRef.current
+    if (!controller) {
+      followPathsRef.current = null
+      return
+    }
+    followPathsRef.current = computeZoomFollowPaths(
+      zoomClipsRef.current,
+      (time) => controller.getArtboardFocusAt(time, artboardSize)
+    )
+  }, [])
+
+  const applyZoomCameraAtCurrentTime = useCallback(() => {
+    sceneRef.current?.applyZoomCamera(
+      sampleZoomCameraAtTime(
+        zoomClipsRef.current,
+        artboardSizeRef.current,
+        committedTimeRef.current,
+        followPathsRef.current
+      )
+    )
+  }, [])
+
+  const refreshFollowPathsAndCamera = useCallback(() => {
+    recomputeFollowPaths()
+    applyZoomCameraAtCurrentTime()
+  }, [applyZoomCameraAtCurrentTime, recomputeFollowPaths])
+
   // ── PixiJS lifecycle ──────────────────────────────────────────────────────
   useEffect(() => {
     const host = hostRef.current
@@ -530,6 +563,10 @@ export function PixiCanvas() {
       cursorController.setTrack(cursorTrackRef.current)
       cursorController.place(committedTimeRef.current)
       cursorControllerRef.current = cursorController
+      // `getCursorData()` can resolve before async Pixi init creates this
+      // controller. Rebuild now so project-open auto clips do not stay on a
+      // pathless fixed focus until a later Zoom edit forces another recompute.
+      refreshFollowPathsAndCamera()
 
       themeObserver = new MutationObserver(() => {
         sceneRef.current?.setColors(resolveCanvasPalette(getIsDark()))
@@ -667,43 +704,17 @@ export function PixiCanvas() {
     videoControllerRef.current?.setPrimaryAudio(primaryAudioVideoId)
   }, [primaryAudioVideoId])
 
-  // Rebuild the precomputed cursor-follow paths from the current clips + cursor
-  // track. Pure + deterministic (samples the fixed recorded cursor at a fixed
-  // rate), so the same paths drive preview, hover, and export identically. Cheap
-  // (a handful of clips, ~30 Hz over each hold), and kept OFF the per-frame path.
-  const recomputeFollowPaths = useCallback(() => {
-    const controller = cursorControllerRef.current
-    const artboardSize = artboardSizeRef.current
-    if (!controller) {
-      followPathsRef.current = null
-      return
-    }
-    followPathsRef.current = computeZoomFollowPaths(
-      zoomClipsRef.current,
-      (time) => controller.getArtboardFocusAt(time, artboardSize)
-    )
-  }, [])
-
   // Recompute follow paths whenever the clips, artboard geometry, or cursor
   // inputs change, then re-apply the camera at the current time so the change is
   // visible immediately while paused.
   useEffect(() => {
-    recomputeFollowPaths()
-    const time = committedTimeRef.current
-    sceneRef.current?.applyZoomCamera(
-      sampleZoomCameraAtTime(
-        zoomClipsRef.current,
-        artboardSizeRef.current,
-        time,
-        followPathsRef.current
-      )
-    )
+    refreshFollowPathsAndCamera()
   }, [
     zoomClips,
     artboard.width,
     artboard.height,
     cursorState,
-    recomputeFollowPaths,
+    refreshFollowPathsAndCamera,
   ])
 
   // Composition zoom-clip camera: sample at the live playback tick / paused hover
@@ -761,29 +772,17 @@ export function PixiCanvas() {
     // earlier in the commit) sampled a stale/empty state and baked a static
     // path, so a post-refresh auto clip would hold its seed instead of
     // following. Re-apply the camera so the change is visible immediately.
-    recomputeFollowPaths()
-    sceneRef.current?.applyZoomCamera(
-      sampleZoomCameraAtTime(
-        zoomClipsRef.current,
-        artboardSizeRef.current,
-        committedTimeRef.current,
-        followPathsRef.current
-      )
-    )
-  }, [cursorState, recomputeFollowPaths])
+    refreshFollowPathsAndCamera()
+  }, [cursorState, refreshFollowPathsAndCamera])
 
   // Load the recorded cursor track when the screen recording / smoothing changes.
   useEffect(() => {
     const controller = cursorControllerRef.current
-    if (
-      !screenVideo ||
-      screenVideo.source.kind !== "recording" ||
-      !artboard.cursorCustomRenderingEnabled
-    ) {
+    if (!screenVideo || screenVideo.source.kind !== "recording") {
       cursorTrackRef.current = null
       controller?.setTrack(null)
-      // No screen recording / custom rendering off — the notice is
-      // inapplicable, not "unavailable".
+      refreshFollowPathsAndCamera()
+      // No screen recording — the notice is inapplicable, not "unavailable".
       reportCursorTrackUnavailable(false)
       return
     }
@@ -795,45 +794,48 @@ export function PixiCanvas() {
     if (!folder) {
       cursorTrackRef.current = null
       controller?.setTrack(null)
+      refreshFollowPathsAndCamera()
       reportCursorTrackUnavailable(true)
       return
     }
     let cancelled = false
-    void window.api?.projects.getCursorData(folder).then((data) => {
-      if (cancelled) return
-      const track = buildCursorTrack(data ?? null, {
-        smoothingMode: artboard.cursorSmoothingMode,
-        stabilizeCursorType: artboard.cursorTypeStabilization,
-      })
-      cursorTrackRef.current = track
-      cursorControllerRef.current?.setTrack(track)
-      cursorControllerRef.current?.place(committedTimeRef.current)
-      // The follow paths depend on the recorded cursor — rebuild them now that
-      // the track has loaded and re-apply the camera at the committed time.
-      recomputeFollowPaths()
-      sceneRef.current?.applyZoomCamera(
-        sampleZoomCameraAtTime(
-          zoomClipsRef.current,
-          artboardSizeRef.current,
-          committedTimeRef.current,
-          followPathsRef.current
-        )
-      )
-      // Track === null means the sidecar data was missing/corrupt/unusable
-      // (main has already logged the precise reason).
-      reportCursorTrackUnavailable(track === null)
-    })
+    void (async () => {
+      try {
+        const data = await window.api?.projects.getCursorData(folder)
+        if (cancelled) return
+        const track = buildCursorTrack(data ?? null, {
+          smoothingMode: artboard.cursorSmoothingMode,
+          stabilizeCursorType: artboard.cursorTypeStabilization,
+        })
+        cursorTrackRef.current = track
+        cursorControllerRef.current?.setTrack(track)
+        cursorControllerRef.current?.place(committedTimeRef.current)
+        // The follow paths depend on the recorded cursor — rebuild them now
+        // that the track has loaded and re-apply the camera at the committed
+        // time.
+        refreshFollowPathsAndCamera()
+        // Track === null means the sidecar data was missing/corrupt/unusable
+        // (main has already logged the precise reason).
+        reportCursorTrackUnavailable(track === null)
+      } catch (error) {
+        if (cancelled) return
+        console.warn("[PixiCanvas] cursor data load failed:", error)
+        cursorTrackRef.current = null
+        cursorControllerRef.current?.setTrack(null)
+        refreshFollowPathsAndCamera()
+        reportCursorTrackUnavailable(true)
+      }
+    })()
     return () => {
       cancelled = true
     }
   }, [
     screenVideo,
-    artboard.cursorCustomRenderingEnabled,
     artboard.cursorSmoothingMode,
     artboard.cursorTypeStabilization,
     project?.path,
     reportCursorTrackUnavailable,
-    recomputeFollowPaths,
+    refreshFollowPathsAndCamera,
   ])
 
   return (

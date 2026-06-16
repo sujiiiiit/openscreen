@@ -491,7 +491,7 @@ export async function runExport(options: RunExportOptions): Promise<void> {
           // Place the recorded cursor using the screen clip's source time straight
           // from the plan (honors trims/splits). Same CursorSprite the preview uses.
           const cursor = handles.cursor
-          if (cursor) {
+          if (cursor?.cursorSprite && cursor.options) {
             const screenEntry = active.find(
               (entry) => entry.videoId === cursor.screenVideoId
             )

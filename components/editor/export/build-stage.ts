@@ -75,14 +75,18 @@ export interface ExportVideoNode {
   hide(): void
 }
 
-/** The recorded-cursor overlay for the export, placed per frame from the plan. */
+/**
+ * Recorded-cursor data for the export. The track always feeds auto-mode zoom
+ * follow; `cursorSprite` is only present when custom cursor rendering is enabled
+ * and assets are available.
+ */
 export interface ExportCursorHandle {
-  cursorSprite: CursorSprite
+  cursorSprite: CursorSprite | null
   track: SmoothedCursorTrack
   video: CursorVideoGeometry
   /** Which video the cursor follows — used to find the active screen clip. */
   screenVideoId: string
-  options: CursorPlaceOptions
+  options: CursorPlaceOptions | null
   motionBlur: number
 }
 
@@ -91,7 +95,7 @@ export interface ExportStageHandles {
   app: Application
   outputSize: { width: number; height: number }
   nodesByVideoId: Map<string, ExportVideoNode>
-  /** Recorded-cursor overlay, or null when the composition has no cursor data. */
+  /** Recorded-cursor data, or null when the composition has no cursor data. */
   cursor: ExportCursorHandle | null
   /** Apply the composition zoom-clip camera (scale + offset) for a frame. */
   applyZoomCamera: (camera: ZoomCamera) => void
@@ -245,7 +249,7 @@ export async function buildExportStage(
 
   const dispose = () => {
     nodesByVideoId.clear()
-    cursor?.cursorSprite.destroy()
+    cursor?.cursorSprite?.destroy()
     zoomBlur.destroy()
     zoomPanBlur.destroy()
     try {
@@ -270,7 +274,6 @@ async function buildExportCursor(
   parent: Container,
   projectPath?: string
 ): Promise<ExportCursorHandle | null> {
-  if (state.artboard.cursorCustomRenderingEnabled === false) return null
   const screenVideo = state.videos.find(
     (video) => video.role === "screen" && (video.onCanvas ?? true)
   )
@@ -282,7 +285,14 @@ async function buildExportCursor(
   const folder = projectPath ?? projectFolderFromObjectUrl(url)
   if (!folder) return null
 
-  const data = await window.api?.projects.getCursorData(folder)
+  const data = await (async () => {
+    try {
+      return await window.api?.projects.getCursorData(folder)
+    } catch (error) {
+      console.warn("[export] cursor data load failed:", error)
+      return null
+    }
+  })()
   const smoothingMode = clampCursorSmoothingMode(
     state.artboard.cursorSmoothingMode ?? CURSOR_SMOOTHING_MODE_DEFAULT
   )
@@ -292,20 +302,6 @@ async function buildExportCursor(
   })
   if (!track) return null
 
-  const alwaysUsePointer = state.artboard.cursorAlwaysUsePointer === true
-  const cursorSetId = clampCursorSetId(state.artboard.cursorSetId)
-  const urls = new Set<string>()
-  const cursorIds = alwaysUsePointer
-    ? [CURSOR_POINTER_CURSOR_ID]
-    : track.cursorIds
-  for (const cursorId of cursorIds) {
-    const asset = resolveCursorAsset(cursorId, cursorSetId, CURSOR_SET_DEFAULT)
-    if (asset) urls.add(asset.url)
-  }
-  if (urls.size === 0) return null
-  await preloadCursorImages(urls)
-
-  const cursorSprite = new CursorSprite(parent)
   const video: CursorVideoGeometry = {
     x: screenVideo.x,
     y: screenVideo.y,
@@ -315,27 +311,53 @@ async function buildExportCursor(
     intrinsicWidth: screenVideo.intrinsicWidth,
     intrinsicHeight: screenVideo.intrinsicHeight,
   }
-  const options: CursorPlaceOptions = {
-    sizeMultiplier: clampCursorSize(
-      state.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT
-    ),
-    clickPressScale: clampCursorClickPressScale(
-      state.artboard.cursorClickPressScale ?? CURSOR_CLICK_PRESS_SCALE_DEFAULT
-    ),
-    cursorSet: cursorSetId,
-    alwaysUsePointer,
-    motionRotation: clampCursorMotionRotation(
-      state.artboard.cursorMotionRotation ?? CURSOR_MOTION_ROTATION_DEFAULT
-    ),
-    smoothingMode,
-    referenceSize: {
-      width: state.artboard.width,
-      height: state.artboard.height,
-    },
+  let cursorSprite: CursorSprite | null = null
+  let options: CursorPlaceOptions | null = null
+  let motionBlur = 0
+
+  if (state.artboard.cursorCustomRenderingEnabled !== false) {
+    const alwaysUsePointer = state.artboard.cursorAlwaysUsePointer === true
+    const cursorSetId = clampCursorSetId(state.artboard.cursorSetId)
+    const urls = new Set<string>()
+    const cursorIds = alwaysUsePointer
+      ? [CURSOR_POINTER_CURSOR_ID]
+      : track.cursorIds
+    for (const cursorId of cursorIds) {
+      const asset = resolveCursorAsset(
+        cursorId,
+        cursorSetId,
+        CURSOR_SET_DEFAULT
+      )
+      if (asset) urls.add(asset.url)
+    }
+
+    if (urls.size > 0) {
+      await preloadCursorImages(urls)
+      cursorSprite = new CursorSprite(parent)
+      options = {
+        sizeMultiplier: clampCursorSize(
+          state.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT
+        ),
+        clickPressScale: clampCursorClickPressScale(
+          state.artboard.cursorClickPressScale ??
+            CURSOR_CLICK_PRESS_SCALE_DEFAULT
+        ),
+        cursorSet: cursorSetId,
+        alwaysUsePointer,
+        motionRotation: clampCursorMotionRotation(
+          state.artboard.cursorMotionRotation ?? CURSOR_MOTION_ROTATION_DEFAULT
+        ),
+        smoothingMode,
+        referenceSize: {
+          width: state.artboard.width,
+          height: state.artboard.height,
+        },
+      }
+      motionBlur = clampCursorMotionBlur(
+        state.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT
+      )
+    }
   }
-  const motionBlur = clampCursorMotionBlur(
-    state.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT
-  )
 
   return {
     cursorSprite,

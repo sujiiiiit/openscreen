@@ -83,6 +83,11 @@ The smoothed focus is baked into `8 ms` keyframes; the per-frame sampler lerps
 between them, so it is pure and deterministic (preview == export). A `manual`
 clip gets no path and renders as a plain fixed-focus zoom.
 
+The follow consumes the recorded cursor metadata independently of the custom
+cursor overlay. Turning off custom cursor rendering hides the sprite in preview
+and export, but `auto` Zoom clips still follow the captured hotspot as long as
+the cursor sidecar is available and the hotspot maps onto the screen video.
+
 The zoom **amount** ramps on the spring too (`springEase` / `springEaseOut`), fit
 into the clip's `transition.durationMs` window (default `1000 ms` = Cap's
 `ZOOM_DURATION`) — see `docs/editor-canvas.md`.
