@@ -462,6 +462,50 @@ describe("auto-mode cursor follow (spring)", () => {
     }
   })
 
+  it("anticipates a near-future turn so L-shaped cursor moves become diagonal camera intent", () => {
+    const sampleCursor = (t: number) => {
+      if (t < 1) return { x: 0.25, y: 0.35 }
+      if (t < 2) return { x: 0.25 + (t - 1) * 0.5, y: 0.35 }
+      if (t < 3) return { x: 0.75, y: 0.35 + (t - 2) * 0.4 }
+      return { x: 0.75, y: 0.75 }
+    }
+    const predictive = computeZoomFollowPaths([clip], sampleCursor)
+    const liveOnly = computeZoomFollowPaths([clip], sampleCursor, {
+      intentLookaheadMs: 0,
+      intentBlend: 0,
+    })
+
+    const beforeVisibleTurn = 1.92
+    const predictiveCamera = sampleZoomCameraAtTime(
+      [clip],
+      artboard,
+      beforeVisibleTurn,
+      predictive
+    )
+    const liveOnlyCamera = sampleZoomCameraAtTime(
+      [clip],
+      artboard,
+      beforeVisibleTurn,
+      liveOnly
+    )
+
+    // Before the cursor itself has moved down, the predictive camera has
+    // already begun carrying a downward component from the upcoming turn.
+    expect(predictiveCamera.radialBlurCenterY).toBeGreaterThan(
+      liveOnlyCamera.radialBlurCenterY + 0.015
+    )
+
+    // The real cursor is still kept inside the zoom window at the turn.
+    const cursorAtTurn = sampleCursor(2.15)
+    const turned = sampleZoomCameraAtTime([clip], artboard, 2.15, predictive)
+    expect(
+      cursorInWindow(turned.radialBlurCenterX, turned.scale, cursorAtTurn.x)
+    ).toBe(true)
+    expect(
+      cursorInWindow(turned.radialBlurCenterY, turned.scale, cursorAtTurn.y)
+    ).toBe(true)
+  })
+
   it("eases out from the followed frame, not back to the clip focus", () => {
     const sampleCursor = (t: number) =>
       t < 2 ? { x: 0.5, y: 0.5 } : { x: 0.9, y: 0.5 }

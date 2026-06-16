@@ -68,8 +68,13 @@ For an `auto` clip, `computeZoomFollowPaths` precomputes a follow path off the h
 path (port of Cap's `zoom_focus_interpolation.rs`):
 
 - Sample the cursor's artboard focus every `8 ms` across the hold.
+- Convert each live sample into a short **predictive intent target** by blending
+  toward the cursor's near-future position (`280 ms`, blend `0.58`, capped by
+  the lag leash). Since the full cursor track is known, this smooths hard
+  right-then-down turns into one diagonal camera intent instead of a visible
+  corner chase.
 - Drive a **mass-spring-damper** (`stiffness 200, damping 40, mass 2.25`) toward
-  each sample — the spring gives the cinematic lag + settle.
+  each intent target — the spring gives the cinematic lag + settle.
 - **Lag leash:** cap how far the smoothed focus trails the live cursor at
   `clamp(viewportHalf · 0.65, 0.12, 0.28)` of the frame, snapping back and
   bleeding velocity so a fast flick never drags the cursor out of the window.

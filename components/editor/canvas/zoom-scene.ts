@@ -15,6 +15,8 @@ import type {
 } from "@/types/editor-canvas"
 import {
   FOCUS_IDLE_GAP_MS,
+  FOCUS_INTENT_BLEND,
+  FOCUS_INTENT_LOOKAHEAD_MS,
   FOCUS_LAG_MAX,
   FOCUS_LAG_MIN,
   FOCUS_LAG_RATIO,
@@ -158,6 +160,10 @@ export type ZoomFollowParams = {
   edgeSnapRatio: number
   /** Hold the previous target when cursor samples are farther apart than this (ms). */
   idleGapMs: number
+  /** Short future lookahead (ms) used to infer gesture intent. */
+  intentLookaheadMs: number
+  /** Blend toward the future cursor target, 0 = live only, 1 = future only. */
+  intentBlend: number
 }
 
 export const ZOOM_FOLLOW_DEFAULTS: ZoomFollowParams = {
@@ -167,6 +173,8 @@ export const ZOOM_FOLLOW_DEFAULTS: ZoomFollowParams = {
   lagMax: FOCUS_LAG_MAX,
   edgeSnapRatio: ZOOM_EDGE_SNAP_RATIO,
   idleGapMs: FOCUS_IDLE_GAP_MS,
+  intentLookaheadMs: FOCUS_INTENT_LOOKAHEAD_MS,
+  intentBlend: FOCUS_INTENT_BLEND,
 }
 
 // --- Reframe motion blur (directional) -----------------------------------
@@ -322,6 +330,22 @@ function clampRange(value: number, lo: number, hi: number) {
   return Math.min(hi, Math.max(lo, value))
 }
 
+function capTargetLead(
+  current: CanvasZoomFocus,
+  predicted: CanvasZoomFocus,
+  maxLead: number
+): CanvasZoomFocus {
+  const dx = predicted.x - current.x
+  const dy = predicted.y - current.y
+  const dist = Math.hypot(dx, dy)
+  if (dist <= maxLead || dist <= 1e-9) return predicted
+  const scale = maxLead / dist
+  return {
+    x: current.x + dx * scale,
+    y: current.y + dy * scale,
+  }
+}
+
 /**
  * Precompute the auto-mode spring follow path for one resolved clip. Integrates a
  * mass-spring-damper toward the recorded cursor's focus at a fixed step across
@@ -381,7 +405,20 @@ function computeFollowPath(
     params.lagMin,
     params.lagMax
   )
+  const maxLead = maxLag
+  const lookaheadSec = Math.max(0, params.intentLookaheadMs) / 1000
+  const intentBlend = clampUnit(params.intentBlend)
   const snap = (v: number) => snapToEdges(clampUnit(v), params.edgeSnapRatio)
+  const targetForTime = (t: number, current: CanvasZoomFocus) => {
+    if (lookaheadSec <= 0 || intentBlend <= 0) return current
+    const future = sampleCursor(Math.min(clip.end, t + lookaheadSec))
+    if (!future) return current
+    const predicted = {
+      x: clampUnit(current.x + (clampUnit(future.x) - current.x) * intentBlend),
+      y: clampUnit(current.y + (clampUnit(future.y) - current.y) * intentBlend),
+    }
+    return capTargetLead(current, predicted, maxLead)
+  }
 
   const keyframes: ZoomFocusKeyframe[] = [
     { t: clip.start, fx: snap(target.x), fy: snap(target.y) },
@@ -391,7 +428,10 @@ function computeFollowPath(
     // A null sample (cursor off-screen / no data) holds the previous target
     // rather than interpolating phantom motion across the gap.
     const c = sampleCursor(t)
-    if (c) target = { x: clampUnit(c.x), y: clampUnit(c.y) }
+    if (c) {
+      const current = { x: clampUnit(c.x), y: clampUnit(c.y) }
+      target = targetForTime(t, current)
+    }
     sim.setTarget(target)
     sim.run(stepMs)
 

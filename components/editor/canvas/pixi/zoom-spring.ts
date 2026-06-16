@@ -47,6 +47,16 @@ export const ZOOM_EDGE_SNAP_RATIO = 0.25
  */
 export const FOCUS_IDLE_GAP_MS = 66.67
 
+/**
+ * Predictive intent lookahead for auto-mode focus follow. The cursor track is
+ * known before preview/export sampling, so the camera can blend each live target
+ * slightly toward the near future. This turns L-shaped cursor moves (right, then
+ * down) into a smoother diagonal camera intent instead of a visible right-then-
+ * down chase.
+ */
+export const FOCUS_INTENT_LOOKAHEAD_MS = 280
+export const FOCUS_INTENT_BLEND = 0.58
+
 // --- Amount easing: closed-form mass-spring-damper step response -----------
 
 function clamp01(value: number) {
