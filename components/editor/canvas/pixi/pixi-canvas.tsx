@@ -206,11 +206,10 @@ export function PixiCanvas() {
   const viewTransformRef = useRef(viewTransform)
   const setViewTransformRef = useRef(setViewTransform)
   const setViewportSizeRef = useRef(setViewportSize)
-  // Effective background/grain for the scene: the Background tab's master
-  // switch paints nothing when off (values stay stored in provider state).
+  // Effective background for the scene: the Background tab's master switch
+  // paints nothing when off (the value stays stored in provider state).
   const artboardBgRef = useRef({
     background: artboard.backgroundEnabled ? artboard.background : null,
-    grain: artboard.backgroundEnabled ? artboard.grain : 0,
   })
   useEffect(() => {
     artboardSizeRef.current = { width: artboard.width, height: artboard.height }
@@ -230,9 +229,8 @@ export function PixiCanvas() {
   useEffect(() => {
     artboardBgRef.current = {
       background: artboard.backgroundEnabled ? artboard.background : null,
-      grain: artboard.backgroundEnabled ? artboard.grain : 0,
     }
-  }, [artboard.background, artboard.grain, artboard.backgroundEnabled])
+  }, [artboard.background, artboard.backgroundEnabled])
 
   const videosRef = useRef(videos)
   const primaryAudioRef = useRef(primaryAudioVideoId)
@@ -514,10 +512,7 @@ export function PixiCanvas() {
       controller.setExternalViewTransform(
         getImmediateResizeView(size, initialViewTransform)
       )
-      scene.setBackground(
-        artboardBgRef.current.background,
-        artboardBgRef.current.grain
-      )
+      scene.setBackground(artboardBgRef.current.background)
 
       const videoController = new VideoController({
         scene,
@@ -669,10 +664,9 @@ export function PixiCanvas() {
 
   useEffect(() => {
     sceneRef.current?.setBackground(
-      artboard.backgroundEnabled ? artboard.background : null,
-      artboard.backgroundEnabled ? artboard.grain : 0
+      artboard.backgroundEnabled ? artboard.background : null
     )
-  }, [artboard.background, artboard.grain, artboard.backgroundEnabled])
+  }, [artboard.background, artboard.backgroundEnabled])
 
   useEffect(() => {
     const controller = controllerRef.current

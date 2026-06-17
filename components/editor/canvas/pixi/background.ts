@@ -1,5 +1,3 @@
-import { Texture } from "pixi.js"
-
 import {
   getWallpaperFullUrl,
   isWallpaperId,
@@ -10,12 +8,11 @@ import type { ArtboardBackground, CanvasSize } from "@/types/editor-canvas"
 /**
  * Framework-agnostic artboard-background helpers, shared by the Pixi preview
  * scene and the offscreen export stage. Ported from the Konva
- * `artboard-background.tsx` / `artboard-grain.tsx` so the cover-crop, wallpaper
- * blur, and noise-tile math stay byte-identical across preview and export.
+ * `artboard-background.tsx` so the cover-crop and wallpaper-blur math stay
+ * byte-identical across preview and export.
  *
- * The scene/export build the actual Pixi display objects (Sprite / TilingSprite /
- * Graphics); this module only loads + crops bitmaps and produces the noise
- * texture.
+ * The scene/export build the actual Pixi display objects (Sprite / Graphics);
+ * this module only loads + crops bitmaps.
  */
 
 const bitmapCache = new Map<string, ImageBitmap>()
@@ -192,35 +189,4 @@ export function resolveWallpaper(background: ArtboardBackground | null): {
     wallpaperId: background.value,
     blurRadius,
   }
-}
-
-const NOISE_TILE_SIZE = 256
-let cachedNoiseTexture: Texture | null = null
-
-/** A cached 256×256 repeating grayscale noise texture for the film-grain overlay. */
-export function getNoiseTexture(): Texture | null {
-  if (cachedNoiseTexture) return cachedNoiseTexture
-  if (typeof document === "undefined") return null
-
-  const canvas = document.createElement("canvas")
-  canvas.width = NOISE_TILE_SIZE
-  canvas.height = NOISE_TILE_SIZE
-  const ctx = canvas.getContext("2d")
-  if (!ctx) return null
-
-  const imageData = ctx.createImageData(NOISE_TILE_SIZE, NOISE_TILE_SIZE)
-  const data = imageData.data
-  for (let i = 0; i < data.length; i += 4) {
-    const v = (Math.random() * 256) | 0
-    data[i] = v
-    data[i + 1] = v
-    data[i + 2] = v
-    data[i + 3] = 255
-  }
-  ctx.putImageData(imageData, 0, 0)
-
-  const texture = Texture.from(canvas)
-  texture.source.style.addressMode = "repeat"
-  cachedNoiseTexture = texture
-  return texture
 }

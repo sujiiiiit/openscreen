@@ -1,4 +1,3 @@
-import "pixi.js/advanced-blend-modes"
 import {
   type Application,
   Container,
@@ -6,7 +5,6 @@ import {
   Rectangle,
   Sprite,
   Texture,
-  TilingSprite,
   VideoSource,
 } from "pixi.js"
 
@@ -34,7 +32,6 @@ import {
 import {
   blurredWallpaperPadding,
   computeCoverCrop,
-  getNoiseTexture,
   loadBlurredWallpaperBitmap,
   loadWallpaperBitmap,
   resolveWallpaper,
@@ -84,7 +81,7 @@ const ARTBOARD_BORDER_ALPHA = 0.1
  * layer tree:
  *
  *   stage → world (render group) → artboard → {
- *     backgroundCamera → surface (bg fill / wallpaper / grain),   [clipped]
+ *     backgroundCamera → surface (bg fill / wallpaper),           [clipped]
  *     grid,
  *     contentCamera → nodesLayer (video nodes),                   [clipped]
  *     border,
@@ -113,7 +110,7 @@ export class CanvasScene {
   private readonly world: Container
   private readonly artboard: Container
 
-  /** Composition zoom-clip camera for the background fill/grain. */
+  /** Composition zoom-clip camera for the background fill. */
   private readonly backgroundCamera = new Container({
     label: "background-camera",
   })
@@ -121,10 +118,9 @@ export class CanvasScene {
   private readonly contentCamera = new Container({ label: "content-camera" })
   private readonly backgroundMask = new Graphics({ label: "background-mask" })
   private readonly contentMask = new Graphics({ label: "content-mask" })
-  /** Artboard background fill / wallpaper / grain. */
+  /** Artboard background fill / wallpaper. */
   private readonly surface = new Container({ label: "surface" })
   private readonly backgroundHolder = new Container({ label: "bg-fill" })
-  private readonly grainHolder = new Container({ label: "grain" })
   /** Editable nodes — one wrapper container per video (populated later). */
   private readonly nodesLayer = new Container({ label: "nodes" })
   /** Cursor overlay parent — above the video nodes, inside the artboard clip. */
@@ -141,6 +137,28 @@ export class CanvasScene {
   private readonly zoomedContent = new Container({ label: "zoomed-content" })
   /** Wraps the zoomed composition (zoomed content + cursor) for the radial blur. */
   private readonly composite = new Container({ label: "composite" })
+
+  /**
+   * Unfiltered, zoom-mirrored copy of the artboard background, drawn BEHIND the
+   * blurred {@link composite}. The directional reframe pan blur averages each
+   * edge pixel of the composite against the transparent region just outside the
+   * artboard, so the composite's alpha falls off in a ring at the artboard
+   * edges. The Pixi canvas is transparent, so without an opaque layer behind,
+   * that ring reveals the white "paper" DOM backdrop as a halo (and in export,
+   * the opaque black clear). This sharp backing fills the ring with the same
+   * background instead. It mirrors the zoom camera so it stays pixel-aligned
+   * with the composite's own (blurred) background at every zoom depth.
+   */
+  private readonly backingCamera = new Container({ label: "backing-camera" })
+  private readonly backingMask = new Graphics({ label: "backing-mask" })
+  private readonly backingHolder = new Container({ label: "backing-fill" })
+  /**
+   * Clips the FILTERED composite to the exact artboard rect. The per-camera
+   * masks clip content BEFORE the blur runs, so the blur's outward smear would
+   * otherwise bleed past the artboard onto the workspace; this clips it after.
+   */
+  private readonly clip = new Container({ label: "composite-clip" })
+  private readonly clipMask = new Graphics({ label: "composite-clip-mask" })
 
   private readonly gridGfx = new Graphics({ label: "grid" })
   private readonly gridMask = new Graphics({ label: "grid-mask" })
@@ -159,7 +177,6 @@ export class CanvasScene {
   private lastView: ViewTransform = { scale: 1, x: 0, y: 0 }
   private lastViewport: CanvasSize = { width: 0, height: 0 }
   private lastBackground: ArtboardBackground | null = null
-  private lastGrain = 0
   /** Bumped per setBackground so a stale async wallpaper load is ignored. */
   private surfaceGen = 0
 
@@ -200,8 +217,7 @@ export class CanvasScene {
     this.backgroundMask.eventMode = "none"
     this.surface.eventMode = "none"
     this.backgroundHolder.eventMode = "none"
-    this.grainHolder.eventMode = "none"
-    this.surface.addChild(this.backgroundHolder, this.grainHolder)
+    this.surface.addChild(this.backgroundHolder)
     this.backgroundCamera.addChild(this.surface)
 
     this.gridGfx.mask = this.gridMask
@@ -224,7 +240,7 @@ export class CanvasScene {
 
     // Paint order (first child = bottom): bg fill → grid → content → cursor →
     // border. `zoomedContent` holds everything the reframe pan blur acts on (bg
-    // fill/grain, grid, video nodes); the cursor camera sits beside it so the
+    // fill, grid, video nodes); the cursor camera sits beside it so the
     // pan blur skips it. The whole composite (zoomed content + cursor) takes the
     // radial zoom blur. The artboard border stays outside so the 1px edge never
     // blurs.
@@ -241,7 +257,31 @@ export class CanvasScene {
       this.cursorCamera,
       this.cursorMask
     )
-    this.artboard.addChild(this.composite, this.borderGfx)
+
+    // Sharp background backing (zoom-mirrored, clipped to the artboard rect),
+    // sitting behind the blurred composite so the blur's edge alpha-falloff
+    // reveals the same background instead of the white DOM paper / export black.
+    this.backingCamera.mask = this.backingMask
+    this.backingCamera.eventMode = "none"
+    this.backingMask.eventMode = "none"
+    this.backingHolder.eventMode = "none"
+    this.backingCamera.addChild(this.backingHolder)
+
+    // The composite carries the radial + pan blur filters; clip the filtered
+    // result to the exact artboard rect so the smear can't escape the artboard.
+    this.clip.mask = this.clipMask
+    this.clip.eventMode = "none"
+    this.clipMask.eventMode = "none"
+    this.clip.addChild(this.composite)
+
+    // Paint order (first = bottom): backing → clipped composite → crisp border.
+    this.artboard.addChild(
+      this.backingCamera,
+      this.backingMask,
+      this.clip,
+      this.clipMask,
+      this.borderGfx
+    )
     this.world.addChild(this.artboard)
     app.stage.addChild(this.world)
     app.stage.addChild(this.hoverGfx)
@@ -292,6 +332,9 @@ export class CanvasScene {
     this.contentCamera.position.set(camera.offsetX, camera.offsetY)
     this.cursorCamera.scale.set(camera.scale)
     this.cursorCamera.position.set(camera.offsetX, camera.offsetY)
+    // Keep the sharp backing aligned with the composite's own background.
+    this.backingCamera.scale.set(camera.scale)
+    this.backingCamera.position.set(camera.offsetX, camera.offsetY)
     this.applyZoomBlurFilter(camera)
     this.requestRender()
   }
@@ -321,7 +364,7 @@ export class CanvasScene {
   }
 
   /**
-   * Synchronously rasterize the artboard composition — background fill/grain,
+   * Synchronously rasterize the artboard composition — background fill,
    * video nodes (with their appearance: corners, border, shadow), and the
    * cursor overlay — to a canvas no wider than `targetWidth`. Editor chrome
    * is excluded: the pixel grid is hidden and the zoom-clip camera + radial
@@ -423,8 +466,8 @@ export class CanvasScene {
     this.artboardSize = size
     this.rebuildArtboardGeometry()
     this.redrawGrid()
-    // Cover-crop + grain coverage depend on the artboard size.
-    this.setBackground(this.lastBackground, this.lastGrain)
+    // Cover-crop coverage depends on the artboard size.
+    this.setBackground(this.lastBackground)
     this.requestRender()
   }
 
@@ -437,16 +480,16 @@ export class CanvasScene {
 
   /**
    * Render the artboard background (color fill or cover-cropped wallpaper with
-   * optional blur) plus the film-grain overlay. Wallpaper bitmaps load async; a
-   * generation token discards a stale load if the background changes mid-flight.
-   * Background fill + grain are clipped to the artboard via the background mask.
+   * optional blur). Wallpaper bitmaps load async; a generation token discards a
+   * stale load if the background changes mid-flight. The background fill is
+   * clipped to the artboard via the background mask.
    */
-  setBackground(background: ArtboardBackground | null, grain: number) {
+  setBackground(background: ArtboardBackground | null) {
     this.lastBackground = background
-    this.lastGrain = grain
     const gen = ++this.surfaceGen
     this.clearHolder(this.backgroundHolder)
-    this.clearHolder(this.grainHolder)
+    // The backing mirrors the fill/wallpaper.
+    this.clearHolder(this.backingHolder)
 
     const { width, height } = this.artboardSize
 
@@ -455,6 +498,10 @@ export class CanvasScene {
       fill.rect(0, 0, width, height).fill(background.value)
       fill.eventMode = "none"
       this.backgroundHolder.addChild(fill)
+      const backingFill = new Graphics()
+      backingFill.rect(0, 0, width, height).fill(background.value)
+      backingFill.eventMode = "none"
+      this.backingHolder.addChild(backingFill)
     } else {
       const { src, blurRadius } = resolveWallpaper(background)
       if (src) {
@@ -484,23 +531,18 @@ export class CanvasScene {
             sprite.eventMode = "none"
             this.clearHolder(this.backgroundHolder)
             this.backgroundHolder.addChild(sprite)
+            // A second sprite sharing the same texture for the sharp backing.
+            const backingSprite = new Sprite(texture)
+            backingSprite.width = this.artboardSize.width
+            backingSprite.height = this.artboardSize.height
+            backingSprite.eventMode = "none"
+            this.clearHolder(this.backingHolder)
+            this.backingHolder.addChild(backingSprite)
             this.requestRender()
           })
           .catch(() => {
             /* wallpaper load failed; the white DOM backdrop shows through */
           })
-      }
-    }
-
-    const grainAlpha = Math.max(0, Math.min(1, grain / 100))
-    if (grainAlpha > 0) {
-      const texture = getNoiseTexture()
-      if (texture) {
-        const tiling = new TilingSprite({ texture, width, height })
-        tiling.alpha = grainAlpha
-        tiling.blendMode = "overlay"
-        tiling.eventMode = "none"
-        this.grainHolder.addChild(tiling)
       }
     }
 
@@ -822,6 +864,8 @@ export class CanvasScene {
     this.contentMask.clear().rect(0, 0, width, height).fill(0xffffff)
     this.cursorMask.clear().rect(0, 0, width, height).fill(0xffffff)
     this.gridMask.clear().rect(0, 0, width, height).fill(0xffffff)
+    this.backingMask.clear().rect(0, 0, width, height).fill(0xffffff)
+    this.clipMask.clear().rect(0, 0, width, height).fill(0xffffff)
     this.redrawBorder()
 
     const el = this.backdropEl

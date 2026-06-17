@@ -21,7 +21,6 @@ export type HistoryCommitTag =
   | "background"
   | "background-enabled"
   | "padding"
-  | "grain"
   | "cursor-custom-rendering"
   | "cursor-set"
   | "cursor-size"

@@ -1,4 +1,3 @@
-import "pixi.js/advanced-blend-modes"
 import {
   Application,
   Container,
@@ -7,14 +6,12 @@ import {
   Rectangle,
   Sprite,
   Texture,
-  TilingSprite,
 } from "pixi.js"
 
 import type { ProjectStateV1, ProjectVideo } from "@/types/api"
 import {
   blurredWallpaperPadding,
   computeCoverCrop,
-  getNoiseTexture,
   loadBlurredWallpaperBitmap,
   loadWallpaperBitmap,
   resolveWallpaper,
@@ -119,7 +116,7 @@ export interface BuildStageOptions {
  * Build an offscreen PixiJS scene that mirrors the editor preview for a single
  * artboard composition, sized to the export's output pixel dimensions. It
  * reuses the SAME shared modules as the live canvas — `video-appearance.ts`
- * (squircle/border/shadow), `background.ts` (wallpaper cover-crop/blur, grain),
+ * (squircle/border/shadow), `background.ts` (wallpaper cover-crop/blur),
  * and `getVideoCoverCrop` — so the encoded frame matches the on-screen preview.
  *
  * Each video clip becomes a Sprite whose texture wraps a per-node reused canvas;
@@ -188,13 +185,35 @@ export async function buildExportStage(
   )
   const composite = new Container()
   composite.addChild(zoomedContent, cursorCamera, cursorMask)
-  artboardContainer.addChild(composite)
+
+  // Sharp, zoom-mirrored background backing behind the blurred composite, and a
+  // clip on the filtered composite — same structure as the editor scene so the
+  // export matches. Without the backing, the pan blur's edge alpha-falloff
+  // reveals the opaque black clear in a ring at the frame edges; the clip keeps
+  // the smear from escaping the artboard rect. (See docs/editor-canvas.md →
+  // "Zoom Blur Edge Halo".)
+  const backingCamera = new Container()
+  const backingMask = new Graphics()
+    .rect(0, 0, artboard.width, artboard.height)
+    .fill(0xffffff)
+  backingCamera.mask = backingMask
+  const backingSurface = new Container()
+  backingCamera.addChild(backingSurface)
+  const clipMask = new Graphics()
+    .rect(0, 0, artboard.width, artboard.height)
+    .fill(0xffffff)
+  const clip = new Container()
+  clip.mask = clipMask
+  clip.addChild(composite)
+  artboardContainer.addChild(backingCamera, backingMask, clip, clipMask)
   const zoomBlur = createZoomBlurFilter()
   let zoomBlurOn = false
   const zoomPanBlur = createZoomPanBlurFilter()
   let zoomPanBlurOn = false
 
   await buildExportSurface(surface, artboard)
+  // The backing mirrors the fill/wallpaper.
+  await buildExportSurface(backingSurface, artboard)
 
   const nodesByVideoId = new Map<string, ExportVideoNode>()
   for (const video of state.videos) {
@@ -222,6 +241,9 @@ export async function buildExportStage(
     contentCamera.position.set(camera.offsetX, camera.offsetY)
     cursorCamera.scale.set(camera.scale)
     cursorCamera.position.set(camera.offsetX, camera.offsetY)
+    // Keep the sharp backing aligned with the composite's own background.
+    backingCamera.scale.set(camera.scale)
+    backingCamera.position.set(camera.offsetX, camera.offsetY)
     // The export filter input is the output canvas, so center/velocity map to
     // output px. Radial blur on the whole composite, directional reframe pan
     // blur on the zoomed content only (cursor excluded).
@@ -480,8 +502,8 @@ async function buildExportSurface(
   artboard: ProjectStateV1["artboard"]
 ): Promise<void> {
   // Background master switch (Background tab header): when off, the export
-  // paints no fill/wallpaper and no grain — same as the editor preview. The
-  // stored values stay in project.json untouched.
+  // paints no fill/wallpaper — same as the editor preview. The stored values
+  // stay in project.json untouched.
   if (artboard.backgroundEnabled === false) return
   const background = artboard.background ?? null
 
@@ -522,21 +544,6 @@ async function buildExportSurface(
       } catch {
         // Wallpaper missing — drop the background rather than failing export.
       }
-    }
-  }
-
-  const grainAlpha = Math.max(0, Math.min(1, artboard.grain / 100))
-  if (grainAlpha > 0) {
-    const texture = getNoiseTexture()
-    if (texture) {
-      const tiling = new TilingSprite({
-        texture,
-        width: artboard.width,
-        height: artboard.height,
-      })
-      tiling.alpha = grainAlpha
-      tiling.blendMode = "overlay"
-      surface.addChild(tiling)
     }
   }
 }

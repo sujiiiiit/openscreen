@@ -103,7 +103,6 @@ const DEFAULT_ARTBOARD: EditorArtboard = {
   width: DEFAULT_ARTBOARD_PRESET.width,
   height: DEFAULT_ARTBOARD_PRESET.height,
   background: null,
-  grain: 0,
   padding: 0,
   backgroundEnabled: true,
   cursorCustomRenderingEnabled: true,
@@ -237,7 +236,6 @@ type EditorCanvasContextValue = {
   setArtboardPreset: (id: ArtboardPresetId) => void
   setArtboardBackground: (background: ArtboardBackground | null) => void
   setArtboardBackgroundEnabled: (enabled: boolean) => void
-  setArtboardGrain: (grain: number) => void
   setArtboardPadding: (padding: number) => void
   setCursorCustomRenderingEnabled: (enabled: boolean) => void
   setCursorSetId: (setId: CursorSetId) => void
@@ -340,7 +338,6 @@ type EditorCanvasActionsContextValue = Pick<
   | "setArtboardPreset"
   | "setArtboardBackground"
   | "setArtboardBackgroundEnabled"
-  | "setArtboardGrain"
   | "setArtboardPadding"
   | "setCursorCustomRenderingEnabled"
   | "setCursorSetId"
@@ -2529,7 +2526,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       flushAutosaveNow()
       historyCommitTagRef.current = "preset"
       const prevBackground = artboardRef.current.background
-      const prevGrain = artboardRef.current.grain
       const prevPadding = artboardRef.current.padding
       const prevBackgroundEnabled = artboardRef.current.backgroundEnabled
       const prevCursorCustomRenderingEnabled =
@@ -2558,7 +2554,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           width: auto.width,
           height: auto.height,
           background: prevBackground,
-          grain: prevGrain,
           padding: prevPadding,
           backgroundEnabled: prevBackgroundEnabled,
           cursorCustomRenderingEnabled: prevCursorCustomRenderingEnabled,
@@ -2578,7 +2573,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           width: preset.width,
           height: preset.height,
           background: prevBackground,
-          grain: prevGrain,
           padding: prevPadding,
           backgroundEnabled: prevBackgroundEnabled,
           cursorCustomRenderingEnabled: prevCursorCustomRenderingEnabled,
@@ -2990,16 +2984,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const setArtboardGrain = useCallback((grain: number) => {
-    const current = artboardRef.current
-    const clamped = Math.max(0, Math.min(100, Math.round(grain)))
-    if (current.grain === clamped) return
-    historyCommitTagRef.current = "grain"
-    const nextArtboard: EditorArtboard = { ...current, grain: clamped }
-    artboardRef.current = nextArtboard
-    setArtboard(nextArtboard)
-  }, [])
-
   // Recorded-cursor render size. Pure appearance — it scales the cursor's
   // render box only; position, hotspot, and timing are unaffected (see
   // `placeCursor`), so accuracy is preserved at every size. Stored on the
@@ -3064,7 +3048,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   }, [])
 
   // Master switch for the background treatment (Background tab header). Only
-  // the flag flips — background/grain/padding values stay stored so they come
+  // the flag flips — background/padding values stay stored so they come
   // back when re-enabled (mirrors setCursorCustomRenderingEnabled).
   const setArtboardBackgroundEnabled = useCallback(
     (enabled: boolean) => {
@@ -3410,7 +3394,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         width: savedState.artboard.width,
         height: savedState.artboard.height,
         background: savedState.artboard.background,
-        grain: savedState.artboard.grain,
         padding: savedState.artboard.padding,
         backgroundEnabled: savedState.artboard.backgroundEnabled !== false,
         cursorCustomRenderingEnabled:
@@ -3668,7 +3651,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setArtboardPreset,
       setArtboardBackground,
       setArtboardBackgroundEnabled,
-      setArtboardGrain,
       setArtboardPadding,
       setCursorCustomRenderingEnabled,
       setCursorSetId,
@@ -3695,7 +3677,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setArtboardPreset,
       setArtboardBackground,
       setArtboardBackgroundEnabled,
-      setArtboardGrain,
       setArtboardPadding,
       setCursorCustomRenderingEnabled,
       setCursorSetId,
@@ -3880,7 +3861,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         width: savedState.artboard.width,
         height: savedState.artboard.height,
         background: savedState.artboard.background,
-        grain: savedState.artboard.grain,
         padding: savedState.artboard.padding,
         backgroundEnabled: savedState.artboard.backgroundEnabled !== false,
         cursorCustomRenderingEnabled:
@@ -4054,7 +4034,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       // odd-shaped artboard.
       const useAuto = project.recordingType === "display"
       const previousBackground = artboardRef.current.background
-      const previousGrain = artboardRef.current.grain
       const previousPadding = artboardRef.current.padding
       const previousBackgroundEnabled = artboardRef.current.backgroundEnabled
       const previousCursorCustomRenderingEnabled =
@@ -4080,7 +4059,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               width: auto.width,
               height: auto.height,
               background: previousBackground,
-              grain: previousGrain,
               padding: previousPadding,
               backgroundEnabled: previousBackgroundEnabled,
               cursorCustomRenderingEnabled:
@@ -4102,7 +4080,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               width: preset.width,
               height: preset.height,
               background: previousBackground,
-              grain: previousGrain,
               padding: previousPadding,
               backgroundEnabled: previousBackgroundEnabled,
               cursorCustomRenderingEnabled:

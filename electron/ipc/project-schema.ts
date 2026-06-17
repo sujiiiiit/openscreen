@@ -58,8 +58,7 @@ export interface ProjectArtboard {
   height: number
   background: ProjectArtboardBackground | null
   padding: number
-  grain: number
-  // Master switch for the background treatment (fill/wallpaper + grain).
+  // Master switch for the background treatment (fill/wallpaper).
   // Optional + defaulted to true for old project.json files so existing
   // projects keep rendering their background.
   backgroundEnabled?: boolean
@@ -293,8 +292,7 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
   if (
     !isFiniteNumber(value["width"]) ||
     !isFiniteNumber(value["height"]) ||
-    !isFiniteNumber(value["padding"]) ||
-    !isFiniteNumber(value["grain"])
+    !isFiniteNumber(value["padding"])
   ) {
     return null
   }
@@ -365,7 +363,6 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     height: value["height"] as number,
     background,
     padding: value["padding"] as number,
-    grain: value["grain"] as number,
     backgroundEnabled,
     cursorCustomRenderingEnabled,
     cursorSetId,

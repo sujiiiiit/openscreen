@@ -207,8 +207,7 @@ export interface ProjectArtboard {
   height: number
   background: ProjectArtboardBackground | null
   padding: number
-  grain: number
-  // Master switch for the background treatment (fill/wallpaper + grain).
+  // Master switch for the background treatment (fill/wallpaper).
   // Optional on disk; validator defaults to true so old projects keep
   // rendering their background.
   backgroundEnabled?: boolean

@@ -28,8 +28,6 @@ const BACKGROUND_TABS = [
 
 const BACKGROUND_BLUR_DEFAULT = 0
 const BACKGROUND_BLUR_MAX = 200
-const GRAIN_DEFAULT = 0
-const GRAIN_MAX = 100
 const PADDING_DEFAULT = 0
 const PADDING_MAX = 500
 
@@ -104,12 +102,11 @@ export function BackgroundPanel() {
   const {
     setArtboardBackground,
     setArtboardBackgroundEnabled,
-    setArtboardGrain,
     setArtboardPadding,
   } = useEditorCanvasActions()
   // Master switch — persisted on the artboard (project-level). When off, the
   // preview/export paint no background and every control below disables; the
-  // stored background/grain/padding values are kept, not reset (mirrors the
+  // stored background/padding values are kept, not reset (mirrors the
   // Cursor tab's custom-rendering switch).
   const enabled = artboard.backgroundEnabled
 
@@ -123,10 +120,6 @@ export function BackgroundPanel() {
   const blurStrength = Math.max(
     BACKGROUND_BLUR_DEFAULT,
     Math.min(BACKGROUND_BLUR_MAX, wallpaperBackground?.blurRadius ?? 0)
-  )
-  const grainStrength = Math.max(
-    GRAIN_DEFAULT,
-    Math.min(GRAIN_MAX, artboard.grain)
   )
   const paddingStrength = Math.max(
     PADDING_DEFAULT,
@@ -144,10 +137,6 @@ export function BackgroundPanel() {
       value: wallpaperBackground.value,
       blurRadius: clamped > 0 ? clamped : undefined,
     })
-  }
-
-  const applyGrain = (next: number) => {
-    setArtboardGrain(Math.max(GRAIN_DEFAULT, Math.min(GRAIN_MAX, next)))
   }
 
   const applyPadding = (next: number) => {
@@ -235,18 +224,6 @@ export function BackgroundPanel() {
           disabled={!enabled || !isWallpaperActive}
           showValueTooltip
           formatValue={(v) => `${Math.round(v)}px`}
-        />
-        <AdjustmentRow
-          label="Grain"
-          description="Subtle film-noise texture over the background."
-          value={grainStrength}
-          onValueChange={applyGrain}
-          onReset={() => applyGrain(GRAIN_DEFAULT)}
-          min={0}
-          max={GRAIN_MAX}
-          disabled={!enabled}
-          showValueTooltip
-          formatValue={(v) => `${Math.round(v)}`}
         />
       </div>
     </section>

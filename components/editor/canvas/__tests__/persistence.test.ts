@@ -15,9 +15,7 @@ const ARTBOARD: EditorArtboard = {
   presetId: "wide",
   width: 1920,
   height: 1080,
-  background: null,
-  grain: 0,
-  padding: 0,
+  background: null,  padding: 0,
   backgroundEnabled: true,
   cursorCustomRenderingEnabled: true,
   cursorSetId: "macos",
@@ -164,9 +162,7 @@ describe("cursor motion rotation persistence", () => {
       width: 1920,
       height: 1080,
       background: null,
-      padding: 0,
-      grain: 0,
-    }
+      padding: 0,    }
     const legacy = parseProjectState({
       version: 1,
       artboard: base,
@@ -194,9 +190,7 @@ describe("cursor motion rotation persistence", () => {
       width: 1920,
       height: 1080,
       background: null,
-      padding: 0,
-      grain: 0,
-    }
+      padding: 0,    }
     const legacy = parseProjectState({
       version: 1,
       artboard: base,
@@ -224,9 +218,7 @@ describe("cursor motion rotation persistence", () => {
       width: 1920,
       height: 1080,
       background: null,
-      padding: 0,
-      grain: 0,
-    }
+      padding: 0,    }
     const tooSmall = parseProjectState({
       version: 1,
       artboard: { ...base, cursorMotionRotation: -1 },
@@ -271,9 +263,7 @@ describe("custom cursor rendering persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-      },
+        padding: 0,      },
       videos: [],
       timelineClips: [],
       updatedAtUnixMs: 0,
@@ -285,9 +275,7 @@ describe("custom cursor rendering persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-        cursorCustomRenderingEnabled: "no",
+        padding: 0,        cursorCustomRenderingEnabled: "no",
       },
       videos: [],
       timelineClips: [],
@@ -323,9 +311,7 @@ describe("cursor style persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-      },
+        padding: 0,      },
       videos: [],
       timelineClips: [],
       updatedAtUnixMs: 0,
@@ -337,9 +323,7 @@ describe("cursor style persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-        cursorSetId: "made-up",
+        padding: 0,        cursorSetId: "made-up",
       },
       videos: [],
       timelineClips: [],
@@ -375,9 +359,7 @@ describe("cursor smoothing persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-        cursorSmoothingMode: "raw",
+        padding: 0,        cursorSmoothingMode: "raw",
       },
       videos: [],
       timelineClips: [],
@@ -411,9 +393,7 @@ describe("cursor click press scale persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-      },
+        padding: 0,      },
       videos: [],
       timelineClips: [],
       updatedAtUnixMs: 0,
@@ -425,9 +405,7 @@ describe("cursor click press scale persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-        cursorClickPressScale: 0.2,
+        padding: 0,        cursorClickPressScale: 0.2,
       },
       videos: [],
       timelineClips: [],
@@ -463,9 +441,7 @@ describe("cursor pointer override persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-      },
+        padding: 0,      },
       videos: [],
       timelineClips: [],
       updatedAtUnixMs: 0,
@@ -477,9 +453,7 @@ describe("cursor pointer override persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-        cursorAlwaysUsePointer: "yes",
+        padding: 0,        cursorAlwaysUsePointer: "yes",
       },
       videos: [],
       timelineClips: [],
@@ -513,9 +487,7 @@ describe("cursor type stabilization persistence", () => {
       width: 1920,
       height: 1080,
       background: null,
-      padding: 0,
-      grain: 0,
-    }
+      padding: 0,    }
     const legacy = parseProjectState({
       version: 1,
       artboard: base,
@@ -554,9 +526,7 @@ describe("parseProjectState onCanvas tolerance", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-      },
+        padding: 0,      },
       videos: [
         {
           ...serializeVideo(canvasVideo({ id: "a" })),
@@ -778,6 +748,9 @@ describe("parseProjectState imported-video tolerance", () => {
 })
 
 describe("engaged content rects persistence", () => {
+  // `grain` is a removed field; old project.json files still carry it. The
+  // validator must tolerate (and drop) the extra key, so it stays here on
+  // purpose to assert legacy payloads keep parsing.
   const LEGACY_ARTBOARD = {
     presetId: "wide",
     width: 1920,
