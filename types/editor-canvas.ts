@@ -12,15 +12,17 @@ export type ArtboardBackground =
   | { type: "wallpaper"; value: string; blurRadius?: number }
   | { type: "color"; value: string }
 
-export type CursorMotionBlurBackend = "gpu" | "cpu"
-export type CursorMotionRotationMode = "side-lean" | "rotation"
 export type CursorSmoothingMode = "rapid" | "quick" | "default" | "slow"
 
 export type EditorArtboard = CanvasSize & {
   presetId: ArtboardPresetId
   background: ArtboardBackground | null
-  grain: number
   padding: number
+  // Master switch for the background treatment (Background tab header). When
+  // false, preview and export skip painting the background fill/wallpaper; the
+  // stored background/padding values stay persisted so they come back when
+  // re-enabled. Mirrors cursorCustomRenderingEnabled.
+  backgroundEnabled: boolean
   // Master switch for the custom cursor overlay. When false, preview and export
   // skip rendering the themed cursor entirely; the other cursor settings stay
   // persisted so they come back when the overlay is re-enabled.
@@ -37,25 +39,25 @@ export type EditorArtboard = CanvasSize & {
   // from cursor speed; this is the single user-facing amount. See cursor-scene.ts
   // CURSOR_MOTION_BLUR_DEFAULT / computeCursorBlur.
   cursorMotionBlur: number
-  // Cursor motion-rotation amount, 0..1 (0 = off). Horizontal cursor velocity
-  // adds a subtle lean, or full 2D motion direction adds a bounded rotation,
-  // around the existing hotspot; shared by preview/export.
+  // Cursor side-lean amount, 0..1 (0 = off). Horizontal cursor velocity adds a
+  // subtle Screen-Studio-style lean around the existing hotspot; shared by
+  // preview/export. (The full direction-follow "rotation" mode was removed
+  // 2026-06-06; the persisted `cursorMotionRotationMode` field is read/ignored
+  // for v1 compatibility.)
   cursorMotionRotation: number
-  // Cursor motion-rotation behavior. Default is the Screen-Studio-style side
-  // lean; rotation follows the 2D travel vector with the same amount slider.
-  cursorMotionRotationMode: CursorMotionRotationMode
-  // Renderer backend for cursor motion blur. GPU is the default for responsive
-  // preview; CPU is kept as a project-level fallback/comparison mode.
-  cursorMotionBlurBackend: CursorMotionBlurBackend
   // Cursor path smoothing preset. All modes smooth; Rapid is the lightest and
   // Slow is the softest. Shared by preview and export.
   cursorSmoothingMode: CursorSmoothingMode
   // Target cursor scale while a captured mouse button is pressed. `1` disables
-  // the shrink; default is 0.88. Shared by preview and export.
+  // the shrink; default is 0.78 (22 % downscale). Shared by preview and export.
   cursorClickPressScale: number
   // When true, every captured cursor id resolves to the themed pointer asset.
   // Useful when text/resize cursors are distracting. Shared by preview/export.
   cursorAlwaysUsePointer: boolean
+  // When true, brief cursor-SHAPE flickers (a type that changes and reverts
+  // faster than ~150 ms) are debounced out at track-build time, so the rendered
+  // cursor type stays steady. Shared by preview/export.
+  cursorTypeStabilization: boolean
 }
 
 export const ARTBOARD_SELECTION_ID = "__artboard__"
@@ -77,6 +79,35 @@ export type ViewTransform = {
   x: number
   y: number
 }
+
+/** The kinds of editable content that can live on the artboard. */
+export type NodeType = "video" | "image" | "text" | "shape"
+
+/**
+ * A node's placement on the artboard. `(x, y)` is the top-left of the
+ * axis-aligned (unrotated) box in artboard coordinates; `rotation` (radians) is
+ * applied around the box's center. Placement is derived from the artboard
+ * settings (`lib/video-placement.ts`); `rotation` is always 0 for new state and
+ * exists so the hit-test/overlay math in `lib/node-transform.ts` stays general.
+ */
+export type NodeTransform = {
+  x: number
+  y: number
+  width: number
+  height: number
+  rotation: number
+}
+
+/**
+ * A node on the artboard — the in-memory canvas model the PixiJS scene and the
+ * pure hit-test math operate on. It is a read-side derivation of
+ * {@link CanvasVideoItem} (see `components/editor/canvas/pixi/node-model.ts`),
+ * never persisted directly. Named to avoid clashing with the DOM `Node`.
+ */
+export type CanvasNode = {
+  id: string
+  type: NodeType
+} & NodeTransform
 
 /**
  * Coarse-grained label for the autosave pipeline shown in the titlebar.
@@ -136,30 +167,7 @@ export type CanvasVideoItem = {
   borderOffset: number
   /** Where the stroke sits relative to its (already offset) centerline. */
   borderAlignment: CanvasBorderAlignment
-  /**
-   * Drop-shadow color as a CSS string. Alpha is baked into the color (rgba)
-   * — there is no separate `shadowOpacity` field. The shadow pass is skipped
-   * entirely when the parsed alpha is 0 or when every spatial field
-   * (`blur`, `offsetX`, `offsetY`, `spread`) is 0.
-   */
-  shadowColor: string
-  /** Gaussian blur radius in artboard px. `0` is a sharp cast (no falloff). */
-  shadowBlur: number
-  /** Horizontal shadow displacement in artboard px. Signed; positive = right. */
-  shadowOffsetX: number
-  /** Vertical shadow displacement in artboard px. Signed; positive = down. */
-  shadowOffsetY: number
-  /**
-   * Silhouette spread in artboard px (Figma "spread"). Positive grows the
-   * shadow caster outward before blur; negative shrinks it. The corner
-   * radius shifts by the same delta so the shadow stays squircle-aligned.
-   */
-  shadowSpread: number
 }
-
-export type CanvasVideoTransformPatch = Partial<
-  Pick<CanvasVideoItem, "x" | "y" | "width" | "height" | "rotation">
->
 
 export type CanvasVideoAppearancePatch = Partial<
   Pick<
@@ -170,11 +178,6 @@ export type CanvasVideoAppearancePatch = Partial<
     | "borderColor"
     | "borderOffset"
     | "borderAlignment"
-    | "shadowColor"
-    | "shadowBlur"
-    | "shadowOffsetX"
-    | "shadowOffsetY"
-    | "shadowSpread"
   >
 >
 
@@ -193,6 +196,14 @@ export type CanvasZoomFocus = {
   /** Normalized target Y, where 0 = top edge and 1 = bottom edge. */
   y: number
 }
+
+/**
+ * How a zoom clip resolves its focus point.
+ * - `"auto"`  — the camera spring-follows the recorded cursor at render time
+ *   (the clip's stored `focus` is only the ease-in anchor). The default.
+ * - `"manual"` — the camera holds the fixed stored `focus` point.
+ */
+export type CanvasZoomMode = "auto" | "manual"
 
 export type CanvasZoomTransitionCurve =
   | "linear"
@@ -235,24 +246,49 @@ export type CanvasZoomEasePreset = "smooth" | "snappy" | "slow"
  * session-only (provider `selectedZoomClipId`), not part of this persisted
  * shape.
  */
+/**
+ * A detected content rect (a menu/popover's artboard-normalized bounds, top-left
+ * origin) at an interaction time. Produced by frame-analysis at auto-zoom
+ * generation (or, later, Accessibility) and persisted on the clip.
+ */
+export type CanvasZoomEngagedRect = {
+  /** Timeline (composition) seconds of the interaction the rect belongs to. */
+  t: number
+  /** Artboard-normalized bounds [0,1]. */
+  rect: { x: number; y: number; width: number; height: number }
+}
+
 export type CanvasZoomClip = {
   id: string
   start: number
   end: number
   enabled: boolean
-  /** User-picked anchor point; the zoom scales around this fixed artboard point. */
+  /**
+   * In `manual` mode the fixed artboard point the zoom scales around. In `auto`
+   * mode the camera spring-follows the cursor and this is only the ease-in
+   * anchor (where the zoom-in lands before the follow takes over).
+   */
   focus: CanvasZoomFocus
+  /** Auto (cursor-follow) vs manual (fixed `focus`). Defaults to `auto`. */
+  mode: CanvasZoomMode
   scale: number
   radialBlur: number
   radialBlurSettings: CanvasZoomRadialBlurSettings
   transition: CanvasZoomTransitionSettings
   easePreset: CanvasZoomEasePreset
+  /**
+   * Engaged-content rects keyed by interaction time. The predictive cursor-follow
+   * planner widens a dwell's region by the rect active around it, driving the
+   * zoom-out-to-fit reveal for content larger than the frame. Empty when no
+   * content was detected. Persisted so preview and export reveal identically.
+   */
+  engagedRects: readonly CanvasZoomEngagedRect[]
 }
 
 export type CanvasZoomClipPatch = Partial<
   Pick<
     CanvasZoomClip,
-    "enabled" | "focus" | "scale" | "radialBlur" | "easePreset"
+    "enabled" | "focus" | "mode" | "scale" | "radialBlur" | "easePreset"
   >
 > & {
   radialBlurSettings?: Partial<CanvasZoomRadialBlurSettings>

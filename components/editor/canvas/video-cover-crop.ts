@@ -1,5 +1,3 @@
-import type Konva from "konva"
-
 import type { CanvasSize } from "@/types/editor-canvas"
 
 export type VideoCoverCrop = {
@@ -46,17 +44,4 @@ export function getVideoCoverCrop(
     cropWidth,
     cropHeight: source.height,
   }
-}
-
-export function applyVideoCoverCrop(
-  node: Konva.Image,
-  sourceSize: CanvasSize,
-  frameSize: CanvasSize
-) {
-  const crop = getVideoCoverCrop(sourceSize, frameSize)
-
-  node.cropX(crop.cropX)
-  node.cropY(crop.cropY)
-  node.cropWidth(crop.cropWidth)
-  node.cropHeight(crop.cropHeight)
 }

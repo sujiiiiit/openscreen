@@ -14,25 +14,21 @@
 import type { ProjectStateV1 } from "@/types/api"
 
 export type HistoryCommitTag =
-  | "transform"
   | "appearance"
-  | "nudge"
-  | "lock"
   | "add"
   | "delete"
-  | "duplicate"
   | "preset"
   | "background"
+  | "background-enabled"
   | "padding"
-  | "grain"
   | "cursor-custom-rendering"
   | "cursor-set"
   | "cursor-size"
   | "cursor-smoothing"
   | "cursor-click-press-scale"
   | "cursor-always-use-pointer"
+  | "cursor-type-stabilization"
   | "cursor-motion-rotation"
-  | "cursor-motion-rotation-mode"
   | "cursor-motion-blur"
   | "cursor-motion-blur-backend"
   | "clip-move"
@@ -42,6 +38,8 @@ export type HistoryCommitTag =
   | "zoom-resize"
   | "zoom-settings"
   | "zoom-remove"
+  | "zoom-auto-generate"
+  | "zoom-regenerate"
   | "unknown"
 
 export interface HistoryEntry {
@@ -71,8 +69,13 @@ export const HISTORY_COALESCE_WINDOW_MS = 2000
 export const ALWAYS_NEW_ENTRY_TAGS: ReadonlySet<HistoryCommitTag> = new Set([
   "add",
   "delete",
-  "duplicate",
   "preset",
+  // One-shot auto-zoom generation (first open of a recording) is a single
+  // atomic undo step, so Cmd+Z removes all generated zooms in one go.
+  "zoom-auto-generate",
+  // Manual "Regenerate auto-zoom" replaces the whole Zoom track in one shot,
+  // so it is likewise a single atomic undo step.
+  "zoom-regenerate",
 ])
 
 export function createEmptyHistory(): EditorHistory {
@@ -131,7 +134,7 @@ export function applyHistoryCommit(
   // still coalesces within the window, but do not allocate a new entry.
   // Preserve the existing tag when the incoming tag is "unknown" so a benign
   // no-op flush (e.g. the post-`flushAutosaveNow` drain) cannot demote a
-  // meaningful tag like "transform" to "unknown" and break the next
+  // meaningful tag like "appearance" to "unknown" and break the next
   // coalesce check.
   if (
     top &&

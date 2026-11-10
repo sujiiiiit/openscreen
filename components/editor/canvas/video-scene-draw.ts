@@ -1,19 +1,16 @@
-import type Konva from "konva"
-
 import {
   clampSquircleRadius,
   computeSquircleCornerParams,
-  tracePathOrRect,
   type SquircleCornerParams,
 } from "@/lib/squircle"
-import { parseRgba } from "@/lib/rgba-color"
 
 /**
- * Minimal style description consumed by the canvas-video sceneFunc. Both the
- * live editor (`CanvasVideoItem`) and the export pipeline (`ProjectVideo`)
- * conform to this shape, so this module is the single source of truth for
- * how a video is rasterised — keeping the editor preview and the export
- * frame pixel-identical.
+ * Minimal style description for a video's appearance. Both the live editor
+ * (`CanvasVideoItem`) and the export pipeline (`ProjectVideo`) conform to this
+ * shape, so the `compute*Params` helpers below are the single source of truth for
+ * the size-independent corner/border geometry — shared by the Pixi
+ * preview appearance (`pixi/video-appearance.ts`) and the offscreen export
+ * (`export/build-stage.ts`), keeping preview and encoded frame pixel-identical.
  */
 export interface VideoStyleSource {
   width: number
@@ -24,28 +21,11 @@ export interface VideoStyleSource {
   borderColor: string
   borderOffset: number
   borderAlignment: "inside" | "center" | "outside"
-  shadowColor: string
-  shadowBlur: number
-  shadowOffsetX: number
-  shadowOffsetY: number
-  shadowSpread: number
 }
 
 export interface BorderRenderParams {
   strokeWidth: number
   color: string
-  originX: number
-  originY: number
-  width: number
-  height: number
-  params: SquircleCornerParams | null
-}
-
-export interface ShadowRenderParams {
-  color: string
-  blur: number
-  offsetX: number
-  offsetY: number
   originX: number
   originY: number
   width: number
@@ -66,7 +46,19 @@ export function computeSquircleParams(
     source.cornerRadius,
   )
   if (safeRadius <= 0) return null
-  return computeSquircleCornerParams(safeRadius, source.cornerSmoothing)
+  return computeSquircleCornerParams(
+    safeRadius,
+    source.cornerSmoothing,
+    squircleBudget(source.width, source.height),
+  )
+}
+
+/**
+ * Per-corner rounding-and-smoothing budget of a box: how far a corner curve
+ * may extend along each adjacent edge before opposite corners collide.
+ */
+function squircleBudget(width: number, height: number): number {
+  return Math.min(width, height) / 2
 }
 
 export function computeBorderParams(
@@ -106,7 +98,11 @@ export function computeBorderParams(
   )
   const params =
     safeRadius > 0
-      ? computeSquircleCornerParams(safeRadius, source.cornerSmoothing)
+      ? computeSquircleCornerParams(
+          safeRadius,
+          source.cornerSmoothing,
+          squircleBudget(borderBoxWidth, borderBoxHeight),
+        )
       : null
 
   return {
@@ -117,178 +113,5 @@ export function computeBorderParams(
     width: borderBoxWidth,
     height: borderBoxHeight,
     params,
-  }
-}
-
-export function computeShadowParams(
-  source: Pick<
-    VideoStyleSource,
-    | "width"
-    | "height"
-    | "cornerRadius"
-    | "cornerSmoothing"
-    | "shadowColor"
-    | "shadowBlur"
-    | "shadowOffsetX"
-    | "shadowOffsetY"
-    | "shadowSpread"
-  >,
-): ShadowRenderParams | null {
-  const parsedColor = parseRgba(source.shadowColor)
-  if (parsedColor === null || parsedColor.a <= 0) return null
-
-  const blur = Math.max(0, source.shadowBlur)
-  const offsetX = source.shadowOffsetX
-  const offsetY = source.shadowOffsetY
-  const spread = source.shadowSpread
-
-  if (blur === 0 && offsetX === 0 && offsetY === 0 && spread === 0) {
-    return null
-  }
-
-  const casterWidth = source.width + 2 * spread
-  const casterHeight = source.height + 2 * spread
-  if (casterWidth <= 0 || casterHeight <= 0) return null
-
-  const requestedRadius =
-    source.cornerRadius > 0
-      ? Math.max(0, source.cornerRadius + spread)
-      : 0
-  const safeRadius = clampSquircleRadius(
-    casterWidth,
-    casterHeight,
-    requestedRadius,
-  )
-  const params =
-    safeRadius > 0
-      ? computeSquircleCornerParams(safeRadius, source.cornerSmoothing)
-      : null
-
-  return {
-    color: source.shadowColor,
-    blur,
-    offsetX,
-    offsetY,
-    originX: -spread,
-    originY: -spread,
-    width: casterWidth,
-    height: casterHeight,
-    params,
-  }
-}
-
-/**
- * Render a single video bitmap with the editor's full appearance stack
- * (drop shadow, squircle clip, image draw with high-quality smoothing,
- * stroked border). Same code path runs in the live editor and in the
- * exporter so the on-screen preview matches the encoded frame.
- *
- * The shadow pass uses an in-place fill + `destination-out` mask trick:
- * Konva clipping at the layer level would otherwise cull a far-offscreen
- * shadow cast (see commentary in canvas-video-node.tsx). The same caveat
- * applies here — overlapping shadows on the same layer can chip pixels.
- */
-export function drawCanvasVideoFrame(
-  context: Konva.Context,
-  image: CanvasImageSource,
-  width: number,
-  height: number,
-  crop: {
-    x: number
-    y: number
-    width: number
-    height: number
-  } | null,
-  squircleParams: SquircleCornerParams | null,
-  borderParams: BorderRenderParams | null,
-  shadowParams: ShadowRenderParams | null,
-): void {
-  if (width <= 0 || height <= 0) return
-
-  if (shadowParams !== null) {
-    context.save()
-    context.shadowColor = shadowParams.color
-    context.shadowBlur = shadowParams.blur
-    context.shadowOffsetX = shadowParams.offsetX
-    context.shadowOffsetY = shadowParams.offsetY
-    context.translate(shadowParams.originX, shadowParams.originY)
-    context.beginPath()
-    tracePathOrRect(
-      context,
-      shadowParams.width,
-      shadowParams.height,
-      shadowParams.params,
-    )
-    context.closePath()
-    context.fillStyle = "#000"
-    context.fill()
-    context.restore()
-
-    context.save()
-    context.globalCompositeOperation = "destination-out"
-    context.translate(shadowParams.originX, shadowParams.originY)
-    context.beginPath()
-    tracePathOrRect(
-      context,
-      shadowParams.width,
-      shadowParams.height,
-      shadowParams.params,
-    )
-    context.closePath()
-    context.fillStyle = "#000"
-    context.fill()
-    context.restore()
-  }
-
-  context.save()
-  // Konva's public Context doesn't expose imageSmoothingQuality directly;
-  // reach into the underlying 2D context. Wrapped in save/restore via the
-  // Konva context so it doesn't leak to subsequent shapes on the same layer.
-  const ctx2d = (
-    context as unknown as { _context: CanvasRenderingContext2D }
-  )._context
-  ctx2d.imageSmoothingEnabled = true
-  ctx2d.imageSmoothingQuality = "high"
-
-  context.beginPath()
-  tracePathOrRect(context, width, height, squircleParams)
-  context.closePath()
-  if (squircleParams !== null) {
-    context.clip()
-  }
-
-  if (crop && crop.width > 0 && crop.height > 0) {
-    context.drawImage(
-      image,
-      crop.x,
-      crop.y,
-      crop.width,
-      crop.height,
-      0,
-      0,
-      width,
-      height,
-    )
-  } else {
-    context.drawImage(image, 0, 0, width, height)
-  }
-  context.restore()
-
-  if (borderParams !== null) {
-    context.save()
-    context.translate(borderParams.originX, borderParams.originY)
-    context.beginPath()
-    tracePathOrRect(
-      context,
-      borderParams.width,
-      borderParams.height,
-      borderParams.params,
-    )
-    context.closePath()
-    context.lineWidth = borderParams.strokeWidth
-    context.strokeStyle = borderParams.color
-    context.lineJoin = "round"
-    context.stroke()
-    context.restore()
   }
 }

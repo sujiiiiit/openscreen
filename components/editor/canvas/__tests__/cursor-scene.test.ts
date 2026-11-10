@@ -9,8 +9,7 @@ import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
 import {
   buildCursorTrack,
   computeCursorBlur,
-  CURSOR_MOTION_ROTATION_DIRECTION_MAX_DEG,
-  CURSOR_MOTION_ROTATION_MAX_DEG,
+  CURSOR_MOTION_ROTATION_SIDE_LEAN_MAX_DEG,
   placeCursor,
   type CursorVideoGeometry,
 } from "../cursor-scene"
@@ -155,7 +154,7 @@ describe("placeCursor motion rotation", () => {
     })!
 
     expect(placement.motionRotationDeg).toBeGreaterThan(0)
-    expect(placement.rotation).toBeCloseTo(CURSOR_MOTION_ROTATION_MAX_DEG, 4)
+    expect(placement.rotation).toBeCloseTo(CURSOR_MOTION_ROTATION_SIDE_LEAN_MAX_DEG, 4)
   })
 
   it("tilts counter-clockwise for leftward motion", () => {
@@ -165,7 +164,7 @@ describe("placeCursor motion rotation", () => {
     })!
 
     expect(placement.motionRotationDeg).toBeLessThan(0)
-    expect(placement.rotation).toBeCloseTo(-CURSOR_MOTION_ROTATION_MAX_DEG, 4)
+    expect(placement.rotation).toBeCloseTo(-CURSOR_MOTION_ROTATION_SIDE_LEAN_MAX_DEG, 4)
   })
 
   it("does not tilt for vertical-only motion", () => {
@@ -177,53 +176,22 @@ describe("placeCursor motion rotation", () => {
     expect(placement.motionRotationDeg).toBeCloseTo(0, 6)
   })
 
-  it("direction-rotation mode responds to vertical motion", () => {
-    const movingDown = track([100, 100, 100], [0, 50, 100])
-    const placement = placeCursor(movingDown, geometry(), 0.1, {
-      motionRotation: 1,
-      motionRotationMode: "rotation",
-    })!
-
-    expect(Math.abs(placement.motionRotationDeg)).toBeGreaterThan(1)
-    expect(Math.abs(placement.motionRotationDeg)).toBeLessThanOrEqual(
-      CURSOR_MOTION_ROTATION_DIRECTION_MAX_DEG
-    )
-  })
-
-  it("direction-rotation mode follows the full travel vector", () => {
-    const placement = placeCursor(movingRight, geometry(), 0.1, {
-      motionRotation: 1,
-      motionRotationMode: "rotation",
-    })!
-
-    expect(placement.motionRotationDeg).toBeGreaterThan(
-      CURSOR_MOTION_ROTATION_MAX_DEG
-    )
-    expect(placement.motionRotationDeg).toBeLessThanOrEqual(
-      CURSOR_MOTION_ROTATION_DIRECTION_MAX_DEG
-    )
-  })
-
   it("uses the cursor smoothing preset to soften rotation changes", () => {
     const turning = track([0, 100, 100, 100, 100], [50, 50, 150, 250, 350], 100)
     const rapidBefore = placeCursor(turning, geometry(), 0.1, {
       motionRotation: 1,
-      motionRotationMode: "rotation",
       smoothingMode: "rapid",
     })!.motionRotationDeg
     const rapidAfter = placeCursor(turning, geometry(), 0.16, {
       motionRotation: 1,
-      motionRotationMode: "rotation",
       smoothingMode: "rapid",
     })!.motionRotationDeg
     const slowBefore = placeCursor(turning, geometry(), 0.1, {
       motionRotation: 1,
-      motionRotationMode: "rotation",
       smoothingMode: "slow",
     })!.motionRotationDeg
     const slowAfter = placeCursor(turning, geometry(), 0.16, {
       motionRotation: 1,
-      motionRotationMode: "rotation",
       smoothingMode: "slow",
     })!.motionRotationDeg
 
@@ -235,7 +203,6 @@ describe("placeCursor motion rotation", () => {
   it("can be disabled with a zero amount", () => {
     const placement = placeCursor(movingRight, geometry(), 0.1, {
       motionRotation: 0,
-      motionRotationMode: "rotation",
     })!
 
     expect(placement.motionRotationDeg).toBe(0)
@@ -264,7 +231,7 @@ describe("placeCursor motion rotation", () => {
     })!
 
     expect(placement.motionRotationDeg).toBeCloseTo(
-      CURSOR_MOTION_ROTATION_MAX_DEG * 0.5,
+      CURSOR_MOTION_ROTATION_SIDE_LEAN_MAX_DEG * 0.5,
       4
     )
   })
@@ -376,6 +343,34 @@ describe("cursor click scale", () => {
     expect(
       placeCursor(held, geometry(), 0.3, { clickPressScale: 1 })!.clickScale
     ).toBe(1)
+  })
+
+  it("presses in faster on rapid than on slow smoothing", () => {
+    const held = track([100, 100, 100, 100, 100], [50, 50, 50, 50, 50], 100, [
+      { t: 100, type: "down" },
+    ])
+    // 50 ms after the down: rapid (45 ms press) has reached the target while
+    // slow (95 ms press) is still easing in, so rapid is shrunk further.
+    const rapid = placeCursor(held, geometry(), 0.15, {
+      smoothingMode: "rapid",
+    })!.clickScale
+    const slow = placeCursor(held, geometry(), 0.15, {
+      smoothingMode: "slow",
+    })!.clickScale
+    expect(rapid).toBeLessThan(slow)
+  })
+
+  it("releases sooner on rapid than on slow smoothing", () => {
+    // `clicked` releases at 150 ms; 200 ms later rapid (150 ms release) has
+    // fully settled back to 1 while slow (300 ms release) is still rebounding.
+    const rapid = placeCursor(clicked, geometry(), 0.35, {
+      smoothingMode: "rapid",
+    })!.clickScale
+    const slow = placeCursor(clicked, geometry(), 0.35, {
+      smoothingMode: "slow",
+    })!.clickScale
+    expect(rapid).toBe(1)
+    expect(slow).not.toBe(1)
   })
 })
 

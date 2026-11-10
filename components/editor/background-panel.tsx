@@ -1,6 +1,6 @@
 "use client"
 
-import { useId, useState } from "react"
+import { useId } from "react"
 
 import { Button } from "@/components/ui/button"
 import { Slider } from "@/components/ui/slider"
@@ -28,13 +28,12 @@ const BACKGROUND_TABS = [
 
 const BACKGROUND_BLUR_DEFAULT = 0
 const BACKGROUND_BLUR_MAX = 200
-const GRAIN_DEFAULT = 0
-const GRAIN_MAX = 100
 const PADDING_DEFAULT = 0
 const PADDING_MAX = 500
 
 type AdjustmentRowProps = {
   label: string
+  description: string
   value: number
   onValueChange: (value: number) => void
   onReset: () => void
@@ -47,6 +46,7 @@ type AdjustmentRowProps = {
 
 function AdjustmentRow({
   label,
+  description,
   value,
   onValueChange,
   onReset,
@@ -58,14 +58,15 @@ function AdjustmentRow({
 }: AdjustmentRowProps) {
   return (
     <div className="w-full space-y-2">
-      <h4
+      <div
         className={cn(
-          "text-xs font-semibold transition-opacity select-none",
+          "space-y-1 transition-opacity select-none",
           disabled && "opacity-50"
         )}
       >
-        {label}
-      </h4>
+        <h4 className="text-xs font-semibold">{label}</h4>
+        <p className="text-xs text-muted-foreground">{description}</p>
+      </div>
       <div className="flex w-full items-center gap-3">
         <Slider
           size="sm"
@@ -98,9 +99,16 @@ export function BackgroundPanel() {
   const switchId = useId()
   const { artboard } = useEditorCanvasArtboard()
   const { videos } = useEditorCanvasMedia()
-  const { setArtboardBackground, setArtboardGrain, setArtboardPadding } =
-    useEditorCanvasActions()
-  const [enabled, setEnabled] = useState(true)
+  const {
+    setArtboardBackground,
+    setArtboardBackgroundEnabled,
+    setArtboardPadding,
+  } = useEditorCanvasActions()
+  // Master switch — persisted on the artboard (project-level). When off, the
+  // preview/export paint no background and every control below disables; the
+  // stored background/padding values are kept, not reset (mirrors the
+  // Cursor tab's custom-rendering switch).
+  const enabled = artboard.backgroundEnabled
 
   const wallpaperBackground =
     artboard.background?.type === "wallpaper" ? artboard.background : null
@@ -112,10 +120,6 @@ export function BackgroundPanel() {
   const blurStrength = Math.max(
     BACKGROUND_BLUR_DEFAULT,
     Math.min(BACKGROUND_BLUR_MAX, wallpaperBackground?.blurRadius ?? 0)
-  )
-  const grainStrength = Math.max(
-    GRAIN_DEFAULT,
-    Math.min(GRAIN_MAX, artboard.grain)
   )
   const paddingStrength = Math.max(
     PADDING_DEFAULT,
@@ -135,16 +139,12 @@ export function BackgroundPanel() {
     })
   }
 
-  const applyGrain = (next: number) => {
-    setArtboardGrain(Math.max(GRAIN_DEFAULT, Math.min(GRAIN_MAX, next)))
-  }
-
   const applyPadding = (next: number) => {
     setArtboardPadding(Math.max(PADDING_DEFAULT, Math.min(PADDING_MAX, next)))
   }
 
   return (
-    <section className="flex w-full flex-col gap-4 pb-6">
+    <section className="flex w-full flex-col gap-6 pb-6">
       <header className="space-y-2">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold select-none">Background</h3>
@@ -152,7 +152,8 @@ export function BackgroundPanel() {
             id={switchId}
             size="sm"
             checked={enabled}
-            onCheckedChange={setEnabled}
+            onCheckedChange={setArtboardBackgroundEnabled}
+            aria-label="Background rendering"
           />
         </div>
         <p className="text-xs text-muted-foreground select-none">
@@ -160,56 +161,69 @@ export function BackgroundPanel() {
           surface.
         </p>
       </header>
-      <Tabs defaultValue="wallpaper">
-        <TabsList aria-label="Background style" className="justify-start gap-1">
-          {BACKGROUND_TABS.map((tab) => (
-            <TabsTrigger key={tab.value} value={tab.value}>
-              {tab.label}
-            </TabsTrigger>
-          ))}
-        </TabsList>
-        <TabsContents className="min-h-24">
-          <TabsContent value="wallpaper">
-            <WallpaperGrid />
-          </TabsContent>
+      {/* The grids manage their own provider writes, so the off state dims +
+          blocks the whole block instead of threading a disabled prop down. */}
+      <div
+        className={cn(
+          "transition-opacity",
+          !enabled && "pointer-events-none opacity-50 select-none"
+        )}
+        aria-disabled={!enabled}
+      >
+        <Tabs defaultValue="wallpaper">
+          <TabsList
+            aria-label="Background style"
+            className="justify-start gap-1"
+          >
+            {BACKGROUND_TABS.map((tab) => (
+              <TabsTrigger key={tab.value} value={tab.value}>
+                {tab.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          <TabsContents className="min-h-24">
+            <TabsContent value="wallpaper">
+              <WallpaperGrid />
+            </TabsContent>
 
-          <TabsContent value="color">
-            <ColorGrid />
-          </TabsContent>
-        </TabsContents>
-      </Tabs>
-      <div className="flex flex-col gap-5">
+            <TabsContent value="color" className="pb-6">
+              <ColorGrid />
+            </TabsContent>
+          </TabsContents>
+        </Tabs>
+      </div>
+      <div className="flex flex-col gap-9">
         <AdjustmentRow
           label="Padding"
+          description={
+            hasScreenVideo
+              ? "Space around the recording, revealing the background."
+              : "Space around the recording — needs a screen recording."
+          }
           value={paddingStrength}
           onValueChange={applyPadding}
           onReset={() => applyPadding(PADDING_DEFAULT)}
           min={0}
           max={PADDING_MAX}
-          disabled={!hasScreenVideo}
+          disabled={!enabled || !hasScreenVideo}
           showValueTooltip
           formatValue={(v) => `${Math.round(v)}px`}
         />
         <AdjustmentRow
           label="Background blur"
+          description={
+            isWallpaperActive
+              ? "Blurs the wallpaper behind the recording."
+              : "Blurs the wallpaper — pick a wallpaper first."
+          }
           value={blurStrength}
           onValueChange={applyBlur}
           onReset={() => applyBlur(BACKGROUND_BLUR_DEFAULT)}
           min={0}
           max={BACKGROUND_BLUR_MAX}
-          disabled={!isWallpaperActive}
+          disabled={!enabled || !isWallpaperActive}
           showValueTooltip
           formatValue={(v) => `${Math.round(v)}px`}
-        />
-        <AdjustmentRow
-          label="Grain"
-          value={grainStrength}
-          onValueChange={applyGrain}
-          onReset={() => applyGrain(GRAIN_DEFAULT)}
-          min={0}
-          max={GRAIN_MAX}
-          showValueTooltip
-          formatValue={(v) => `${Math.round(v)}`}
         />
       </div>
     </section>

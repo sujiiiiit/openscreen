@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useEffect, useMemo, useState } from "react"
+import React, { useCallback, useEffect, useMemo, useState } from "react"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -8,6 +8,15 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { Switch } from "@/components/ui/switch"
+import {
+  getAutoplayOnOpenEnabled,
+  setAutoplayOnOpenEnabled,
+} from "@/components/editor/canvas/autoplay-preference"
+import {
+  getSidebarTabPersistEnabled,
+  setSidebarTabPersistEnabled,
+} from "@/components/editor/sidebar/tab-preference"
 import { DRAG, NO_DRAG } from "@/lib/window-drag"
 import { cn } from "@/lib/utils"
 import type { RecordingQualitySettings } from "@/types/api"
@@ -177,6 +186,28 @@ export default function RecordingSettingsPage() {
   const [settings, setSettings] = useState<RecordingQualitySettings>(DEFAULT_SETTINGS)
   const [loading, setLoading] = useState(true)
 
+  // Editor preferences live in localStorage (shared across windows — the
+  // settings window loads the same origin as the editor). SSR has no
+  // localStorage, so the first client render must match the prerendered
+  // default; the persisted values are synced in after hydration.
+  const [autoplayEnabled, setAutoplayEnabled] = useState(true)
+  const [tabPersistEnabled, setTabPersistEnabled] = useState(true)
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot post-hydration sync from localStorage
+    setAutoplayEnabled(getAutoplayOnOpenEnabled())
+    setTabPersistEnabled(getSidebarTabPersistEnabled())
+  }, [])
+  // Stable handler identities so the Switch rows never re-render from a
+  // recreated callback prop (only from their own checked state).
+  const applyAutoplay = useCallback((value: boolean) => {
+    setAutoplayEnabled(value)
+    setAutoplayOnOpenEnabled(value)
+  }, [])
+  const applyTabPersist = useCallback((value: boolean) => {
+    setTabPersistEnabled(value)
+    setSidebarTabPersistEnabled(value)
+  }, [])
+
   useEffect(() => {
     if (!window.api?.recorder?.getRecordingSettings) {
       // Renderer mounted outside Electron (tests, storybook). Keep defaults.
@@ -276,7 +307,7 @@ export default function RecordingSettingsPage() {
         ) : (
           <>
             <section>
-             
+              <SectionTitle>Recording</SectionTitle>
               <SettingRow label="Codec">
                 <Select
                   value={settings.videoCodec}
@@ -326,7 +357,37 @@ export default function RecordingSettingsPage() {
               </SettingRow>
             </section>
 
-           
+            <section>
+              <SectionTitle>Editor</SectionTitle>
+              <SettingRow
+                label="Autoplay on open"
+                description={
+                  autoplayEnabled
+                    ? "Starts playback when a project opens."
+                    : "Projects open paused."
+                }
+              >
+                <Switch
+                  checked={autoplayEnabled}
+                  onCheckedChange={applyAutoplay}
+                  aria-label="Autoplay on open"
+                />
+              </SettingRow>
+              <SettingRow
+                label="Remember sidebar tab"
+                description={
+                  tabPersistEnabled
+                    ? "Reopens the last sidebar tab on launch."
+                    : "Sidebar opens on the Background tab each launch."
+                }
+              >
+                <Switch
+                  checked={tabPersistEnabled}
+                  onCheckedChange={applyTabPersist}
+                  aria-label="Remember sidebar tab"
+                />
+              </SettingRow>
+            </section>
           </>
         )}
       </div>

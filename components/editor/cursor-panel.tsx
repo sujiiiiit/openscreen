@@ -2,7 +2,6 @@
 
 import { useEffect, useId, useRef, useState } from "react"
 import Image from "next/image"
-import { motion } from "motion/react"
 import { Squircle } from "@squircle-js/react"
 import { HugeiconsIcon } from "@hugeicons/react"
 import { ArrowDown01Icon } from "@hugeicons/core-free-icons"
@@ -15,10 +14,8 @@ import {
   CURSOR_CLICK_PRESS_SCALE_DEFAULT,
   CURSOR_CLICK_PRESS_SCALE_MAX,
   CURSOR_CLICK_PRESS_SCALE_MIN,
-  CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   CURSOR_MOTION_BLUR_DEFAULT,
   CURSOR_MOTION_ROTATION_DEFAULT,
-  CURSOR_MOTION_ROTATION_MODE_DEFAULT,
   CURSOR_POINTER_CURSOR_ID,
   CURSOR_SET_DEFAULT,
   CURSOR_SMOOTHING_MODE_DEFAULT,
@@ -35,13 +32,14 @@ import type {
 import {
   useEditorCanvasActions,
   useEditorCanvasArtboard,
+  useEditorCanvasCursorData,
   useEditorCanvasMedia,
 } from "@/components/editor/canvas/provider"
-import type {
-  CursorMotionBlurBackend,
-  CursorMotionRotationMode,
-  CursorSmoothingMode,
-} from "@/types/editor-canvas"
+import {
+  SelectionPills,
+  type SelectionPillOption,
+} from "@/components/editor/selection-pills"
+import type { CursorSmoothingMode } from "@/types/editor-canvas"
 
 // The slider works in whole percent (100% = the recorded-accurate minimum) and
 // converts to the stored multiplier. Bounds come from cursor-scene so the
@@ -63,46 +61,9 @@ const CLICK_DOWNSCALE_DEFAULT_PCT = Math.round(
 // Motion blur is a single 0–100% intensity; the blur velocity is derived from
 // cursor speed (see cursor-scene.ts `computeCursorBlur`).
 const BLUR_DEFAULT_PCT = Math.round(CURSOR_MOTION_BLUR_DEFAULT * 100)
-// Motion rotation is exposed as one checkpoint slider:
-// 0 = none, 100 = full side lean, 200 = full direction rotation. The persisted
-// state stays split into mode + amount so old projects keep round-tripping.
-const MOTION_ROTATION_DEFAULT_PCT = Math.round(
-  CURSOR_MOTION_ROTATION_DEFAULT * 100
-)
-const MOTION_SLIDER_NONE_VALUE = 0
-const MOTION_SLIDER_SIDE_LEAN_VALUE = 100
-const MOTION_SLIDER_ROTATION_VALUE = 200
-const MOTION_SLIDER_SNAP_RADIUS = 5
-const MOTION_SLIDER_THUMB_WIDTH_PX = 16
-const MOTION_SLIDER_LABELS: Record<
-  "none" | CursorMotionRotationMode,
-  string
-> = {
-  none: "None",
-  "side-lean": "Side lean",
-  rotation: "Rotation",
-}
-const MOTION_SLIDER_CHECKPOINTS: Array<{
-  key: "none" | CursorMotionRotationMode
-  value: number
-}> = [
-  { key: "none", value: MOTION_SLIDER_NONE_VALUE },
-  { key: "side-lean", value: MOTION_SLIDER_SIDE_LEAN_VALUE },
-  { key: "rotation", value: MOTION_SLIDER_ROTATION_VALUE },
-]
-const motionSliderCheckpointPosition = (value: number) => {
-  const pct = (value / MOTION_SLIDER_ROTATION_VALUE) * 100
-  const offset =
-    MOTION_SLIDER_THUMB_WIDTH_PX / 2 -
-    (value / MOTION_SLIDER_ROTATION_VALUE) * MOTION_SLIDER_THUMB_WIDTH_PX
-  return offset < 0
-    ? `calc(${pct}% - ${Math.abs(offset)}px)`
-    : `calc(${pct}% + ${offset}px)`
-}
-const BACKENDS: Array<{ value: CursorMotionBlurBackend; label: string }> = [
-  { value: "gpu", label: "GPU" },
-  { value: "cpu", label: "CPU" },
-]
+// Side lean is one plain 0–100% intensity slider (the direction-follow
+// "rotation" mode was removed — side lean is the only cursor motion behavior).
+const SIDE_LEAN_DEFAULT_PCT = Math.round(CURSOR_MOTION_ROTATION_DEFAULT * 100)
 const SMOOTHING_LABELS: Record<CursorSmoothingMode, string> = {
   rapid: "Rapid",
   quick: "Quick",
@@ -110,13 +71,7 @@ const SMOOTHING_LABELS: Record<CursorSmoothingMode, string> = {
   slow: "Slow",
 }
 
-type CursorSelectionOption<TValue extends string> = {
-  value: TValue
-  label: string
-}
-type CursorSelectionPillSize = "default" | "xs"
-
-const SMOOTHING_OPTIONS: Array<CursorSelectionOption<CursorSmoothingMode>> =
+const SMOOTHING_OPTIONS: Array<SelectionPillOption<CursorSmoothingMode>> =
   CURSOR_SMOOTHING_MODES.map((mode) => ({
     value: mode,
     label: SMOOTHING_LABELS[mode],
@@ -167,129 +122,6 @@ const CURSOR_STYLE_OPTIONS = [...cursorSetIds]
 function clampUnit(value: number): number {
   if (!Number.isFinite(value)) return 0
   return Math.min(1, Math.max(0, value))
-}
-
-function motionSliderValueFromSettings(
-  amount: number,
-  mode: CursorMotionRotationMode
-): number {
-  const clampedAmount = clampUnit(amount)
-  if (clampedAmount <= 0) return MOTION_SLIDER_NONE_VALUE
-  const amountPct = clampedAmount * 100
-  return mode === "rotation"
-    ? MOTION_SLIDER_SIDE_LEAN_VALUE + amountPct
-    : amountPct
-}
-
-function motionSettingsFromSliderValue(value: number): {
-  amount: number
-  mode: CursorMotionRotationMode
-} {
-  const clamped = Math.min(
-    MOTION_SLIDER_ROTATION_VALUE,
-    Math.max(MOTION_SLIDER_NONE_VALUE, Number.isFinite(value) ? value : 0)
-  )
-  if (clamped <= MOTION_SLIDER_SIDE_LEAN_VALUE) {
-    return { amount: clamped / 100, mode: "side-lean" }
-  }
-  return {
-    amount: (clamped - MOTION_SLIDER_SIDE_LEAN_VALUE) / 100,
-    mode: "rotation",
-  }
-}
-
-function snapMotionSliderValue(value: number): number {
-  const clamped = Math.min(
-    MOTION_SLIDER_ROTATION_VALUE,
-    Math.max(MOTION_SLIDER_NONE_VALUE, Number.isFinite(value) ? value : 0)
-  )
-  const nearest = MOTION_SLIDER_CHECKPOINTS.reduce(
-    (closest, checkpoint) =>
-      Math.abs(checkpoint.value - clamped) < Math.abs(closest - clamped)
-        ? checkpoint.value
-        : closest,
-    MOTION_SLIDER_NONE_VALUE
-  )
-  return Math.abs(nearest - clamped) <= MOTION_SLIDER_SNAP_RADIUS
-    ? nearest
-    : clamped
-}
-
-function motionSliderLabelForValue(value: number): string {
-  const { amount, mode } = motionSettingsFromSliderValue(value)
-  if (amount <= 0) return MOTION_SLIDER_LABELS.none
-  return `${MOTION_SLIDER_LABELS[mode]} ${Math.round(amount * 100)}%`
-}
-
-function activeMotionCheckpoint(value: number): "none" | CursorMotionRotationMode {
-  const { amount, mode } = motionSettingsFromSliderValue(value)
-  return amount <= 0 ? "none" : mode
-}
-
-const SELECTION_PILL_BUTTON_CLASS =
-  "relative inline-flex shrink-0 items-center justify-center rounded-full whitespace-nowrap transition-colors outline-none select-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50"
-const SELECTION_PILL_SIZE_CLASS: Record<CursorSelectionPillSize, string> = {
-  default: "px-4 py-2 text-sm",
-  xs: "h-6 px-2.5 text-xs",
-}
-
-function CursorSelectionPills<TValue extends string>({
-  ariaLabel,
-  disabled,
-  options,
-  size = "default",
-  value,
-  onValueChange,
-}: {
-  ariaLabel: string
-  disabled: boolean
-  options: ReadonlyArray<CursorSelectionOption<TValue>>
-  size?: CursorSelectionPillSize
-  value: TValue
-  onValueChange: (value: TValue) => void
-}) {
-  const indicatorLayoutId = `${useId()}-indicator`
-
-  return (
-    <div
-      className="flex min-w-0 flex-1 flex-nowrap items-center gap-1"
-      role="group"
-      aria-label={ariaLabel}
-    >
-      {options.map((option) => {
-        const selected = value === option.value
-        return (
-          <motion.button
-            key={option.value}
-            type="button"
-            className={cn(
-              SELECTION_PILL_BUTTON_CLASS,
-              SELECTION_PILL_SIZE_CLASS[size]
-            )}
-            aria-pressed={selected}
-            disabled={disabled}
-            onClick={() => onValueChange(option.value)}
-          >
-            {selected && (
-              <motion.span
-                layoutId={indicatorLayoutId}
-                className="absolute inset-0 rounded-full bg-primary-active-bg"
-                transition={{ type: "tween", duration: 0.2 }}
-              />
-            )}
-            <span
-              className={cn(
-                "relative z-10",
-                selected ? "text-primary-active" : "text-primary"
-              )}
-            >
-              {option.label}
-            </span>
-          </motion.button>
-        )
-      })}
-    </div>
-  )
 }
 
 function CursorStylePicker({
@@ -464,6 +296,7 @@ function CursorStylePicker({
 export function CursorPanel() {
   const { artboard } = useEditorCanvasArtboard()
   const { videos } = useEditorCanvasMedia()
+  const { cursorTrackUnavailable } = useEditorCanvasCursorData()
   const {
     setCursorCustomRenderingEnabled,
     setCursorSetId,
@@ -471,13 +304,13 @@ export function CursorPanel() {
     setCursorSmoothingMode,
     setCursorClickPressScale,
     setCursorAlwaysUsePointer,
+    setCursorTypeStabilization,
     setCursorMotionRotation,
-    setCursorMotionRotationMode,
     setCursorMotionBlur,
-    setCursorMotionBlurBackend,
   } = useEditorCanvasActions()
   const customRenderingSwitchId = useId()
   const alwaysUsePointerSwitchId = useId()
+  const typeStabilizationSwitchId = useId()
 
   // The recorded cursor is drawn over the screen recording, so the control is
   // meaningless without one — disable it rather than move a slider that does
@@ -502,30 +335,10 @@ export function CursorPanel() {
   const applyBlurPct = (pct: number) => {
     setCursorMotionBlur(pct / 100)
   }
-  const motionRotationAmount = clampUnit(artboard.cursorMotionRotation)
-  const motionRotationMode = artboard.cursorMotionRotationMode
-  const motionSliderValue = motionSliderValueFromSettings(
-    motionRotationAmount,
-    motionRotationMode
-  )
-  const isMotionRotationDefault =
-    Math.round(motionSliderValue) === MOTION_ROTATION_DEFAULT_PCT &&
-    motionRotationMode === CURSOR_MOTION_ROTATION_MODE_DEFAULT
-  const applyMotionSliderValue = (value: number, snap = false) => {
-    const settings = motionSettingsFromSliderValue(
-      snap ? snapMotionSliderValue(value) : value
-    )
-    if (settings.mode !== motionRotationMode) {
-      setCursorMotionRotationMode(settings.mode)
-    }
-    if (Math.abs(settings.amount - motionRotationAmount) > 0.0001) {
-      setCursorMotionRotation(settings.amount)
-    }
-  }
-  const motionCheckpoint = activeMotionCheckpoint(motionSliderValue)
-  const resetMotionRotation = () => {
-    setCursorMotionRotation(CURSOR_MOTION_ROTATION_DEFAULT)
-    setCursorMotionRotationMode(CURSOR_MOTION_ROTATION_MODE_DEFAULT)
+  const sideLeanPct = Math.round(clampUnit(artboard.cursorMotionRotation) * 100)
+  const isSideLeanDefault = sideLeanPct === SIDE_LEAN_DEFAULT_PCT
+  const applySideLeanPct = (pct: number) => {
+    setCursorMotionRotation(Math.min(100, Math.max(0, pct)) / 100)
   }
   const smoothingMode = artboard.cursorSmoothingMode
   const isSmoothingDefault = smoothingMode === CURSOR_SMOOTHING_MODE_DEFAULT
@@ -542,15 +355,14 @@ export function CursorPanel() {
   const applyClickDownscalePct = (pct: number) => {
     setCursorClickPressScale(1 - pct / 100)
   }
-  const backend = artboard.cursorMotionBlurBackend
-  const isBackendDefault = backend === CURSOR_MOTION_BLUR_BACKEND_DEFAULT
   const customRenderingEnabled = artboard.cursorCustomRenderingEnabled
   const cursorControlsDisabled = !hasScreenVideo || !customRenderingEnabled
   const alwaysUsePointer = artboard.cursorAlwaysUsePointer
+  const typeStabilization = artboard.cursorTypeStabilization
   const cursorSetId = artboard.cursorSetId
 
   return (
-    <section className="flex w-full flex-col gap-4 pb-6">
+    <section className="flex w-full flex-col gap-6 pb-6">
       <header className="space-y-2">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold select-none">Cursor</h3>
@@ -566,313 +378,255 @@ export function CursorPanel() {
         <p className="text-xs text-muted-foreground select-none">
           Adjust how the cursor appears in your recording.
         </p>
+        {cursorTrackUnavailable && hasScreenVideo && customRenderingEnabled ? (
+          <p className="text-xs text-destructive select-none">
+            Cursor data for this recording could not be loaded — the custom
+            cursor won&apos;t be shown in the preview or the exported video.
+          </p>
+        ) : null}
       </header>
 
-      <div className="flex w-full items-center justify-between gap-3">
-        <label
-          htmlFor={alwaysUsePointerSwitchId}
-          className={cn(
-            "text-xs font-semibold transition-opacity select-none",
-            cursorControlsDisabled && "opacity-50"
-          )}
-        >
-          Always use pointer
-        </label>
-        <Switch
-          id={alwaysUsePointerSwitchId}
-          size="sm"
-          checked={alwaysUsePointer}
-          onCheckedChange={setCursorAlwaysUsePointer}
-          disabled={cursorControlsDisabled}
-        />
-      </div>
-
-      <div className="w-full space-y-2">
-        <div className="flex items-center">
-          <h4 className="text-xs font-semibold transition-opacity select-none">
-            Cursor style
-          </h4>
-        </div>
-        <CursorStylePicker
-          disabled={false}
-          value={cursorSetId}
-          onValueChange={setCursorSetId}
-        />
-      </div>
-
-      <div className="w-full space-y-2">
-        <div className="flex items-center">
-          <h4
-            className={cn(
-              "text-xs font-semibold transition-opacity select-none",
-              cursorControlsDisabled && "opacity-50"
-            )}
-          >
-            Size
-          </h4>
-        </div>
-        <div className="flex w-full items-center gap-3">
-          <Slider
-            size="sm"
-            value={[sizePct]}
-            onValueChange={(values) =>
-              applyPct(Array.isArray(values) ? values[0] : values)
-            }
-            min={SIZE_MIN_PCT}
-            max={SIZE_MAX_PCT}
-            disabled={cursorControlsDisabled}
-            showValueTooltip
-            formatValue={(v) => `${Math.round(v)}%`}
-            className="flex-1"
+      <div className="flex w-full flex-col gap-9">
+        <div className="w-full space-y-4">
+          <div className="flex items-center">
+            <h4 className="text-xs font-semibold transition-opacity select-none">
+              Cursor style
+            </h4>
+          </div>
+          <CursorStylePicker
+            disabled={false}
+            value={cursorSetId}
+            onValueChange={setCursorSetId}
           />
-          <Button
-            type="button"
-            variant="link"
-            size="sm"
-            onClick={() => applyPct(SIZE_DEFAULT_PCT)}
-            disabled={cursorControlsDisabled || isDefault}
-          >
-            Reset
-          </Button>
         </div>
-      </div>
 
-      <div className="w-full space-y-2">
-        <div className="flex items-center">
-          <h4
+        <div className="flex w-full items-center justify-between gap-3">
+          <label
+            htmlFor={alwaysUsePointerSwitchId}
             className={cn(
               "text-xs font-semibold transition-opacity select-none",
               cursorControlsDisabled && "opacity-50"
             )}
           >
-            Click downscale
-          </h4>
-        </div>
-        <div className="flex w-full items-center gap-3">
-          <Slider
+            Always use pointer
+          </label>
+          <Switch
+            id={alwaysUsePointerSwitchId}
             size="sm"
-            value={[clickDownscalePct]}
-            onValueChange={(values) =>
-              applyClickDownscalePct(Array.isArray(values) ? values[0] : values)
-            }
-            min={CLICK_DOWNSCALE_MIN_PCT}
-            max={CLICK_DOWNSCALE_MAX_PCT}
+            checked={alwaysUsePointer}
+            onCheckedChange={setCursorAlwaysUsePointer}
             disabled={cursorControlsDisabled}
-            showValueTooltip
-            formatValue={(v) => `${Math.round(v)}%`}
-            className="flex-1"
           />
-          <Button
-            type="button"
-            variant="link"
-            size="sm"
-            onClick={() => applyClickDownscalePct(CLICK_DOWNSCALE_DEFAULT_PCT)}
-            disabled={cursorControlsDisabled || isClickDownscaleDefault}
-          >
-            Reset
-          </Button>
         </div>
-      </div>
 
-      <div className="w-full space-y-2">
-        <div className="flex items-center">
-          <h4
+        <div className="flex w-full items-center justify-between gap-3">
+          <label
+            htmlFor={typeStabilizationSwitchId}
             className={cn(
               "text-xs font-semibold transition-opacity select-none",
-              cursorControlsDisabled && "opacity-50"
+              (cursorControlsDisabled || alwaysUsePointer) && "opacity-50"
             )}
           >
-            Smoothing
-          </h4>
-        </div>
-        <div className="flex w-full items-center gap-2">
-          <CursorSelectionPills
-            ariaLabel="Cursor smoothing"
-            disabled={cursorControlsDisabled}
-            options={SMOOTHING_OPTIONS}
-            size="xs"
-            value={smoothingMode}
-            onValueChange={setCursorSmoothingMode}
-          />
-          <Button
-            type="button"
-            variant="link"
+            Stabilize cursor type
+          </label>
+          <Switch
+            id={typeStabilizationSwitchId}
             size="sm"
-            onClick={() =>
-              setCursorSmoothingMode(CURSOR_SMOOTHING_MODE_DEFAULT)
-            }
-            disabled={cursorControlsDisabled || isSmoothingDefault}
-          >
-            Reset
-          </Button>
+            checked={typeStabilization}
+            onCheckedChange={setCursorTypeStabilization}
+            disabled={cursorControlsDisabled || alwaysUsePointer}
+          />
         </div>
-      </div>
 
-      <div className="w-full space-y-2">
-        <div className="flex items-center">
-          <h4
-            className={cn(
-              "text-xs font-semibold transition-opacity select-none",
-              cursorControlsDisabled && "opacity-50"
-            )}
-          >
-            Motion
-          </h4>
-        </div>
-        <div className="flex w-full items-start gap-3">
-          <div className="min-w-0 flex-1 space-y-1.5">
-            <div className="relative pt-6 pb-1.5">
-              <div
-                className="pointer-events-none absolute inset-x-0 top-[1.5625rem] z-0 h-0"
-                aria-hidden="true"
-              >
-                {MOTION_SLIDER_CHECKPOINTS.map((checkpoint) => (
-                  <span
-                    key={checkpoint.key}
-                    className={cn(
-                      "absolute top-0 size-2 -translate-x-1/2 -translate-y-1/2 rounded-full ring-2 ring-background transition-colors",
-                      motionCheckpoint === checkpoint.key
-                        ? "bg-primary-active"
-                        : "bg-muted-foreground"
-                    )}
-                    style={{
-                      left: motionSliderCheckpointPosition(checkpoint.value),
-                    }}
-                  />
-                ))}
-              </div>
-              <Slider
-                size="sm"
-                value={[motionSliderValue]}
-                onValueChange={(values) =>
-                  applyMotionSliderValue(
-                    Array.isArray(values) ? values[0] : values
-                  )
-                }
-                onValueCommitted={(values) =>
-                  applyMotionSliderValue(
-                    Array.isArray(values) ? values[0] : values,
-                    true
-                  )
-                }
-                min={MOTION_SLIDER_NONE_VALUE}
-                max={MOTION_SLIDER_ROTATION_VALUE}
-                step={1}
-                disabled={cursorControlsDisabled}
-                showValueTooltip
-                formatValue={motionSliderLabelForValue}
-                aria-label="Cursor motion"
-                className="relative z-10 flex-1"
-              />
-            </div>
-            <div
+        <div className="w-full space-y-2">
+          <div className="flex items-center">
+            <h4
               className={cn(
-                "relative h-3 text-[10px] leading-none font-medium select-none",
+                "text-xs font-semibold transition-opacity select-none",
                 cursorControlsDisabled && "opacity-50"
               )}
             >
-              {MOTION_SLIDER_CHECKPOINTS.map((checkpoint, index) => (
-                <span
-                  key={checkpoint.key}
-                  className={cn(
-                    "absolute top-0 transition-colors",
-                    index === 0 && "-translate-x-0",
-                    index === 1 && "-translate-x-1/2",
-                    index === 2 && "-translate-x-full",
-                    motionCheckpoint === checkpoint.key
-                      ? "text-primary-active"
-                      : "text-muted-foreground"
-                  )}
-                  style={{
-                    left: motionSliderCheckpointPosition(checkpoint.value),
-                  }}
-                >
-                  {MOTION_SLIDER_LABELS[checkpoint.key]}
-                </span>
-              ))}
-            </div>
+              Size
+            </h4>
           </div>
-          <Button
-            type="button"
-            variant="link"
-            size="sm"
-            className="mt-4"
-            onClick={resetMotionRotation}
-            disabled={cursorControlsDisabled || isMotionRotationDefault}
-          >
-            Reset
-          </Button>
+          <div className="flex w-full items-center gap-3">
+            <Slider
+              size="sm"
+              value={[sizePct]}
+              onValueChange={(values) =>
+                applyPct(Array.isArray(values) ? values[0] : values)
+              }
+              min={SIZE_MIN_PCT}
+              max={SIZE_MAX_PCT}
+              disabled={cursorControlsDisabled}
+              showValueTooltip
+              formatValue={(v) => `${Math.round(v)}%`}
+              className="flex-1"
+            />
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              onClick={() => applyPct(SIZE_DEFAULT_PCT)}
+              disabled={cursorControlsDisabled || isDefault}
+            >
+              Reset
+            </Button>
+          </div>
         </div>
-      </div>
 
-      <div className="w-full space-y-2">
-        <div className="flex items-center">
-          <h4
+        <div className="w-full space-y-2">
+          <div
             className={cn(
-              "text-xs font-semibold transition-opacity select-none",
+              "space-y-1 transition-opacity select-none",
               cursorControlsDisabled && "opacity-50"
             )}
           >
-            Motion blur
-          </h4>
+            <h4 className="text-xs font-semibold">Smoothing</h4>
+            <p className="text-xs text-muted-foreground">
+              How quickly the cursor glides along the recorded path.
+            </p>
+          </div>
+          <div className="flex w-full items-center gap-2">
+            <SelectionPills
+              ariaLabel="Cursor smoothing"
+              disabled={cursorControlsDisabled}
+              options={SMOOTHING_OPTIONS}
+              size="xs"
+              value={smoothingMode}
+              onValueChange={setCursorSmoothingMode}
+            />
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              onClick={() =>
+                setCursorSmoothingMode(CURSOR_SMOOTHING_MODE_DEFAULT)
+              }
+              disabled={cursorControlsDisabled || isSmoothingDefault}
+            >
+              Reset
+            </Button>
+          </div>
         </div>
-        <div className="flex w-full items-center gap-3">
-          <Slider
-            size="sm"
-            value={[blurPct]}
-            onValueChange={(values) =>
-              applyBlurPct(Array.isArray(values) ? values[0] : values)
-            }
-            min={0}
-            max={100}
-            disabled={cursorControlsDisabled}
-            showValueTooltip
-            formatValue={(v) => `${Math.round(v)}%`}
-            className="flex-1"
-          />
-          <Button
-            type="button"
-            variant="link"
-            size="sm"
-            onClick={() => applyBlurPct(BLUR_DEFAULT_PCT)}
-            disabled={cursorControlsDisabled || isBlurDefault}
-          >
-            Reset
-          </Button>
-        </div>
-      </div>
 
-      <div className="w-full space-y-2">
-        <div className="flex items-center">
-          <h4
+        <div className="w-full space-y-2">
+          <div
             className={cn(
-              "text-xs font-semibold transition-opacity select-none",
+              "space-y-1 transition-opacity select-none",
               cursorControlsDisabled && "opacity-50"
             )}
           >
-            Blur renderer
-          </h4>
+            <h4 className="text-xs font-semibold">Click downscale</h4>
+            <p className="text-xs text-muted-foreground">
+              Shrinks the cursor on click for a press-down effect.
+            </p>
+          </div>
+          <div className="flex w-full items-center gap-3">
+            <Slider
+              size="sm"
+              value={[clickDownscalePct]}
+              onValueChange={(values) =>
+                applyClickDownscalePct(
+                  Array.isArray(values) ? values[0] : values
+                )
+              }
+              min={CLICK_DOWNSCALE_MIN_PCT}
+              max={CLICK_DOWNSCALE_MAX_PCT}
+              disabled={cursorControlsDisabled}
+              showValueTooltip
+              formatValue={(v) => `${Math.round(v)}%`}
+              className="flex-1"
+            />
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              onClick={() =>
+                applyClickDownscalePct(CLICK_DOWNSCALE_DEFAULT_PCT)
+              }
+              disabled={cursorControlsDisabled || isClickDownscaleDefault}
+            >
+              Reset
+            </Button>
+          </div>
         </div>
-        <div className="flex w-full items-center gap-2">
-          <CursorSelectionPills
-            ariaLabel="Cursor motion blur renderer"
-            disabled={cursorControlsDisabled}
-            options={BACKENDS}
-            size="xs"
-            value={backend}
-            onValueChange={setCursorMotionBlurBackend}
-          />
-          <Button
-            type="button"
-            variant="link"
-            size="sm"
-            onClick={() =>
-              setCursorMotionBlurBackend(CURSOR_MOTION_BLUR_BACKEND_DEFAULT)
-            }
-            disabled={cursorControlsDisabled || isBackendDefault}
+
+        <div className="w-full space-y-2">
+          <div
+            className={cn(
+              "space-y-1 transition-opacity select-none",
+              cursorControlsDisabled && "opacity-50"
+            )}
           >
-            Reset
-          </Button>
+            <h4 className="text-xs font-semibold">Side lean</h4>
+            <p className="text-xs text-muted-foreground">
+              Tilts the cursor sideways as it moves.
+            </p>
+          </div>
+          <div className="flex w-full items-center gap-3">
+            <Slider
+              size="sm"
+              value={[sideLeanPct]}
+              onValueChange={(values) =>
+                applySideLeanPct(Array.isArray(values) ? values[0] : values)
+              }
+              min={0}
+              max={100}
+              disabled={cursorControlsDisabled}
+              showValueTooltip
+              formatValue={(v) => `${Math.round(v)}%`}
+              aria-label="Cursor side lean"
+              className="flex-1"
+            />
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              onClick={() => applySideLeanPct(SIDE_LEAN_DEFAULT_PCT)}
+              disabled={cursorControlsDisabled || isSideLeanDefault}
+            >
+              Reset
+            </Button>
+          </div>
+        </div>
+
+        <div className="w-full space-y-2">
+          <div
+            className={cn(
+              "space-y-1 transition-opacity select-none",
+              cursorControlsDisabled && "opacity-50"
+            )}
+          >
+            <h4 className="text-xs font-semibold">Motion blur</h4>
+            <p className="text-xs text-muted-foreground">
+              Blurs the cursor during fast movement.
+            </p>
+          </div>
+          <div className="flex w-full items-center gap-3">
+            <Slider
+              size="sm"
+              value={[blurPct]}
+              onValueChange={(values) =>
+                applyBlurPct(Array.isArray(values) ? values[0] : values)
+              }
+              min={0}
+              max={100}
+              disabled={cursorControlsDisabled}
+              showValueTooltip
+              formatValue={(v) => `${Math.round(v)}%`}
+              className="flex-1"
+            />
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              onClick={() => applyBlurPct(BLUR_DEFAULT_PCT)}
+              disabled={cursorControlsDisabled || isBlurDefault}
+            >
+              Reset
+            </Button>
+          </div>
         </div>
       </div>
     </section>

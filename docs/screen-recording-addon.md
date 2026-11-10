@@ -1,6 +1,11 @@
 # Screen-Recording Addon
 
-The native macOS recording stack in `packages/mac-addon`. Tracks the **screen** path end to end: capture via ScreenCaptureKit, encoding via AVAssetWriter / VideoToolbox, writing one MOV / MP4 per session. The microphone and camera paths share the same `AVAssetWriter` but live in separate source files (`MicrophoneTrack.mm`, `CameraTrack.mm`). A separate **input path** (`InputTrack.mm`, `CursorTrack.mm`) records mouse / keystroke / cursor-shape metadata into Screen Studio-shaped sidecar JSON — see [Input capture](#input-capture-mouse--keystrokes--cursor).
+The native macOS recording stack in `packages/mac-addon`. Tracks the **screen** path end to end: capture via ScreenCaptureKit, encoding via AVAssetWriter / VideoToolbox, writing one MOV / MP4 per session. System audio and macOS 15+ microphone audio are muxed into the screen writer; the camera path (`CameraTrack.mm`) uses a separate AVCaptureSession + AVAssetWriter and writes `camera.mov`. A separate **input path** (`InputTrack.mm`, `CursorTrack.mm`) records mouse / keystroke / cursor-shape metadata into Screen Studio-shaped sidecar JSON - see [Input capture](#input-capture-mouse--keystrokes--cursor).
+
+For the full recorder audit, see:
+
+- [Recorder Feature Map](recorder-feature-map.md) - feature, file, storage, and macOS compatibility map.
+- [Recorder Case Map](recorder-case-map.md) - handled, partially handled, and unhandled failure cases.
 
 > Whenever you touch the screen path (`ScreenTrack.mm`, `RecorderSession.mm`, `Common.h`, `Bindings.mm`, `binding.gyp`, the recorder settings IPC, or the Recording Quality window) or the input path (`InputTrack.mm`, `CursorTrack.mm`, the input-capture options, or the Input Monitoring permission), update this doc in the same change. See `CLAUDE.md`.
 
@@ -19,12 +24,12 @@ SCStreamConfig    ─┘                                  (one AVAssetWriter per
 
 ## Settings surface
 
-Exposed through `StartRecordingOptions` (see `packages/mac-addon/index.d.ts`) and stored per-user in `<userData>/recording-quality.json` by the Electron main process. The Recording Quality window (`app/recording-settings/page.tsx`) is the user-facing entry point; the menu item lives in the recorder bar's settings menu, just below "Don't record cursor".
+Exposed through `StartRecordingOptions` (see `packages/mac-addon/index.d.ts`) and stored per-user in `<userData>/recording-quality.json` by the Electron main process. The Settings window (`app/recording-settings/page.tsx`) is the user-facing entry point; the menu item lives in the recorder bar's settings menu, just below "Don't record cursor". Since 2026-06-07 the same window also hosts an **Editor** section (grouped with `SectionTitle` headers "Recording" / "Editor") with two default-size `Switch` rows — "Autoplay on open" and "Remember sidebar tab" — that read/write the editor's `localStorage` preference keys directly (helpers in `components/editor/canvas/autoplay-preference.ts` and `components/editor/sidebar/tab-preference.ts`; no IPC — all windows share the same origin's `localStorage`, and the editor picks up tab-persist toggles via the cross-window `storage` event). See `docs/editor-canvas.md` for those features.
 
 | Option | Type | Default | Effect |
 |---|---|---|---|
 | `videoCodec` | `'hevc' \| 'h264'` | `hevc` on Apple Silicon, `h264` on Intel | Picks the AVAssetWriter codec. |
-| `videoQuality` | `'low' \| 'medium' \| 'high'` | `high` | Bits-per-pixel multiplier for the encoder. |
+| `videoQuality` | `'low' \| 'medium' \| 'high' \| 'xhigh' \| 'max'` | `high` | Bits-per-pixel multiplier for the encoder. |
 | `container` | `'mov' \| 'mp4'` | `mov` | AVFileType. Both codecs work in both containers. |
 | `resolutionMode` | `'native' \| 'logical'` | `native` | Native = logical × `pointPixelScale` (Retina). Logical = 1×. |
 | `frameRate` | `0 \| 24 \| 30 \| 60` | `60` | `0` = native refresh (1/120 minimum interval). |
@@ -137,8 +142,9 @@ Deployment target: **macOS 13.0**. Symbols newer than 13.0 are gated with `@avai
 | `captureDynamicRange = .SDR` (explicit) | — | — | — | — | ✅ |
 | `applicationsToInclude` (per-app audio scoping for display/region) | — | — | — | — | ✅ |
 | SCStream microphone output (`captureMicrophone`) | — | — | — | — | ✅ |
+| AVFoundation external-camera discovery via `AVCaptureDeviceTypeExternal` | — | — | ✅ | ✅ | ✅ |
 
-The screen-recording feature set is identical on 13.0 and 15.0+; only audio scoping and SCK-based microphone become available on 15+.
+Minimum support is macOS 13.0 for screen capture, built-in / default camera capture, system audio, cursor/input sidecars, and output writing. macOS 13/14 do **not** record microphone audio through the current pipeline; `getCapabilities().screenCaptureKitMicrophone` reports `false` and there is no AVFoundation microphone fallback. Per-app system-audio scoping for `display` / `region` targets is macOS 15+; on pre-15, only a window target gets practical app-level scoping from the `SCContentFilter`. External / Continuity camera discovery is incomplete on macOS 13 because `Devices.mm` does not include the deprecated pre-14 external camera type.
 
 ## Reliability invariants
 
@@ -147,10 +153,10 @@ The screen-recording feature set is identical on 13.0 and 15.0+; only audio scop
 - **Display picking is cursor-scoped, not primary-display-scoped.** The display picker and the generic default display target ask the native addon for the CoreGraphics display under the cursor, then map that `CGDirectDisplayID` back to Electron for overlay bounds. The display/window picker overlay is moved onto the target display instead of relying on one virtual-desktop-sized panel; macOS can otherwise keep that panel attached to the Dock/active Space display, making the selection for another monitor render off-screen. If the native lookup is unavailable, the fallback first checks which Electron display contains the cursor before using `getDisplayNearestPoint`.
 - **Region picking uses one overlay per display until drawing starts.** Region mode creates a transparent picker panel on every attached display so the user can start a drag on any monitor. Once the first real drag is reported from one panel, the picker destroys the other display panels and keeps the active panel for resizing/confirmation. This avoids cross-display `NSPanel` visibility issues and prevents accidental multi-display regions.
 - **`SCStreamFrameInfo.status` filter** — only `SCFrameStatusComplete` frames are passed to `appendSampleBuffer:`. Empty / idle / blank buffers would otherwise crash VideoToolbox.
-- **Monotonic PTS guard** — drops any sample whose presentation timestamp is ≤ the previous appended frame, protecting against Presenter Overlay timing glitches that would otherwise permanently fail the writer.
+- **Pause timestamp shifting is lock-guarded** — pause/resume does not split files; samples captured after resume are shifted backward by accumulated pause time before append.
 - **`expectsMediaDataInRealTime = YES`** on every writer input lets the encoder make rate-control trade-offs suited to live capture.
-- **Single `AVAssetWriter`** for the whole session — one MOV/MP4 with up to three muxed inputs (video, system audio, microphone audio). The audio tracks are forwarded into the screen writer by `SystemAudioTrack` / `MicrophoneTrack`.
-- **`queueDepth = 8`** on the `SCStreamConfiguration` (the SCK default). Backpressure emits a single `'backpressure'` recording event so the renderer can surface it once.
+- **Single `AVAssetWriter` for the screen file** — one MOV/MP4 with screen video plus system audio and, on macOS 15+, microphone audio. Camera is intentionally separate in `camera.mov`.
+- **`queueDepth = 8`** on the `SCStreamConfiguration`. Backpressure emits a single native `'backpressure'` event and dropped counts are written to the manifest, but the current preload/renderer bridge does not surface those events to the active controls UI yet.
 
 ## Settings UI flow
 
@@ -158,7 +164,8 @@ The screen-recording feature set is identical on 13.0 and 15.0+; only audio scop
 2. Renderer invokes `recorder:openRecordingSettings` → main process opens the Recording Quality `BrowserWindow` (configured via `windowConfigs.recordingSettingsWin`, loaded from `/recording-settings/`). The window is transparent: macOS uses `vibrancy: 'under-window'` with `titleBarStyle: 'hidden'`; Windows / Linux use `transparent: true` (Windows also requests `backgroundMaterial: 'acrylic'`). The page must render **no opaque background** so the native vibrancy / acrylic shows through. The root element sets `data-window="recording-settings"` and stays `bg-transparent`; the `html:has([data-window="recording-settings"])` selector in `app/globals.css` clears the default body background. Mirror this pattern when adding new transparent windows.
 3. The page calls `recorder:getRecordingSettings` on mount to hydrate.
 4. Every form change calls `recorder:setRecordingSettings(patch)`. The main process validates the merged settings, persists them to `<userData>/recording-quality.json`, broadcasts the new state via `recorder:changed`, and **returns the canonical resolved settings** so the form reflects any value coercion immediately.
-5. On `startRecording`, the resolved settings flow into `StartRecordingOptions` (`videoCodec`, `videoQuality`, `container`, `resolutionMode`, `frameRate`). The native side validates once more and writes the final values into the manifest under `outputs[].videoCodec` etc.
+5. The Editor section bypasses this IPC loop entirely: its two switches write `localStorage` synchronously (shared across all windows of the origin), so there is nothing to hydrate from main and no coercion step.
+6. On `startRecording`, the resolved settings flow into `StartRecordingOptions` (`videoCodec`, `videoQuality`, `container`, `resolutionMode`, `frameRate`). The native side validates once more and writes the final values into the manifest under `outputs[].videoCodec` etc.
 
 ## Verification
 
@@ -174,8 +181,8 @@ cd ../..
 pnpm typecheck
 
 # Inspect a recording's actual stream parameters.
-ffmpeg -i ~/Movies/openscreen-recordings/<session>/screen.mov 2>&1 | head -40
-mediainfo ~/Movies/openscreen-recordings/<session>/screen.mov | grep -E \
+ffmpeg -i ~/Documents/openscreen/<session>/screen.mov 2>&1 | head -40
+mediainfo ~/Documents/openscreen/<session>/screen.mov | grep -E \
   "Format|Bit rate|Color primaries|Transfer|Matrix|Bit depth|Profile"
 ```
 
@@ -185,7 +192,12 @@ Expected tags for every recording (the pipeline is single-path SDR):
 |---|---|---|---|
 | 8 | BT.709 | BT.709 | BT.709 |
 
-The recording's `<basename>-recording.json` manifest also records every resolved setting under `outputs[]`.
+The recording's `recording.json` manifest, or `<basename>-recording.json` when a basename is supplied, also records every resolved setting under `outputs[]`, and carries a root **`version: 1`** schema field (`RecorderSession.mm` → `manifestDictionary`; optional `version?: number` on the TS `RecordingManifest`). Recordings made before the field shipped have no `version` — readers must treat absence as the original/unversioned shape and must never *require* the field. Bump it when a manifest field changes shape or meaning so readers can branch on the version instead of inferring from heuristics (the editor already had to guess old-vs-new sidecar clock anchors once).
+
+```bash
+# A fresh recording's manifest carries the schema version.
+head -3 ~/Documents/openscreen/<session>/recording.json   # expect "version": 1
+```
 
 For the input path, inspect the sidecars in the recording folder:
 
@@ -203,6 +215,8 @@ ls <session>/cursors/ | wc -l   # 38 system cursors on a normal session
 - The output uses **8-bit BGRA**. No 10-bit precision path. Intentional — Main10 SDR is occasionally mishandled by older players.
 - Per-app audio scoping (`audioApplications`) is **macOS 15+** for `display` and `region` capture modes. On `window` mode pre-15, `SCContentFilter` implicitly scopes audio to the targeted window's owning app.
 - SCK microphone capture is **macOS 15+**; older macOS receives no microphone track. The mic toggle remains in the UI but produces no audio on 13/14.
+- Native recording events (`error`, `backpressure`) are emitted by the addon but not yet promoted into `RecorderState` or exposed through `window.api.recorder`, so mid-recording faults may be visible only after Stop or in the manifest.
+- `AVAssetWriter.finishWritingWithCompletionHandler` waits are currently unbounded in the screen and camera writer paths. This is the main remaining stop/finalize risk for very long recordings.
 - SCK delivers frames only when content changes. The `frameRate` setting is a *minimum interval* — actual delivered rates are typically below 120 fps even on a ProMotion display when the screen is static.
 - **Input capture requires Accessibility.** The primary `CGEventTap` needs the Accessibility grant (already a `REQUIRED_PERMISSIONS` entry). Without it, capture falls back to an `NSEvent` global monitor, which does **not** see moves over our own recorder UI (causing a multi-second opening gap) and only delivers ~refresh-rate coalesced moves.
 - **Cursor-shape resolution depends on `[NSCursor currentSystemCursor]`.** Validated to resolve all 38 system cursors correctly under an initialized `NSApplication` (always true in Electron). A bare non-GUI process returns no images for `arrow`/`iBeam` — a test-harness artifact, not a runtime concern.
@@ -226,4 +240,4 @@ ls <session>/cursors/ | wc -l   # 38 system cursors on a normal session
 - `electron/preload.ts` — `getRecordingSettings` / `setRecordingSettings` / `openRecordingSettings` bridge.
 - `types/api.d.ts` — renderer-facing mirror of `RecordingQualitySettings`.
 - `electron/main.ts` + `electron/windowConfigs.ts` — `createRecordingSettingsWindow` + `recordingSettingsWin` window config.
-- `app/recording-settings/page.tsx` — Recording Quality window.
+- `app/recording-settings/page.tsx` — Settings window (Recording quality section + Editor preferences section).

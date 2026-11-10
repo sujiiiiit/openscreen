@@ -29,9 +29,10 @@ import {
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import {
+  clampZoomMove,
+  clampZoomResize,
   MIN_ZOOM_CLIP_SECONDS,
   placeZoomSpan,
-  zoomSpanOverlaps,
 } from "@/lib/zoom-clips"
 import type {
   CanvasTimelineClip,
@@ -75,14 +76,26 @@ const DEFAULT_ZOOM_CLIP_PIXELS = 120
 // sized to show its handful of lanes — documented in docs/editor-canvas.md).
 const TIMELINE_RULER_HEIGHT = 32
 const TIMELINE_EDIT_AREA_MARGIN_TOP = 12
-// Inset so the ghost block doesn't touch the lane edges (matches the clip
-// padding `action: "bg-transparent p-1"`).
-const ZOOM_GHOST_INSET = 4
-// Content density for the hover ghost. The box itself can be subpixel-small,
-// but a fixed 16px icon inside a tiny gap reads like overlap, so only show
-// content that can fit inside the current rendered width.
-const ZOOM_GHOST_ICON_MIN_WIDTH = 20
-const ZOOM_GHOST_LABEL_MIN_WIDTH = 76
+// Insets so the ghost block doesn't touch the lane edges (matches the clip
+// padding `action: "bg-transparent px-px py-1"`). The horizontal inset is
+// deliberately hairline: clips that are flush in time should *look* flush —
+// a 4px inset per side used to render an 8px gutter between abutting clips,
+// which read as a gap even when there was none.
+const ZOOM_GHOST_INSET_X = 1
+const ZOOM_GHOST_INSET_Y = 4
+// Magnet distance, in on-screen pixels, for placing the hover ghost: an
+// anchor within this distance after the previous clip's end (or the timeline
+// start) snaps flush to it, and a ghost end stopping within this distance of
+// the next clip's start (or timeline end) extends flush. Converted to seconds
+// at the current zoom and passed to `placeZoomSpan`, so click-adds land
+// exactly adjacent instead of leaving an unfillable micro-gap. Matches the
+// package's guide-line adsorption distance (8 px).
+const ZOOM_ADD_SNAP_PIXELS = 8
+// Content density ladder shared by the hover ghost and the committed zoom
+// chips. A box can be subpixel-small, but a fixed 16px icon inside a tiny chip
+// reads like overlap, so only show content that fits the rendered width.
+const ZOOM_CHIP_ICON_MIN_WIDTH = 20
+const ZOOM_CHIP_LABEL_MIN_WIDTH = 76
 
 const TIMELINE_EFFECTS = {
   screen: { id: "screen", name: "Screen" },
@@ -433,12 +446,22 @@ function TimelineClipRender(action: TimelineAction) {
 
 // Pure render (no hooks) so it can be called directly from `getActionRender`.
 // Removal is via select + Delete/Backspace (editor-workspace keydown); there is
-// no on-clip remove button.
-function renderZoomClip(action: EditorZoomAction) {
+// no on-clip remove button. `widthPx` is the chip's rendered width at the
+// current timeline zoom; narrow chips drop content progressively (same density
+// ladder as the hover ghost) so a fixed-size icon never bleeds over the
+// chip's bounds and reads as overlapping the neighbour.
+function renderZoomClip(action: EditorZoomAction, widthPx: number) {
+  const density =
+    widthPx >= ZOOM_CHIP_LABEL_MIN_WIDTH
+      ? "label"
+      : widthPx >= ZOOM_CHIP_ICON_MIN_WIDTH
+        ? "icon"
+        : "marker"
   return (
     <div
       className={cn(
-        "flex h-full min-w-0 items-center gap-1 overflow-hidden rounded-md border px-2 text-[11px] leading-none backdrop-blur-sm transition-colors",
+        "flex h-full min-w-0 items-center gap-1 overflow-hidden rounded-md border text-[11px] leading-none backdrop-blur-sm transition-colors",
+        density === "label" ? "px-2" : "justify-center gap-0 px-0",
         action.selected
           ? "border-violet-200 bg-violet-400/35 text-violet-50 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.18)]"
           : action.enabled
@@ -446,11 +469,17 @@ function renderZoomClip(action: EditorZoomAction) {
             : "border-white/10 bg-white/5 text-white/45"
       )}
     >
-      <HugeiconsIcon icon={SearchAreaIcon} size={12} color="currentColor" />
-      <span className="min-w-0 truncate font-medium">Zoom</span>
-      <span className="ml-auto shrink-0 tabular-nums opacity-75">
-        {action.enabled ? `${action.scale.toFixed(1)}x` : "Off"}
-      </span>
+      {density !== "marker" ? (
+        <HugeiconsIcon icon={SearchAreaIcon} size={12} color="currentColor" />
+      ) : null}
+      {density === "label" ? (
+        <>
+          <span className="min-w-0 truncate font-medium">Zoom</span>
+          <span className="ml-auto shrink-0 tabular-nums opacity-75">
+            {action.enabled ? `${action.scale.toFixed(1)}x` : "Off"}
+          </span>
+        </>
+      ) : null}
     </div>
   )
 }
@@ -769,12 +798,16 @@ export function EditorTimelinePanel() {
         MIN_ZOOM_CLIP_SECONDS,
         (DEFAULT_ZOOM_CLIP_PIXELS / scaleWidth) * scale
       )
+      // 8 px magnet in time units so the ghost (and therefore the committed
+      // add) lands flush against an adjacent clip / timeline bound.
+      const snapSeconds = (ZOOM_ADD_SNAP_PIXELS / scaleWidth) * scale
       const placed = placeZoomSpan(
         zoomClips,
         timelineDuration,
         time,
         time + defaultSeconds,
-        null
+        null,
+        snapSeconds
       )
       writeZoomGhost(placed)
     },
@@ -848,8 +881,10 @@ export function EditorTimelinePanel() {
     [clipById, resizeTimelineClip, resizeZoomClip, selectItem, selectZoomClip]
   )
 
-  // Real-time block (return false) so a drag can't cross into a neighbour or
-  // past the timeline bounds — the "snap to neighbour" feel.
+  // Real-time clamp (return the corrected span) so a drag that crosses a
+  // neighbour or the timeline bounds slides flush against the obstacle and
+  // pins there — never rejected outright, which used to freeze the clip at
+  // the last sampled valid position and leave an arbitrary gap.
   const handleActionMoving = useCallback(
     ({
       action,
@@ -861,8 +896,18 @@ export function EditorTimelinePanel() {
       end: number
     }) => {
       if (isZoomAction(action)) {
-        if (start < 0 || end > timelineDuration + 0.0001) return false
-        return !zoomSpanOverlaps(zoomClips, start, end, action.id)
+        // `action.start/end` is the committed span (mutated only at drag
+        // end), so the gap bounds stay stable for the whole drag.
+        const clamped = clampZoomMove(
+          zoomClips,
+          timelineDuration,
+          { id: action.zoomClipId, start: action.start, end: action.end },
+          start
+        )
+        const unchanged =
+          Math.abs(clamped.start - start) < 1e-9 &&
+          Math.abs(clamped.end - end) < 1e-9
+        return unchanged ? true : clamped
       }
       return start >= 0
     },
@@ -882,9 +927,19 @@ export function EditorTimelinePanel() {
       dir: "left" | "right"
     }) => {
       if (isZoomAction(action)) {
-        if (end - start < MIN_ZOOM_CLIP_SECONDS) return false
-        if (start < -0.0001 || end > timelineDuration + 0.0001) return false
-        return !zoomSpanOverlaps(zoomClips, start, end, action.id)
+        // Clamp instead of reject: the moving edge stops flush at the
+        // neighbour / timeline bound / minimum duration.
+        const clamped = clampZoomResize(
+          zoomClips,
+          timelineDuration,
+          { id: action.zoomClipId, start: action.start, end: action.end },
+          { start, end },
+          dir
+        )
+        const unchanged =
+          Math.abs(clamped.start - start) < 1e-9 &&
+          Math.abs(clamped.end - end) < 1e-9
+        return unchanged ? true : clamped
       }
 
       const clip = clipById.get(action.id)
@@ -909,11 +964,16 @@ export function EditorTimelinePanel() {
   )
 
   const renderAction = useCallback(
-    (action: TimelineAction) =>
-      isZoomAction(action)
-        ? renderZoomClip(action)
-        : TimelineClipRender(action),
-    []
+    (action: TimelineAction) => {
+      if (isZoomAction(action)) {
+        // Rendered chip width at the current zoom drives the content density.
+        const widthPx =
+          ((action.end - action.start) / Math.max(scale, 1e-6)) * scaleWidth
+        return renderZoomClip(action, widthPx)
+      }
+      return TimelineClipRender(action)
+    },
+    [scale, scaleWidth]
   )
 
   const getAssistDragLineActionIds = useCallback(
@@ -1021,8 +1081,12 @@ export function EditorTimelinePanel() {
               timeAreaInteract: "cursor-default",
               editArea: "mt-3 bg-transparent",
               editRow: "bg-transparent [background-image:none!important]",
-              action: "bg-transparent p-1",
-              cursor: "border-sky-400",
+              // px-px (1px), not p-1 (4px): flush clips must look flush — the
+              // horizontal inset is the only thing separating abutting clips.
+              action: "bg-transparent px-px py-1",
+              // Gradient from-color for the playhead line (the package draws
+              // the line as a fading background, not borders).
+              cursor: "from-sky-400",
               cursorTop:
                 "text-sky-400 drop-shadow-[0_1px_2px_rgba(8,47,73,0.45)]",
               cursorArea: "cursor-ew-resize",
@@ -1118,21 +1182,30 @@ const TimelineHoverGhostCursor = memo(function TimelineHoverGhostCursor({
     <div
       ref={ghostRef}
       aria-hidden="true"
-      className="pointer-events-none absolute top-8 bottom-0 left-0 z-10 w-px border-l border-white/70"
+      // Gradient line matching the committed playhead's: solid for the top
+      // 65%, fading to transparent at the bottom.
+      className="pointer-events-none absolute top-0 bottom-0 left-0 z-10 w-px bg-gradient-to-b from-white/70 from-65% to-transparent"
       style={{ visibility: "hidden" }}
     >
       {/* Same teardrop pin as the committed playhead, in white to distinguish a
           preview position from the committed one. Centred on the line's left
-          edge so the point sits on the hover line. */}
+          edge so the point sits on the hover line. The line spans the full
+          timeline height (top-0, through the ruler) and the pin head sits at
+          the very top of the line (top-0, inside the ruler) — identical to
+          the package cursor's offset, so both seek indicators align. The fill
+          is the *opaque* equivalent of white/70 on the dark footer — an alpha
+          fill would let the seek line show through the head. */}
       <svg
-        className="absolute top-0 left-0 -translate-x-1/2 text-white/70 drop-shadow-[0_1px_2px_rgba(0,0,0,0.5)]"
+        className="absolute top-0 left-0 -translate-x-1/2 text-[#b5b5b5] drop-shadow-[0_1px_2px_rgba(0,0,0,0.5)]"
         width="12"
         height="22"
         viewBox="0 0 12 22"
         fill="none"
       >
+        {/* Same curvature-matched teardrop as the package cursor pin — keep
+            the two paths identical. */}
         <path
-          d="M6 22C5.5 17 0 8.5 0 6C0 2.6863 2.6863 0 6 0C9.3137 0 12 2.6863 12 6C12 8.5 6.5 17 6 22Z"
+          d="M6 0C9.3 0 12 2.8 12 6.2C12 10.8 6.7 16.5 6 22C5.3 16.5 0 10.8 0 6.2C0 2.8 2.7 0 6 0Z"
           fill="currentColor"
         />
       </svg>
@@ -1155,8 +1228,8 @@ type ZoomGhostProps = {
 
 // Translucent dashed preview of the zoom clip a click would drop. Positioned
 // imperatively from the ghost subscription so hover-move never re-renders the
-// timeline. Inset by ZOOM_GHOST_INSET on every side to match the committed
-// clip's `p-1`.
+// timeline. Inset by ZOOM_GHOST_INSET_X / ZOOM_GHOST_INSET_Y to match the
+// committed clip's `px-px py-1`.
 const ZoomGhost = memo(function ZoomGhost({
   startLeft,
   scale,
@@ -1198,7 +1271,8 @@ const ZoomGhost = memo(function ZoomGhost({
         return
       }
 
-      const inset = clippedWidth > ZOOM_GHOST_INSET * 2 ? ZOOM_GHOST_INSET : 0
+      const inset =
+        clippedWidth > ZOOM_GHOST_INSET_X * 2 ? ZOOM_GHOST_INSET_X : 0
       const left = clippedLeft + inset
       const width = clippedWidth - inset * 2
       if (width <= 0) {
@@ -1206,18 +1280,18 @@ const ZoomGhost = memo(function ZoomGhost({
         return
       }
       node.dataset.density =
-        width >= ZOOM_GHOST_LABEL_MIN_WIDTH
+        width >= ZOOM_CHIP_LABEL_MIN_WIDTH
           ? "label"
-          : width >= ZOOM_GHOST_ICON_MIN_WIDTH
+          : width >= ZOOM_CHIP_ICON_MIN_WIDTH
             ? "icon"
             : "marker"
-      const top = rowTop - scrollTopRef.current + ZOOM_GHOST_INSET
+      const top = rowTop - scrollTopRef.current + ZOOM_GHOST_INSET_Y
       node.style.visibility = "visible"
       node.style.transform = `translate3d(${left.toFixed(3)}px, ${top.toFixed(
         3
       )}px, 0)`
       node.style.width = `${width.toFixed(3)}px`
-      node.style.height = `${rowHeight - ZOOM_GHOST_INSET * 2}px`
+      node.style.height = `${rowHeight - ZOOM_GHOST_INSET_Y * 2}px`
     },
     [
       rowHeight,

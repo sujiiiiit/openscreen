@@ -76,6 +76,50 @@ export function rawSamplesFromMoves(
   return samples
 }
 
+/**
+ * Minimum dwell (ms) a cursor shape must persist to be shown when cursor-type
+ * stabilization is on. Captured shapes that change and revert faster than this
+ * (e.g. an I-beam blip while brushing past a text field, or a pointing-hand
+ * flicker crossing a link) are held to the surrounding shape so the rendered
+ * cursor doesn't flicker. Matches the "~150 ms" feel chosen for the toggle.
+ */
+export const CURSOR_TYPE_STABILIZE_MS = 150
+
+/**
+ * Minimum-dwell debounce of the cursor SHAPE timeline: any run of a `cursorId`
+ * shorter than `thresholdMs` is relabeled to the previously committed shape, so
+ * brief flickers (`arrow → iBeam → arrow`) collapse to the steady shape. Only the
+ * `cursorId` field changes — positions and clicks are untouched — and it is a
+ * pure function of the samples, so preview and export stay identical. The final
+ * run persists to the recording end (treated as long → kept), and a short leading
+ * run is kept as the initial shape (there is no prior shape to fall back to).
+ */
+export function stabilizeCursorIds(
+  samples: RawCursorSample[],
+  thresholdMs: number
+): RawCursorSample[] {
+  if (samples.length < 2 || thresholdMs <= 0) return samples
+  const out = samples.map((s) => ({ ...s }))
+  let committedId = samples[0].cursorId
+  let runStart = 0
+  for (let i = 1; i <= samples.length; i++) {
+    const isBoundary =
+      i === samples.length || samples[i].cursorId !== samples[runStart].cursorId
+    if (!isBoundary) continue
+    // The run [runStart, i) lasts until the next shape change; the final run
+    // persists to the recording end, so treat its duration as infinite (kept).
+    const dur =
+      i < samples.length ? samples[i].t - samples[runStart].t : Infinity
+    if (runStart > 0 && dur < thresholdMs) {
+      for (let k = runStart; k < i; k++) out[k].cursorId = committedId
+    } else {
+      committedId = samples[runStart].cursorId
+    }
+    runStart = i
+  }
+  return out
+}
+
 /** Build normalized click events from `mouseclicks-0.json`. */
 export function clickEventsFromClicks(
   clicks: Array<{ processTimeMs: number; type?: string }>,

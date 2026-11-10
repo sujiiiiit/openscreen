@@ -100,9 +100,11 @@ export interface EditData {
    */
   onActionMoveStart?: (params: { action: TimelineAction; row: TimelineRow }) => void;
   /**
-   * @description Move callback (return false to cancel the move)
+   * @description Move callback. Return false to cancel the step, or an
+   * adjusted `{ start, end }` to clamp the move (e.g. flush against a
+   * neighbour) — the timeline applies the corrected span instead.
    */
-  onActionMoving?: (params: { action: TimelineAction; row: TimelineRow; start: number; end: number }) => void | boolean;
+  onActionMoving?: (params: { action: TimelineAction; row: TimelineRow; start: number; end: number }) => void | boolean | { start: number; end: number };
   /**
    * @description Move end callback (return false to suppress onChange)
    */
@@ -112,9 +114,11 @@ export interface EditData {
    */
   onActionResizeStart?: (params: { action: TimelineAction; row: TimelineRow; dir: 'right' | 'left' }) => void;
   /**
-   * @description Resize callback (return false to cancel the resize)
+   * @description Resize callback. Return false to cancel the step, or an
+   * adjusted `{ start, end }` to clamp the resize — the timeline applies the
+   * corrected span instead.
    */
-  onActionResizing?: (params: { action: TimelineAction; row: TimelineRow; start: number; end: number; dir: 'right' | 'left' }) => void | boolean;
+  onActionResizing?: (params: { action: TimelineAction; row: TimelineRow; start: number; end: number; dir: 'right' | 'left' }) => void | boolean | { start: number; end: number };
   /**
    * @description Resize end callback (return false to suppress onChange)
    */

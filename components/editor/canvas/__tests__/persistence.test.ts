@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  fingerprintProjectState,
   projectZoomClipToCanvasClip,
   serializeProjectState,
   serializeVideo,
@@ -14,19 +15,17 @@ const ARTBOARD: EditorArtboard = {
   presetId: "wide",
   width: 1920,
   height: 1080,
-  background: null,
-  grain: 0,
-  padding: 0,
+  background: null,  padding: 0,
+  backgroundEnabled: true,
   cursorCustomRenderingEnabled: true,
   cursorSetId: "macos",
   cursorSizeMultiplier: 1,
   cursorMotionBlur: 0,
   cursorMotionRotation: 0.35,
-  cursorMotionRotationMode: "side-lean",
-  cursorMotionBlurBackend: "gpu",
   cursorSmoothingMode: "default",
   cursorClickPressScale: 0.88,
   cursorAlwaysUsePointer: false,
+  cursorTypeStabilization: false,
 }
 
 function canvasVideo(
@@ -59,11 +58,6 @@ function canvasVideo(
     borderColor: "#000000",
     borderOffset: 0,
     borderAlignment: "inside",
-    shadowColor: "rgba(0, 0, 0, 0.25)",
-    shadowBlur: 0,
-    shadowOffsetX: 0,
-    shadowOffsetY: 0,
-    shadowSpread: 0,
     ...rest,
   }
 }
@@ -135,42 +129,6 @@ describe("serializeProjectState with detached videos", () => {
   })
 })
 
-describe("cursor motion blur backend persistence", () => {
-  it("preserves the selected backend through a round-trip", () => {
-    const parsed = roundTrip(
-      serializeProjectState(
-        { ...ARTBOARD, cursorMotionBlurBackend: "cpu" },
-        [canvasVideo({ id: "a" })],
-        []
-      )
-    )
-
-    expect(parsed).not.toBeNull()
-    expect(parsed!.artboard.cursorMotionBlurBackend).toBe("cpu")
-  })
-
-  it("defaults an invalid backend to gpu for legacy/hand-edited projects", () => {
-    const parsed = parseProjectState({
-      version: 1,
-      artboard: {
-        presetId: "wide",
-        width: 1920,
-        height: 1080,
-        background: null,
-        padding: 0,
-        grain: 0,
-        cursorMotionBlurBackend: "webgpu",
-      },
-      videos: [],
-      timelineClips: [],
-      updatedAtUnixMs: 0,
-    })
-
-    expect(parsed).not.toBeNull()
-    expect(parsed!.artboard.cursorMotionBlurBackend).toBe("gpu")
-  })
-})
-
 describe("cursor motion rotation persistence", () => {
   it("preserves the selected motion rotation through a round-trip", () => {
     const parsed = roundTrip(
@@ -185,17 +143,17 @@ describe("cursor motion rotation persistence", () => {
     expect(parsed!.artboard.cursorMotionRotation).toBe(0.72)
   })
 
-  it("preserves the selected motion rotation mode through a round-trip", () => {
-    const parsed = roundTrip(
-      serializeProjectState(
-        { ...ARTBOARD, cursorMotionRotationMode: "rotation" },
-        [canvasVideo({ id: "a" })],
-        []
-      )
+  it("omits the legacy motion rotation mode from new saves", () => {
+    const snapshot = serializeProjectState(
+      ARTBOARD,
+      [canvasVideo({ id: "a" })],
+      []
     )
 
-    expect(parsed).not.toBeNull()
-    expect(parsed!.artboard.cursorMotionRotationMode).toBe("rotation")
+    // The direction-follow "rotation" mode was removed; side lean is the only
+    // behavior, so new saves drop the field while old files keep parsing (see
+    // the legacy-default test below).
+    expect("cursorMotionRotationMode" in snapshot.artboard).toBe(false)
   })
 
   it("defaults missing and invalid motion rotation mode to side-lean", () => {
@@ -204,9 +162,7 @@ describe("cursor motion rotation persistence", () => {
       width: 1920,
       height: 1080,
       background: null,
-      padding: 0,
-      grain: 0,
-    }
+      padding: 0,    }
     const legacy = parseProjectState({
       version: 1,
       artboard: base,
@@ -234,9 +190,7 @@ describe("cursor motion rotation persistence", () => {
       width: 1920,
       height: 1080,
       background: null,
-      padding: 0,
-      grain: 0,
-    }
+      padding: 0,    }
     const legacy = parseProjectState({
       version: 1,
       artboard: base,
@@ -264,9 +218,7 @@ describe("cursor motion rotation persistence", () => {
       width: 1920,
       height: 1080,
       background: null,
-      padding: 0,
-      grain: 0,
-    }
+      padding: 0,    }
     const tooSmall = parseProjectState({
       version: 1,
       artboard: { ...base, cursorMotionRotation: -1 },
@@ -311,9 +263,7 @@ describe("custom cursor rendering persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-      },
+        padding: 0,      },
       videos: [],
       timelineClips: [],
       updatedAtUnixMs: 0,
@@ -325,9 +275,7 @@ describe("custom cursor rendering persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-        cursorCustomRenderingEnabled: "no",
+        padding: 0,        cursorCustomRenderingEnabled: "no",
       },
       videos: [],
       timelineClips: [],
@@ -363,9 +311,7 @@ describe("cursor style persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-      },
+        padding: 0,      },
       videos: [],
       timelineClips: [],
       updatedAtUnixMs: 0,
@@ -377,9 +323,7 @@ describe("cursor style persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-        cursorSetId: "made-up",
+        padding: 0,        cursorSetId: "made-up",
       },
       videos: [],
       timelineClips: [],
@@ -415,9 +359,7 @@ describe("cursor smoothing persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-        cursorSmoothingMode: "raw",
+        padding: 0,        cursorSmoothingMode: "raw",
       },
       videos: [],
       timelineClips: [],
@@ -451,9 +393,7 @@ describe("cursor click press scale persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-      },
+        padding: 0,      },
       videos: [],
       timelineClips: [],
       updatedAtUnixMs: 0,
@@ -465,9 +405,7 @@ describe("cursor click press scale persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-        cursorClickPressScale: 0.2,
+        padding: 0,        cursorClickPressScale: 0.2,
       },
       videos: [],
       timelineClips: [],
@@ -475,7 +413,7 @@ describe("cursor click press scale persistence", () => {
     })
 
     expect(legacy).not.toBeNull()
-    expect(legacy!.artboard.cursorClickPressScale).toBe(0.88)
+    expect(legacy!.artboard.cursorClickPressScale).toBe(0.78)
     expect(tooSmall).not.toBeNull()
     expect(tooSmall!.artboard.cursorClickPressScale).toBe(0.5)
   })
@@ -503,9 +441,7 @@ describe("cursor pointer override persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-      },
+        padding: 0,      },
       videos: [],
       timelineClips: [],
       updatedAtUnixMs: 0,
@@ -517,9 +453,7 @@ describe("cursor pointer override persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-        cursorAlwaysUsePointer: "yes",
+        padding: 0,        cursorAlwaysUsePointer: "yes",
       },
       videos: [],
       timelineClips: [],
@@ -530,6 +464,49 @@ describe("cursor pointer override persistence", () => {
     expect(legacy!.artboard.cursorAlwaysUsePointer).toBe(false)
     expect(invalid).not.toBeNull()
     expect(invalid!.artboard.cursorAlwaysUsePointer).toBe(false)
+  })
+})
+
+describe("cursor type stabilization persistence", () => {
+  it("preserves the stabilize-cursor-type setting through a round-trip", () => {
+    const parsed = roundTrip(
+      serializeProjectState(
+        { ...ARTBOARD, cursorTypeStabilization: true },
+        [canvasVideo({ id: "a" })],
+        []
+      )
+    )
+
+    expect(parsed).not.toBeNull()
+    expect(parsed!.artboard.cursorTypeStabilization).toBe(true)
+  })
+
+  it("defaults missing/non-true values to false for legacy/hand-edited projects", () => {
+    const base = {
+      presetId: "wide",
+      width: 1920,
+      height: 1080,
+      background: null,
+      padding: 0,    }
+    const legacy = parseProjectState({
+      version: 1,
+      artboard: base,
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+    const invalid = parseProjectState({
+      version: 1,
+      artboard: { ...base, cursorTypeStabilization: "yes" },
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+
+    expect(legacy).not.toBeNull()
+    expect(legacy!.artboard.cursorTypeStabilization).toBe(false)
+    expect(invalid).not.toBeNull()
+    expect(invalid!.artboard.cursorTypeStabilization).toBe(false)
   })
 })
 
@@ -549,9 +526,7 @@ describe("parseProjectState onCanvas tolerance", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,
-        grain: 0,
-      },
+        padding: 0,      },
       videos: [
         {
           ...serializeVideo(canvasVideo({ id: "a" })),
@@ -715,5 +690,139 @@ describe("zoom clips persistence", () => {
       start: 1,
       end: 2,
     })
+  })
+})
+
+describe("fingerprintProjectState zoomClips normalization", () => {
+  const base = serializeProjectState(ARTBOARD, [canvasVideo({ id: "a" })], [])
+
+  it("hashes absent and empty zoomClips identically", () => {
+    expect(fingerprintProjectState({ ...base, zoomClips: undefined })).toBe(
+      fingerprintProjectState({ ...base, zoomClips: [] })
+    )
+  })
+
+  it("changes when a zoom clip exists", () => {
+    expect(
+      fingerprintProjectState({
+        ...base,
+        zoomClips: [{ id: "z", start: 1, end: 2 }],
+      })
+    ).not.toBe(fingerprintProjectState({ ...base, zoomClips: [] }))
+  })
+
+  it("ignores updatedAtUnixMs", () => {
+    expect(fingerprintProjectState({ ...base, updatedAtUnixMs: 1 })).toBe(
+      fingerprintProjectState({ ...base, updatedAtUnixMs: 2 })
+    )
+  })
+})
+
+// The import UI/pipeline was removed (recordings are the only video source),
+// but old project.json files written while it existed must keep loading.
+describe("parseProjectState imported-video tolerance", () => {
+  it("still parses videos with an imported source", () => {
+    const parsed = roundTrip(
+      serializeProjectState(
+        ARTBOARD,
+        [
+          canvasVideo({
+            id: "legacy-import",
+            source: {
+              kind: "imported",
+              relativePath: "assets/videos/legacy-import/clip.mp4",
+              fileSize: 42,
+            },
+          }),
+        ],
+        []
+      )
+    )
+    expect(parsed).not.toBeNull()
+    expect(parsed!.videos[0].source).toEqual({
+      kind: "imported",
+      relativePath: "assets/videos/legacy-import/clip.mp4",
+      fileSize: 42,
+    })
+  })
+})
+
+describe("engaged content rects persistence", () => {
+  // `grain` is a removed field; old project.json files still carry it. The
+  // validator must tolerate (and drop) the extra key, so it stays here on
+  // purpose to assert legacy payloads keep parsing.
+  const LEGACY_ARTBOARD = {
+    presetId: "wide",
+    width: 1920,
+    height: 1080,
+    background: null,
+    padding: 0,
+    grain: 0,
+  }
+
+  it("round-trips engagedRects on a zoom clip through JSON + the validator", () => {
+    const clip = withZoomClipDefaults({
+      id: "z1",
+      start: 1,
+      end: 5,
+      scale: 2.4,
+      engagedRects: [
+        { t: 2, rect: { x: 0.5, y: 0.4, width: 0.4, height: 0.3 } },
+        { t: 3.5, rect: { x: 0.1, y: 0.1, width: 0.2, height: 0.2 } },
+      ],
+    })
+    const parsed = roundTrip(
+      serializeProjectState(
+        ARTBOARD,
+        [canvasVideo({ id: "a" })],
+        [],
+        [],
+        [clip]
+      )
+    )
+    expect(parsed).not.toBeNull()
+    const restored = projectZoomClipToCanvasClip(parsed!.zoomClips![0])
+    expect(restored.engagedRects.length).toBe(2)
+    expect(restored.engagedRects[0].t).toBeCloseTo(2)
+    expect(restored.engagedRects[0].rect.width).toBeCloseTo(0.4)
+    expect(restored.engagedRects[1].rect.x).toBeCloseTo(0.1)
+  })
+
+  it("omits the field when empty and hydrates a legacy clip to []", () => {
+    const empty = serializeZoomClip(
+      withZoomClipDefaults({ id: "z1", start: 1, end: 5, scale: 2 })
+    )
+    expect("engagedRects" in empty).toBe(false)
+    // A legacy project.json clip with no such field loads with [].
+    expect(
+      projectZoomClipToCanvasClip({ id: "z1", start: 1, end: 5 }).engagedRects
+    ).toEqual([])
+  })
+
+  it("drops malformed engagedRects entries on parse", () => {
+    const parsed = parseProjectState({
+      version: 1,
+      artboard: LEGACY_ARTBOARD,
+      videos: [],
+      timelineClips: [],
+      zoomClips: [
+        {
+          id: "z1",
+          start: 1,
+          end: 5,
+          engagedRects: [
+            { t: 2, rect: { x: 0.5, y: 0.4, width: 0.4, height: 0.3 } }, // valid
+            { t: 3, rect: { x: 0.5 } }, // missing fields
+            { rect: { x: 0, y: 0, width: 0.2, height: 0.2 } }, // missing t
+            "nope",
+          ],
+        },
+      ],
+      updatedAtUnixMs: 0,
+    })
+    expect(parsed).not.toBeNull()
+    expect(parsed!.zoomClips![0].engagedRects).toEqual([
+      { t: 2, rect: { x: 0.5, y: 0.4, width: 0.4, height: 0.3 } },
+    ])
   })
 })

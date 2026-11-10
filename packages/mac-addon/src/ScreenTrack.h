@@ -9,10 +9,9 @@
 // Owns the screen-capture path AND the muxed AVAssetWriter that produces the
 // final .mov. The writer holds up to three AVAssetWriterInputs:
 //
-//   * video        — HEVC Main10 (Apple Silicon) / H.264 (Intel), tagged
-//                    with explicit P3-D65 primaries, Rec.709 transfer, and
-//                    Rec.709 YCbCr matrix so any colour-managed player
-//                    renders the full Display-P3 gamut correctly.
+//   * video        — HEVC (Apple Silicon) / H.264 (Intel), using BGRA 8-bit
+//                    ScreenCaptureKit buffers, sRGB capture conversion, and
+//                    BT.709 writer tags for universal SDR playback.
 //   * systemAudio  — AAC, populated lazily once the first sample's format
 //                    description is known.
 //   * microphone   — AAC, ditto.
@@ -55,8 +54,8 @@
 + (void)prewarmShareableContent;
 + (void)invalidateShareableContentCache;
 
-// Builds the SCStreamConfiguration with 10-bit packed RGB pixels in Display
-// P3, recording-tuned queue depth, and an SDR dynamic range cap.
+// Builds the SCStreamConfiguration with BGRA 8-bit pixels, sRGB capture
+// conversion, recording-tuned queue depth, and an SDR dynamic range cap.
 - (SCStreamConfiguration *)streamConfigurationForContent:(SCShareableContent *)content;
 
 // Instantiate AVAssetWriter and the video input now that dimensions are

@@ -1,347 +1,328 @@
-import Konva from "konva"
+import {
+  Application,
+  Container,
+  Graphics,
+  ImageSource,
+  Rectangle,
+  Sprite,
+  Texture,
+} from "pixi.js"
 
 import type { ProjectStateV1, ProjectVideo } from "@/types/api"
 import {
-  computeBorderParams,
-  computeShadowParams,
-  computeSquircleParams,
-  drawCanvasVideoFrame,
-} from "@/components/editor/canvas/video-scene-draw"
+  blurredWallpaperPadding,
+  computeCoverCrop,
+  loadBlurredWallpaperBitmap,
+  loadWallpaperBitmap,
+  resolveWallpaper,
+} from "@/components/editor/canvas/pixi/background"
+import {
+  applyVideoAppearance,
+  type NodeAppearance,
+} from "@/components/editor/canvas/pixi/video-appearance"
+import {
+  CursorSprite,
+  preloadCursorImages,
+  type CursorPlaceOptions,
+} from "@/components/editor/canvas/pixi/cursor-sprite"
 import {
   buildCursorTrack,
   clampCursorClickPressScale,
   clampCursorMotionBlur,
-  clampCursorMotionBlurBackend,
   clampCursorMotionRotation,
-  clampCursorMotionRotationMode,
   clampCursorSetId,
-  clampCursorSmoothingMode,
   clampCursorSize,
+  clampCursorSmoothingMode,
   CURSOR_CLICK_PRESS_SCALE_DEFAULT,
-  CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   CURSOR_MOTION_BLUR_DEFAULT,
   CURSOR_MOTION_ROTATION_DEFAULT,
-  CURSOR_MOTION_ROTATION_MODE_DEFAULT,
   CURSOR_POINTER_CURSOR_ID,
-  CURSOR_SMOOTHING_MODE_DEFAULT,
   CURSOR_SET_DEFAULT,
   CURSOR_SIZE_DEFAULT,
+  CURSOR_SMOOTHING_MODE_DEFAULT,
   projectFolderFromObjectUrl,
   type CursorVideoGeometry,
 } from "@/components/editor/canvas/cursor-scene"
 import { getVideoCoverCrop } from "@/components/editor/canvas/video-cover-crop"
+import type { ZoomCamera } from "@/components/editor/canvas/zoom-scene"
 import {
-  createSpriteMotionBlurRendererForBackend,
-  type SpriteMotionBlurRenderer,
-} from "@/lib/motion-blur/sprite-motion-blur"
-import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
-import type { CursorSetId } from "@/lib/cursors/cursor-manifest"
-import type {
-  CursorMotionRotationMode,
-  CursorSmoothingMode,
-} from "@/types/editor-canvas"
+  applyZoomBlur,
+  createZoomBlurFilter,
+} from "@/components/editor/canvas/pixi/zoom-blur"
+import {
+  applyZoomPanBlur,
+  createZoomPanBlurFilter,
+} from "@/components/editor/canvas/pixi/zoom-pan-blur"
+import { rendererPreferenceChain } from "@/components/editor/canvas/pixi/renderer-preference"
 import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
-import { getWallpaperFullUrl, isWallpaperId } from "@/lib/wallpapers"
+import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
 
-export interface ExportStageHandles {
-  stage: Konva.Stage
-  backgroundLayer: Konva.Layer
-  contentLayer: Konva.Layer
-  /**
-   * Per-video Konva.Image nodes, keyed by `ProjectVideo.id`. The render
-   * loop swaps `node.image(...)` to whichever decoded source canvas is
-   * current for each output frame.
-   */
-  nodesByVideoId: Map<string, Konva.Image>
-  /** Output dimensions of the stage in pixels. */
-  outputSize: { width: number; height: number }
-  /**
-   * Recorded-cursor overlay, or null when the composition has no screen
-   * recording / no captured cursor data. When present the render loop places
-   * it per frame from `track` using the screen clip's source time — the same
-   * code path as the live editor's `CanvasCursorOverlay`, so the cursor in the
-   * exported video matches the on-screen preview.
-   */
-  cursor: ExportCursorHandle | null
-  dispose: () => void
+/**
+ * One exportable video node. The render loop pushes each decoded source frame
+ * via {@link setFrame}; nodes outside their active clip are hidden so a clip
+ * that ended last frame doesn't ghost.
+ *
+ * `setFrame` accepts either a decoded `VideoFrame` (fast path — becomes the
+ * texture's upload resource directly; caller closes it after the stage
+ * renders) or any `CanvasImageSource` (fallback — staged through a reused 2D
+ * canvas).
+ */
+export interface ExportVideoNode {
+  setFrame(source: CanvasImageSource | VideoFrame): void
+  hide(): void
 }
 
+/**
+ * Recorded-cursor data for the export. The track always feeds auto-mode zoom
+ * follow; `cursorSprite` is only present when custom cursor rendering is enabled
+ * and assets are available.
+ */
 export interface ExportCursorHandle {
-  /** Cursor image node, added on top of the video nodes in the content layer. */
-  node: Konva.Image
-  /** Pre-integrated cursor trajectory, sampled by screen source time. */
+  cursorSprite: CursorSprite | null
   track: SmoothedCursorTrack
-  /** Screen video geometry the placement maps through. */
   video: CursorVideoGeometry
-  /** Stable artboard-sized frame used for cursor render scale. */
-  referenceSize: { width: number; height: number }
-  /** Which video id the cursor follows — used to find the active screen clip. */
+  /** Which video the cursor follows — used to find the active screen clip. */
   screenVideoId: string
-  /** User-chosen render-size multiplier (artboard-level); 1 = reference-frame
-   * base size. Threaded into `placeCursor` so export matches preview. */
-  sizeMultiplier: number
-  /** User-chosen clicked scale; 1 means no press shrink. */
-  clickPressScale: number
-  /** Force every captured cursor shape to the themed pointer asset. */
-  alwaysUsePointer: boolean
-  /** Bundled cursor style used to resolve each captured cursor shape. */
-  cursorSetId: CursorSetId
-  /** Cursor motion-blur intensity (0..1); fed to `computeCursorBlur` per frame
-   * so the exported smear matches the preview. */
+  options: CursorPlaceOptions | null
   motionBlur: number
-  /** Cursor motion-rotation amount (0..1); threaded into placement per frame. */
-  motionRotation: number
-  /** Cursor motion-rotation behavior; threaded into placement per frame. */
-  motionRotationMode: CursorMotionRotationMode
-  /** Cursor smoothing preset; also controls deterministic rotation smoothing. */
-  smoothingMode: CursorSmoothingMode
-  /** Requested cursor-blur backend, defaulting to GPU for preview parity. */
-  motionBlurBackend: "gpu" | "cpu"
-  /** Sprite-blur renderer, reused across frames. GPU falls back to CPU if unavailable. */
-  renderer: SpriteMotionBlurRenderer
-  /** Decoded cursor SVGs keyed by asset URL (the shape changes across frames). */
-  images: Map<string, HTMLImageElement>
+}
+
+export interface ExportStageHandles {
+  /** The offscreen Pixi application; `app.canvas` is the export composite. */
+  app: Application
+  outputSize: { width: number; height: number }
+  nodesByVideoId: Map<string, ExportVideoNode>
+  /** Recorded-cursor data, or null when the composition has no cursor data. */
+  cursor: ExportCursorHandle | null
+  /** Apply the composition zoom-clip camera (scale + offset) for a frame. */
+  applyZoomCamera: (camera: ZoomCamera) => void
+  dispose: () => void
 }
 
 export interface BuildStageOptions {
   state: ProjectStateV1
   assetUrlsByVideoId: Record<string, string>
   outputSize: { width: number; height: number }
-  /** Off-DOM container the stage attaches to. Hidden via CSS display:none. */
+  /** Off-DOM container the canvas attaches to (hidden via CSS display:none). */
   container: HTMLDivElement
+  /**
+   * Absolute project folder — preferred source for cursor sidecar loading.
+   * When absent, the folder is derived from the screen video's file URL.
+   */
+  projectPath?: string
 }
 
 /**
- * Build a vanilla-Konva stage that mirrors the editor's render path for a
- * single artboard composition, sized to the export's output pixel
- * dimensions. Each video clip becomes a `Konva.Image` node with a
- * placeholder canvas — the render loop in `run-export.ts` swaps in the
- * real per-frame canvas pulled from a Mediabunny `CanvasSink`.
+ * Build an offscreen PixiJS scene that mirrors the editor preview for a single
+ * artboard composition, sized to the export's output pixel dimensions. It
+ * reuses the SAME shared modules as the live canvas — `video-appearance.ts`
+ * (squircle/border/shadow), `background.ts` (wallpaper cover-crop/blur),
+ * and `getVideoCoverCrop` — so the encoded frame matches the on-screen preview.
  *
- * The stage is not drawn yet — callers should draw the background layer
- * once after construction, then redraw the content layer per output frame.
+ * Each video clip becomes a Sprite whose texture wraps a per-node reused canvas;
+ * `run-export.ts` draws the decoded source frame onto it and calls
+ * `texture.source.update()` each output frame. The whole scene renders into one
+ * canvas (`app.canvas`), which Mediabunny's `CanvasSource` snapshots directly —
+ * no per-layer composite blit.
+ *
+ * Phase 1 omits the cursor overlay and the radial zoom blur (deferred); the
+ * zoom-clip camera transform IS applied. WebGPU is preferred with a WebGL2
+ * fallback, gated by a readback probe so a non-snapshottable WebGPU canvas
+ * falls back rather than producing a blank export.
  */
 export async function buildExportStage(
   options: BuildStageOptions
 ): Promise<ExportStageHandles> {
-  const { state, assetUrlsByVideoId, outputSize, container } = options
+  const { state, assetUrlsByVideoId, outputSize, container, projectPath } =
+    options
   const { artboard } = state
 
-  // Stage in output pixel space. Apply a uniform scale so every node still
-  // uses artboard coordinates internally — keeps the math identical to the
-  // editor's render path.
-  const stage = new Konva.Stage({
-    container,
-    width: outputSize.width,
-    height: outputSize.height,
-  })
-  const scale = outputSize.width / artboard.width
-  stage.scale({ x: scale, y: scale })
+  const app = await createExportApp(outputSize, container)
 
-  const backgroundLayer = new Konva.Layer({ listening: false })
-  const contentLayer = new Konva.Layer({ listening: false })
-  stage.add(backgroundLayer)
-  stage.add(contentLayer)
-  // Konva defaults the layer's backing <canvas> to `width × devicePixelRatio`
-  // — on a Retina display that's 2× the output resolution per layer, which
-  // costs ~4× memory and forces an extra downsample when we blit into the
-  // composite. For export the stage is already at the user's chosen output
-  // pixel size, so pixelRatio=1 is the right setting. Avoids OOM on 4K.
-  backgroundLayer.getCanvas().setPixelRatio(1)
-  contentLayer.getCanvas().setPixelRatio(1)
+  // world carries the artboard→output scale so every node stays in artboard
+  // coordinates (identical math to the editor preview).
+  const world = new Container()
+  world.scale.set(outputSize.width / artboard.width)
+  app.stage.addChild(world)
 
-  // ─── background ────────────────────────────────────────────────────────
-  if (artboard.background?.type === "color") {
-    backgroundLayer.add(
-      new Konva.Rect({
-        x: 0,
-        y: 0,
-        width: artboard.width,
-        height: artboard.height,
-        fill: artboard.background.value,
-        listening: false,
-        perfectDrawEnabled: false,
-        shadowForStrokeEnabled: false,
-      })
-    )
-  } else if (
-    artboard.background?.type === "wallpaper" &&
-    isWallpaperId(artboard.background.value)
-  ) {
-    const url = getWallpaperFullUrl(artboard.background.value)
-    try {
-      const bitmap = await loadImageBitmap(url)
-      const crop = getVideoCoverCrop(
-        { width: bitmap.width, height: bitmap.height },
-        { width: artboard.width, height: artboard.height }
-      )
-      backgroundLayer.add(
-        new Konva.Image({
-          x: 0,
-          y: 0,
-          width: artboard.width,
-          height: artboard.height,
-          image: bitmap as unknown as HTMLImageElement,
-          cropX: crop.cropX,
-          cropY: crop.cropY,
-          cropWidth: crop.cropWidth,
-          cropHeight: crop.cropHeight,
-          listening: false,
-          perfectDrawEnabled: false,
-          shadowForStrokeEnabled: false,
-          transformsEnabled: "position",
-        })
-      )
-    } catch {
-      // Wallpaper missing — drop the background rather than failing the
-      // entire export. Black-fill is acceptable.
-    }
-  }
+  const artboardContainer = new Container()
+  world.addChild(artboardContainer)
 
-  // Grain pass: same noise overlay the editor uses, applied at artboard
-  // resolution. Skip in v1 if it adds measurable cost on slow exports —
-  // it's a cheap pattern fill so we leave it on.
-  if (artboard.grain > 0) {
-    const tile = makeNoiseTile()
-    if (tile) {
-      backgroundLayer.add(
-        new Konva.Rect({
-          x: 0,
-          y: 0,
-          width: artboard.width,
-          height: artboard.height,
-          fillPatternImage: tile as unknown as HTMLImageElement,
-          fillPatternRepeat: "repeat",
-          globalCompositeOperation: "overlay",
-          opacity: Math.max(0, Math.min(1, artboard.grain / 100)),
-          listening: false,
-          perfectDrawEnabled: false,
-          shadowForStrokeEnabled: false,
-          transformsEnabled: "position",
-        })
-      )
-    }
-  }
+  // Composition zoom-clip cameras, clipped to the artboard — same structure as
+  // the editor scene (background fill + content zoom together).
+  const backgroundCamera = new Container()
+  const contentCamera = new Container()
+  const backgroundMask = new Graphics()
+    .rect(0, 0, artboard.width, artboard.height)
+    .fill(0xffffff)
+  const contentMask = new Graphics()
+    .rect(0, 0, artboard.width, artboard.height)
+    .fill(0xffffff)
+  const cursorMask = new Graphics()
+    .rect(0, 0, artboard.width, artboard.height)
+    .fill(0xffffff)
+  backgroundCamera.mask = backgroundMask
+  contentCamera.mask = contentMask
 
-  // ─── videos ────────────────────────────────────────────────────────────
-  // Build one Konva.Image per video. The image source starts as a
-  // placeholder canvas; the render loop swaps it to a real decoded canvas
-  // from the Mediabunny CanvasSink each frame. Nodes start `visible(false)`
-  // so a frame where the clip isn't active doesn't show the prior frame.
-  const nodesByVideoId = new Map<string, Konva.Image>()
-  const placeholderCanvas = makePlaceholderCanvas()
+  const surface = new Container()
+  backgroundCamera.addChild(surface)
+  const nodesLayer = new Container()
+  contentCamera.addChild(nodesLayer)
+  // Cursor in its own camera (mirrors the content transform + clip) so the
+  // directional reframe pan blur — which acts on `zoomedContent` — skips it,
+  // while the radial zoom blur on the whole composite still includes it.
+  const cursorCamera = new Container()
+  cursorCamera.mask = cursorMask
+  // `zoomedContent` = the pan-blur target (bg + content, no cursor). `composite`
+  // = the radial-blur target (zoomed content + cursor). Same structure as the
+  // editor scene so preview and export blur identically.
+  const zoomedContent = new Container()
+  zoomedContent.addChild(
+    backgroundCamera,
+    backgroundMask,
+    contentCamera,
+    contentMask
+  )
+  const composite = new Container()
+  composite.addChild(zoomedContent, cursorCamera, cursorMask)
 
+  // Sharp, zoom-mirrored background backing behind the blurred composite, and a
+  // clip on the filtered composite — same structure as the editor scene so the
+  // export matches. Without the backing, the pan blur's edge alpha-falloff
+  // reveals the opaque black clear in a ring at the frame edges; the clip keeps
+  // the smear from escaping the artboard rect. (See docs/editor-canvas.md →
+  // "Zoom Blur Edge Halo".)
+  const backingCamera = new Container()
+  const backingMask = new Graphics()
+    .rect(0, 0, artboard.width, artboard.height)
+    .fill(0xffffff)
+  backingCamera.mask = backingMask
+  const backingSurface = new Container()
+  backingCamera.addChild(backingSurface)
+  const clipMask = new Graphics()
+    .rect(0, 0, artboard.width, artboard.height)
+    .fill(0xffffff)
+  const clip = new Container()
+  clip.mask = clipMask
+  clip.addChild(composite)
+  artboardContainer.addChild(backingCamera, backingMask, clip, clipMask)
+  const zoomBlur = createZoomBlurFilter()
+  let zoomBlurOn = false
+  const zoomPanBlur = createZoomPanBlurFilter()
+  let zoomPanBlurOn = false
+
+  await buildExportSurface(surface, artboard)
+  // The backing mirrors the fill/wallpaper.
+  await buildExportSurface(backingSurface, artboard)
+
+  const nodesByVideoId = new Map<string, ExportVideoNode>()
   for (const video of state.videos) {
-    if (!assetUrlsByVideoId[video.id]) {
-      // Missing asset — skip this clip. Export proceeds with whatever
-      // videos we could resolve.
-      continue
-    }
-    const node = buildVideoNode(video, placeholderCanvas)
-    contentLayer.add(node)
-    nodesByVideoId.set(video.id, node)
+    if (!assetUrlsByVideoId[video.id]) continue // missing asset — skip clip
+    const built = buildExportVideoNode(video)
+    if (!built) continue
+    nodesLayer.addChild(built.wrapper)
+    nodesByVideoId.set(video.id, built.handle)
   }
 
-  // ─── cursor ──────────────────────────────────────────────────────────────
-  // The recorded cursor is part of the output video, so it is composed here
-  // on top of the video nodes (same z-order as the editor, where
-  // CanvasCursorOverlay sits after the video nodes in the content layer).
-  const cursor = await buildCursorOverlay({
+  // Cursor sits in its own camera (mirrors the content transform + clip, same
+  // z-order as the editor preview), so it zooms + clips with the content but is
+  // excluded from the reframe pan blur.
+  const cursor = await buildExportCursor(
     state,
     assetUrlsByVideoId,
-    contentLayer,
-  })
+    cursorCamera,
+    projectPath
+  )
+
+  const applyZoomCamera = (camera: ZoomCamera) => {
+    backgroundCamera.scale.set(camera.scale)
+    backgroundCamera.position.set(camera.offsetX, camera.offsetY)
+    contentCamera.scale.set(camera.scale)
+    contentCamera.position.set(camera.offsetX, camera.offsetY)
+    cursorCamera.scale.set(camera.scale)
+    cursorCamera.position.set(camera.offsetX, camera.offsetY)
+    // Keep the sharp backing aligned with the composite's own background.
+    backingCamera.scale.set(camera.scale)
+    backingCamera.position.set(camera.offsetX, camera.offsetY)
+    // The export filter input is the output canvas, so center/velocity map to
+    // output px. Radial blur on the whole composite, directional reframe pan
+    // blur on the zoomed content only (cursor excluded).
+    const on = applyZoomBlur(
+      zoomBlur,
+      camera,
+      outputSize.width,
+      outputSize.height
+    )
+    if (on !== zoomBlurOn) {
+      composite.filters = on ? [zoomBlur] : []
+      zoomBlurOn = on
+    }
+    const panOn = applyZoomPanBlur(
+      zoomPanBlur,
+      camera,
+      outputSize.width,
+      outputSize.height
+    )
+    if (panOn !== zoomPanBlurOn) {
+      zoomedContent.filters = panOn ? [zoomPanBlur] : []
+      zoomPanBlurOn = panOn
+    }
+  }
 
   const dispose = () => {
-    stage.destroy()
     nodesByVideoId.clear()
-    cursor?.renderer.destroy()
-    cursor?.images.clear()
+    cursor?.cursorSprite?.destroy()
+    zoomBlur.destroy()
+    zoomPanBlur.destroy()
+    try {
+      app.destroy({ removeView: true }, { children: true })
+    } catch {
+      // best-effort
+    }
   }
 
-  return {
-    stage,
-    backgroundLayer,
-    contentLayer,
-    nodesByVideoId,
-    outputSize,
-    cursor,
-    dispose,
-  }
+  return { app, outputSize, nodesByVideoId, cursor, applyZoomCamera, dispose }
 }
 
 /**
- * Load the recorded cursor track for the composition's screen recording and
- * build a Konva.Image node for it (added on top of the video nodes). Returns
- * null — and composes no cursor — when there is no screen recording, no
- * captured cursor sidecar, or the asset URL doesn't resolve to a project
- * folder. All cursor SVG shapes that appear in the track are pre-decoded so
- * the per-frame render loop only swaps `node.image(...)`, never awaits a load.
+ * Load the recorded cursor track + build a {@link CursorSprite} for the export
+ * (placed per frame by the render loop using the screen clip's source time).
+ * Returns null when there is no screen recording / cursor data. Cursor SVGs are
+ * pre-decoded so the per-frame loop never awaits.
  */
-async function buildCursorOverlay(opts: {
-  state: ProjectStateV1
-  assetUrlsByVideoId: Record<string, string>
-  contentLayer: Konva.Layer
-}): Promise<ExportCursorHandle | null> {
-  const { state, assetUrlsByVideoId, contentLayer } = opts
-  if (state.artboard.cursorCustomRenderingEnabled === false) return null
-
+async function buildExportCursor(
+  state: ProjectStateV1,
+  assetUrlsByVideoId: Record<string, string>,
+  parent: Container,
+  projectPath?: string
+): Promise<ExportCursorHandle | null> {
   const screenVideo = state.videos.find(
     (video) => video.role === "screen" && (video.onCanvas ?? true)
   )
   if (!screenVideo) return null
-
   const url = assetUrlsByVideoId[screenVideo.id]
   if (!url) return null
-  const folder = projectFolderFromObjectUrl(url)
+  // Prefer the explicit project folder; URL derivation is the legacy
+  // fallback for payloads that predate `projectPath`.
+  const folder = projectPath ?? projectFolderFromObjectUrl(url)
   if (!folder) return null
 
-  // getCursorData is exposed on the same preload bridge the export window
-  // already uses; it reads the recording's input sidecar and returns null when
-  // the recording captured no cursor.
-  const data = await window.api?.projects.getCursorData(folder)
+  const data = await (async () => {
+    try {
+      return await window.api?.projects.getCursorData(folder)
+    } catch (error) {
+      console.warn("[export] cursor data load failed:", error)
+      return null
+    }
+  })()
   const smoothingMode = clampCursorSmoothingMode(
     state.artboard.cursorSmoothingMode ?? CURSOR_SMOOTHING_MODE_DEFAULT
   )
-  const track = buildCursorTrack(data ?? null, { smoothingMode })
-  if (!track) return null
-
-  // Pre-decode every distinct cursor shape the track will show. When the
-  // pointer override is enabled, only the pointer asset is needed. Bounded and
-  // tiny either way, so awaiting them up front keeps the per-frame loop
-  // allocation-free.
-  const alwaysUsePointer = state.artboard.cursorAlwaysUsePointer === true
-  const cursorSetId = clampCursorSetId(state.artboard.cursorSetId)
-  const urls = new Set<string>()
-  const cursorIds = alwaysUsePointer
-    ? [CURSOR_POINTER_CURSOR_ID]
-    : track.cursorIds
-  for (const cursorId of cursorIds) {
-    const asset = resolveCursorAsset(cursorId, cursorSetId, CURSOR_SET_DEFAULT)
-    if (asset) urls.add(asset.url)
-  }
-  const images = new Map<string, HTMLImageElement>()
-  await Promise.all(
-    Array.from(urls).map(async (assetUrl) => {
-      try {
-        images.set(assetUrl, await loadHtmlImage(assetUrl))
-      } catch {
-        // A missing/undecodable cursor SVG just means that shape won't draw;
-        // the render loop hides the node for those frames rather than failing
-        // the whole export.
-      }
-    })
-  )
-  if (images.size === 0) return null
-
-  const node = new Konva.Image({
-    image: undefined,
-    listening: false,
-    perfectDrawEnabled: false,
-    shadowForStrokeEnabled: false,
-    visible: false,
+  const track = buildCursorTrack(data ?? null, {
+    smoothingMode,
+    stabilizeCursorType: state.artboard.cursorTypeStabilization === true,
   })
-  contentLayer.add(node)
+  if (!track) return null
 
   const video: CursorVideoGeometry = {
     x: screenVideo.x,
@@ -352,158 +333,284 @@ async function buildCursorOverlay(opts: {
     intrinsicWidth: screenVideo.intrinsicWidth,
     intrinsicHeight: screenVideo.intrinsicHeight,
   }
+  let cursorSprite: CursorSprite | null = null
+  let options: CursorPlaceOptions | null = null
+  let motionBlur = 0
 
-  const sizeMultiplier = clampCursorSize(
-    state.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT
-  )
-  const clickPressScale = clampCursorClickPressScale(
-    state.artboard.cursorClickPressScale ?? CURSOR_CLICK_PRESS_SCALE_DEFAULT
-  )
-  const motionBlur = clampCursorMotionBlur(
-    state.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT
-  )
-  const motionRotation = clampCursorMotionRotation(
-    state.artboard.cursorMotionRotation ?? CURSOR_MOTION_ROTATION_DEFAULT
-  )
-  const motionRotationMode = clampCursorMotionRotationMode(
-    state.artboard.cursorMotionRotationMode ??
-      CURSOR_MOTION_ROTATION_MODE_DEFAULT
-  )
-  const motionBlurBackend = clampCursorMotionBlurBackend(
-    state.artboard.cursorMotionBlurBackend ?? CURSOR_MOTION_BLUR_BACKEND_DEFAULT
-  )
-  const renderer =
-    createSpriteMotionBlurRendererForBackend(motionBlurBackend) ??
-    createSpriteMotionBlurRendererForBackend("cpu")
-  if (!renderer) return null
+  if (state.artboard.cursorCustomRenderingEnabled !== false) {
+    const alwaysUsePointer = state.artboard.cursorAlwaysUsePointer === true
+    const cursorSetId = clampCursorSetId(state.artboard.cursorSetId)
+    const urls = new Set<string>()
+    const cursorIds = alwaysUsePointer
+      ? [CURSOR_POINTER_CURSOR_ID]
+      : track.cursorIds
+    for (const cursorId of cursorIds) {
+      const asset = resolveCursorAsset(
+        cursorId,
+        cursorSetId,
+        CURSOR_SET_DEFAULT
+      )
+      if (asset) urls.add(asset.url)
+    }
+
+    if (urls.size > 0) {
+      await preloadCursorImages(urls)
+      cursorSprite = new CursorSprite(parent)
+      options = {
+        sizeMultiplier: clampCursorSize(
+          state.artboard.cursorSizeMultiplier ?? CURSOR_SIZE_DEFAULT
+        ),
+        clickPressScale: clampCursorClickPressScale(
+          state.artboard.cursorClickPressScale ??
+            CURSOR_CLICK_PRESS_SCALE_DEFAULT
+        ),
+        cursorSet: cursorSetId,
+        alwaysUsePointer,
+        motionRotation: clampCursorMotionRotation(
+          state.artboard.cursorMotionRotation ?? CURSOR_MOTION_ROTATION_DEFAULT
+        ),
+        smoothingMode,
+        referenceSize: {
+          width: state.artboard.width,
+          height: state.artboard.height,
+        },
+      }
+      motionBlur = clampCursorMotionBlur(
+        state.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT
+      )
+    }
+  }
 
   return {
-    node,
+    cursorSprite,
     track,
     video,
-    referenceSize: {
-      width: state.artboard.width,
-      height: state.artboard.height,
-    },
     screenVideoId: screenVideo.id,
-    sizeMultiplier,
-    clickPressScale,
-    alwaysUsePointer,
-    cursorSetId,
+    options,
     motionBlur,
-    motionRotation,
-    motionRotationMode,
-    smoothingMode,
-    motionBlurBackend,
-    renderer,
-    images,
   }
 }
 
-async function loadHtmlImage(url: string): Promise<HTMLImageElement> {
-  const img = new window.Image()
-  img.decoding = "async"
-  img.src = url
-  await img.decode()
-  return img
+function appearanceOf(video: ProjectVideo): NodeAppearance {
+  return {
+    cornerRadius: video.cornerRadius,
+    cornerSmoothing: video.cornerSmoothing,
+    borderWidth: video.borderWidth,
+    borderColor: video.borderColor,
+    borderOffset: video.borderOffset,
+    borderAlignment: video.borderAlignment,
+  }
 }
 
-function buildVideoNode(
-  video: ProjectVideo,
-  placeholder: HTMLCanvasElement
-): Konva.Image {
-  const squircleParams = computeSquircleParams(video)
-  const borderParams = computeBorderParams(video)
-  const shadowParams = computeShadowParams(video)
+function buildExportVideoNode(
+  video: ProjectVideo
+): { wrapper: Container; handle: ExportVideoNode } | null {
+  const intrinsicW = Math.max(1, video.intrinsicWidth)
+  const intrinsicH = Math.max(1, video.intrinsicHeight)
+
+  // Staging canvas for the fallback path (rotated / size-mismatched
+  // sources) and the texture's initial placeholder resource. On the
+  // VideoFrame fast path it is never drawn into — the decoded frame itself
+  // becomes the upload resource, so the per-frame canvas→canvas blit and
+  // canvas→GPU upload collapse into one (GPU→GPU for hardware-decoded
+  // sources).
+  const reusedCanvas = document.createElement("canvas")
+  reusedCanvas.width = intrinsicW
+  reusedCanvas.height = intrinsicH
+  const reusedCtx = reusedCanvas.getContext("2d")
+  if (!reusedCtx) return null
+
+  // Explicit ImageSource (not Texture.from's CanvasSource) so the upload
+  // resource can be swapped per frame between the staging canvas and a
+  // decoded VideoFrame. Fixed pixel size = intrinsic dims; every swapped
+  // resource matches, so uploads hit the no-realloc texSubImage2D path.
+  const imageSource = new ImageSource({
+    resource: reusedCanvas,
+    width: intrinsicW,
+    height: intrinsicH,
+    resolution: 1,
+    label: `export-video-${video.id}`,
+  })
   const cover = getVideoCoverCrop(
-    { width: video.intrinsicWidth, height: video.intrinsicHeight },
+    { width: intrinsicW, height: intrinsicH },
     { width: video.width, height: video.height }
   )
+  const texture = new Texture({
+    source: imageSource,
+    dynamic: true,
+    frame: new Rectangle(
+      cover.cropX,
+      cover.cropY,
+      cover.cropWidth,
+      cover.cropHeight
+    ),
+  })
 
-  const node = new Konva.Image({
-    x: video.x,
-    y: video.y,
+  const sprite = new Sprite(texture)
+  sprite.width = video.width
+  sprite.height = video.height
+  sprite.renderable = false // until the first frame is drawn for this clip
+
+  const content = new Container()
+  content.addChild(sprite)
+  const squircleMask = new Graphics()
+  content.mask = squircleMask
+  const borderGfx = new Graphics()
+
+  const wrapper = new Container()
+  wrapper.addChild(content, squircleMask, borderGfx)
+  wrapper.pivot.set(video.width / 2, video.height / 2)
+  wrapper.rotation = video.rotation
+  wrapper.position.set(video.x + video.width / 2, video.y + video.height / 2)
+
+  // Appearance + cover-crop are fixed across frames in the export (node size
+  // doesn't change), so they're computed once here.
+  applyVideoAppearance({
+    squircleMask,
+    borderGfx,
     width: video.width,
     height: video.height,
-    rotation: video.rotation,
-    image: placeholder,
-    cropX: cover.cropX,
-    cropY: cover.cropY,
-    cropWidth: cover.cropWidth,
-    cropHeight: cover.cropHeight,
-    listening: false,
-    perfectDrawEnabled: false,
-    shadowForStrokeEnabled: false,
-    visible: false,
+    appearance: appearanceOf(video),
   })
-  node.sceneFunc((context, shape) => {
-    const w = shape.width()
-    const h = shape.height()
-    const img = (shape as Konva.Image).image()
-    if (!img || w <= 0 || h <= 0) return
-    const ki = shape as Konva.Image
-    const cw = ki.cropWidth()
-    const ch = ki.cropHeight()
-    drawCanvasVideoFrame(
-      context,
-      img,
-      w,
-      h,
-      cw && ch ? { x: ki.cropX(), y: ki.cropY(), width: cw, height: ch } : null,
-      squircleParams,
-      borderParams,
-      shadowParams
-    )
-  })
-  return node
-}
 
-function makePlaceholderCanvas(): HTMLCanvasElement {
-  // Tiny transparent canvas — Konva needs an image() to construct the node,
-  // but the sceneFunc bails when the underlying image hasn't been swapped
-  // in yet (the `node.visible(false)` guard already prevents drawing).
-  const canvas = document.createElement("canvas")
-  canvas.width = 1
-  canvas.height = 1
-  return canvas
-}
-
-async function loadImageBitmap(url: string): Promise<ImageBitmap> {
-  const response = await fetch(url)
-  if (!response.ok) {
-    throw new Error(`Failed to fetch ${url}: ${response.status}`)
+  const handle: ExportVideoNode = {
+    setFrame(source) {
+      if (typeof VideoFrame !== "undefined" && source instanceof VideoFrame) {
+        // Fast path: upload straight from the decoded frame. The caller
+        // keeps the frame open until after app.render() (the upload happens
+        // inside render), then closes it.
+        imageSource.resource = source
+      } else {
+        if (imageSource.resource !== reusedCanvas) {
+          imageSource.resource = reusedCanvas
+        }
+        reusedCtx.drawImage(source, 0, 0, intrinsicW, intrinsicH)
+      }
+      imageSource.update()
+      sprite.renderable = true
+    },
+    hide() {
+      sprite.renderable = false
+    },
   }
-  const blob = await response.blob()
-  return createImageBitmap(blob, {
-    imageOrientation: "from-image",
-    premultiplyAlpha: "default",
-    colorSpaceConversion: "default",
-  })
+
+  return { wrapper, handle }
 }
 
-const NOISE_TILE_SIZE = 256
-let cachedNoiseTile: HTMLCanvasElement | null = null
+async function buildExportSurface(
+  surface: Container,
+  artboard: ProjectStateV1["artboard"]
+): Promise<void> {
+  // Background master switch (Background tab header): when off, the export
+  // paints no fill/wallpaper — same as the editor preview. The stored values
+  // stay in project.json untouched.
+  if (artboard.backgroundEnabled === false) return
+  const background = artboard.background ?? null
 
-function makeNoiseTile(): HTMLCanvasElement | null {
-  if (typeof document === "undefined") return null
-  if (cachedNoiseTile) return cachedNoiseTile
-  const canvas = document.createElement("canvas")
-  canvas.width = NOISE_TILE_SIZE
-  canvas.height = NOISE_TILE_SIZE
-  const ctx = canvas.getContext("2d")
-  if (!ctx) return null
-  const imageData = ctx.createImageData(NOISE_TILE_SIZE, NOISE_TILE_SIZE)
-  const data = imageData.data
-  for (let i = 0; i < data.length; i += 4) {
-    const v = (Math.random() * 256) | 0
-    data[i] = v
-    data[i + 1] = v
-    data[i + 2] = v
-    data[i + 3] = 255
+  if (background?.type === "color") {
+    const fill = new Graphics()
+    fill.rect(0, 0, artboard.width, artboard.height).fill(background.value)
+    surface.addChild(fill)
+  } else {
+    const { src, blurRadius } = resolveWallpaper(background)
+    if (src) {
+      try {
+        const padding = blurRadius > 0 ? blurredWallpaperPadding(blurRadius) : 0
+        const bitmap =
+          blurRadius > 0
+            ? await loadBlurredWallpaperBitmap(src, blurRadius)
+            : await loadWallpaperBitmap(src)
+        const crop = computeCoverCrop(
+          bitmap,
+          { width: artboard.width, height: artboard.height },
+          padding
+        )
+        if (crop) {
+          const base = Texture.from(bitmap)
+          const texture = new Texture({
+            source: base.source,
+            frame: new Rectangle(
+              crop.cropX,
+              crop.cropY,
+              crop.cropWidth,
+              crop.cropHeight
+            ),
+          })
+          const sprite = new Sprite(texture)
+          sprite.width = artboard.width
+          sprite.height = artboard.height
+          surface.addChild(sprite)
+        }
+      } catch {
+        // Wallpaper missing — drop the background rather than failing export.
+      }
+    }
   }
-  ctx.putImageData(imageData, 0, 0)
-  cachedNoiseTile = canvas
-  return canvas
+}
+
+/**
+ * Create the offscreen export renderer, preferring WebGPU and falling back to
+ * WebGL2. A 1px readback probe rejects a WebGPU canvas that can't be snapshotted
+ * by Mediabunny's `CanvasSource` (which would otherwise yield a blank export),
+ * forcing the WebGL2 path instead.
+ */
+async function createExportApp(
+  outputSize: { width: number; height: number },
+  container: HTMLDivElement
+): Promise<Application> {
+  let lastError: unknown = null
+  // Skip the WebGPU attempt entirely when its global constants are missing —
+  // init would succeed but per-frame video-texture draws in run-export.ts would
+  // throw `GPUTextureUsage is not defined`, which the init try/catch can't see.
+  for (const preference of rendererPreferenceChain()) {
+    const app = new Application()
+    try {
+      await app.init({
+        preference,
+        width: outputSize.width,
+        height: outputSize.height,
+        resolution: 1, // export is already at output pixel size; no DPR scaling
+        autoDensity: false,
+        antialias: true,
+        background: 0x000000,
+        backgroundAlpha: 1, // opaque black behind the artboard (matches prior export)
+        autoStart: false,
+        powerPreference: "high-performance",
+        eventFeatures: {
+          move: false,
+          globalMove: false,
+          click: false,
+          wheel: false,
+        },
+      })
+      app.canvas.style.display = "block"
+      container.appendChild(app.canvas)
+      app.render()
+      probeReadback(app.canvas)
+      return app
+    } catch (error) {
+      lastError = error
+      try {
+        app.destroy({ removeView: true }, { children: true })
+      } catch {
+        // best-effort
+      }
+    }
+  }
+  throw new Error(
+    `Failed to initialize an export renderer (WebGPU + WebGL2): ${String(lastError)}`
+  )
+}
+
+/** Throws if the renderer canvas can't be read back into a 2D context. */
+function probeReadback(canvas: HTMLCanvasElement): void {
+  const probe = document.createElement("canvas")
+  probe.width = 1
+  probe.height = 1
+  const ctx = probe.getContext("2d")
+  if (!ctx) throw new Error("2D probe context unavailable")
+  ctx.drawImage(canvas as CanvasImageSource, 0, 0, 1, 1)
+  ctx.getImageData(0, 0, 1, 1) // throws if the source canvas is unreadable
 }
 
 export type { ProjectVideo }

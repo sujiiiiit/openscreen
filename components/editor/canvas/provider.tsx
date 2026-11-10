@@ -10,7 +10,8 @@ import {
   useState,
   type ReactNode,
 } from "react"
-import type Konva from "konva"
+import type { PixiNodeHandle } from "./pixi/video-controller"
+import { getAutoplayOnOpenEnabled } from "@/components/editor/canvas/autoplay-preference"
 
 import {
   type ArtboardPresetId,
@@ -20,6 +21,7 @@ import {
   getArtboardPreset,
   getFitViewTransform,
   resolveAutoArtboard,
+  resolveAutoSourceDims,
 } from "@/lib/editor-canvas"
 import { useProject } from "@/components/editor/project/provider"
 import type {
@@ -32,9 +34,6 @@ import type {
   CanvasVideoItem,
   CanvasVideoRole,
   CanvasVideoSource,
-  CanvasVideoTransformPatch,
-  CursorMotionBlurBackend,
-  CursorMotionRotationMode,
   CursorSetId,
   CursorSmoothingMode,
   EditorArtboard,
@@ -53,14 +52,14 @@ import {
   serializeProjectState,
 } from "@/components/editor/canvas/persistence"
 import {
+  clampZoomMove,
+  clampZoomResize,
   createZoomClipId,
-  MIN_ZOOM_CLIP_SECONDS,
   normalizeZoomClips,
   placeZoomSpan,
   sanitizeZoomClipPatch,
   withZoomClipDefaults,
   zoomRadialBlurSettingsEqual,
-  zoomSpanOverlaps,
   zoomTransitionSettingsEqual,
 } from "@/lib/zoom-clips"
 import {
@@ -75,10 +74,8 @@ import {
 } from "@/components/editor/canvas/history"
 import {
   CURSOR_CLICK_PRESS_SCALE_DEFAULT,
-  CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   CURSOR_MOTION_BLUR_DEFAULT,
   CURSOR_MOTION_ROTATION_DEFAULT,
-  CURSOR_MOTION_ROTATION_MODE_DEFAULT,
   CURSOR_SET_DEFAULT,
   CURSOR_SMOOTHING_MODE_DEFAULT,
   CURSOR_SIZE_DEFAULT,
@@ -86,12 +83,18 @@ import {
   CURSOR_SIZE_MIN,
   clampCursorClickPressScale,
   clampCursorMotionBlur,
-  clampCursorMotionBlurBackend,
   clampCursorMotionRotation,
-  clampCursorMotionRotationMode,
   clampCursorSetId,
   clampCursorSmoothingMode,
+  projectFolderFromObjectUrl,
 } from "@/components/editor/canvas/cursor-scene"
+import { autoZoomClicksFromCursorData } from "@/components/editor/canvas/auto-zoom-scene"
+import { generateZoomClipsFromClicks } from "@/lib/auto-zoom/generate-from-clicks"
+import {
+  ARTBOARD_PADDING_MAX,
+  applyAutoLayout,
+  computeVideoPlacement,
+} from "@/lib/video-placement"
 
 const DEFAULT_VIEWPORT_SIZE: CanvasSize = { width: 0, height: 0 }
 const DEFAULT_ARTBOARD_PRESET = getArtboardPreset(DEFAULT_ARTBOARD_PRESET_ID)
@@ -100,27 +103,22 @@ const DEFAULT_ARTBOARD: EditorArtboard = {
   width: DEFAULT_ARTBOARD_PRESET.width,
   height: DEFAULT_ARTBOARD_PRESET.height,
   background: null,
-  grain: 0,
   padding: 0,
+  backgroundEnabled: true,
   cursorCustomRenderingEnabled: true,
   cursorSetId: CURSOR_SET_DEFAULT,
   cursorSizeMultiplier: CURSOR_SIZE_DEFAULT,
   cursorMotionBlur: CURSOR_MOTION_BLUR_DEFAULT,
   cursorMotionRotation: CURSOR_MOTION_ROTATION_DEFAULT,
-  cursorMotionRotationMode: CURSOR_MOTION_ROTATION_MODE_DEFAULT,
-  cursorMotionBlurBackend: CURSOR_MOTION_BLUR_BACKEND_DEFAULT,
   cursorSmoothingMode: CURSOR_SMOOTHING_MODE_DEFAULT,
   cursorClickPressScale: CURSOR_CLICK_PRESS_SCALE_DEFAULT,
   cursorAlwaysUsePointer: false,
+  cursorTypeStabilization: false,
 }
-const ARTBOARD_PADDING_MAX = 500
 const DEFAULT_VIEW_TRANSFORM = getFitViewTransform(
   DEFAULT_VIEWPORT_SIZE,
   DEFAULT_ARTBOARD
 )
-const DUPLICATED_VIDEO_OFFSET = 48
-const CAMERA_DEFAULT_DIAMETER = 240
-const CAMERA_DEFAULT_MARGIN = 32
 const TIMELINE_MIN_CLIP_DURATION_SECONDS = 1 / 30
 // Explicit seeks (user scrub, play-from-new-position, clip activation) snap to
 // the target unless the element is already within this many seconds.
@@ -154,7 +152,6 @@ type AddRemoteVideoInput = {
   durationMs?: number
   role: "screen" | "camera"
   source: CanvasVideoSource
-  placement?: Partial<Pick<CanvasVideoItem, "x" | "y" | "width" | "height">>
   shouldAbort?: () => boolean
 }
 
@@ -217,21 +214,28 @@ type EditorCanvasContextValue = {
   primaryAudioVideoId: string | null
   viewportSize: CanvasSize
   artboard: EditorArtboard
+  /**
+   * Screen-recording source pixel size the Auto preset resolves against
+   * (null = no screen source this session; Auto falls back to Wide). Lets
+   * chrome preview the Auto size without selecting it.
+   */
+  sourceVideoDims: { width: number; height: number } | null
   viewTransform: ViewTransform
   isPreviewMode: boolean
-  importError: string | null
-  addVideoFile: (file: File) => Promise<void>
   addRemoteVideo: (input: AddRemoteVideoInput) => Promise<string | null>
+  /**
+   * Canvas → provider report: the recorded cursor track failed to load for
+   * the current screen recording (missing/corrupt sidecars). Session-only;
+   * drives the inline notice in the cursor settings panel.
+   */
+  reportCursorTrackUnavailable: (unavailable: boolean) => void
   selectItem: (id: string | null) => void
-  updateVideoTransform: (id: string, patch: CanvasVideoTransformPatch) => void
   updateVideoAppearance: (id: string, patch: CanvasVideoAppearancePatch) => void
-  setVideoLocked: (id: string, locked: boolean) => void
-  duplicateVideo: (id: string) => void
   deleteVideo: (id: string) => void
   addVideoToCanvas: (id: string) => void
   setArtboardPreset: (id: ArtboardPresetId) => void
   setArtboardBackground: (background: ArtboardBackground | null) => void
-  setArtboardGrain: (grain: number) => void
+  setArtboardBackgroundEnabled: (enabled: boolean) => void
   setArtboardPadding: (padding: number) => void
   setCursorCustomRenderingEnabled: (enabled: boolean) => void
   setCursorSetId: (setId: CursorSetId) => void
@@ -239,11 +243,10 @@ type EditorCanvasContextValue = {
   setCursorSmoothingMode: (mode: CursorSmoothingMode) => void
   setCursorClickPressScale: (scale: number) => void
   setCursorAlwaysUsePointer: (enabled: boolean) => void
+  setCursorTypeStabilization: (enabled: boolean) => void
   setCursorMotionRotation: (amount: number) => void
-  setCursorMotionRotationMode: (mode: CursorMotionRotationMode) => void
   setCursorMotionBlur: (intensity: number) => void
-  setCursorMotionBlurBackend: (backend: CursorMotionBlurBackend) => void
-  setViewportSize: (size: CanvasSize) => void
+  setViewportSize: (size: CanvasSize) => ViewTransform
   setViewTransform: (transform: ViewTransform) => void
   fitArtboardToViewport: () => void
   enterPreview: () => void
@@ -252,7 +255,7 @@ type EditorCanvasContextValue = {
     id: string,
     element: HTMLVideoElement | null
   ) => void
-  registerTimelineCanvasNode: (id: string, node: Konva.Image | null) => void
+  registerTimelineCanvasNode: (id: string, node: PixiNodeHandle | null) => void
   onTimelineVideoSeeked: (
     id: string,
     element: HTMLVideoElement,
@@ -285,6 +288,8 @@ type EditorCanvasContextValue = {
   updateZoomClip: (id: string, patch: CanvasZoomClipPatch) => void
   removeZoomClip: (id: string) => void
   selectZoomClip: (id: string | null) => void
+  /** Re-run the auto-zoom detector on demand, replacing the Zoom track. */
+  regenerateAutoZoom: () => void
   subscribeTimelineTicks: (subscriber: TimelineTickSubscriber) => () => void
   stepTimelineFrame: (direction: number) => void
   registerTimelineVideoFps: (id: string, fps: number) => void
@@ -292,16 +297,12 @@ type EditorCanvasContextValue = {
 
 type EditorCanvasMediaContextValue = Pick<
   EditorCanvasContextValue,
-  | "videos"
-  | "detachedVideos"
-  | "selectedItemId"
-  | "selectedVideo"
-  | "importError"
+  "videos" | "detachedVideos" | "selectedItemId" | "selectedVideo"
 >
 
 type EditorCanvasArtboardContextValue = Pick<
   EditorCanvasContextValue,
-  "artboard"
+  "artboard" | "sourceVideoDims"
 >
 
 type EditorCanvasViewContextValue = Pick<
@@ -328,18 +329,15 @@ type EditorCanvasTimelineContextValue = Pick<
 
 type EditorCanvasActionsContextValue = Pick<
   EditorCanvasContextValue,
-  | "addVideoFile"
   | "addRemoteVideo"
+  | "reportCursorTrackUnavailable"
   | "selectItem"
-  | "updateVideoTransform"
   | "updateVideoAppearance"
-  | "setVideoLocked"
-  | "duplicateVideo"
   | "deleteVideo"
   | "addVideoToCanvas"
   | "setArtboardPreset"
   | "setArtboardBackground"
-  | "setArtboardGrain"
+  | "setArtboardBackgroundEnabled"
   | "setArtboardPadding"
   | "setCursorCustomRenderingEnabled"
   | "setCursorSetId"
@@ -347,10 +345,9 @@ type EditorCanvasActionsContextValue = Pick<
   | "setCursorSmoothingMode"
   | "setCursorClickPressScale"
   | "setCursorAlwaysUsePointer"
+  | "setCursorTypeStabilization"
   | "setCursorMotionRotation"
-  | "setCursorMotionRotationMode"
   | "setCursorMotionBlur"
-  | "setCursorMotionBlurBackend"
   | "setViewportSize"
   | "setViewTransform"
   | "fitArtboardToViewport"
@@ -380,6 +377,7 @@ type EditorCanvasTimelineActionsContextValue = Pick<
   | "updateZoomClip"
   | "removeZoomClip"
   | "selectZoomClip"
+  | "regenerateAutoZoom"
   | "subscribeTimelineTicks"
   | "stepTimelineFrame"
   | "registerTimelineVideoFps"
@@ -388,6 +386,13 @@ type EditorCanvasTimelineActionsContextValue = Pick<
 type EditorCanvasSaveStatusContextValue = {
   status: EditorSaveStatus
   error: string | null
+}
+
+// Session-only cursor-data health for the current project. Kept in its own
+// slice (not media/artboard) so the notice consumer doesn't re-render the
+// hot canvas paths.
+type EditorCanvasCursorDataContextValue = {
+  cursorTrackUnavailable: boolean
 }
 
 type EditorCanvasHistoryContextValue = {
@@ -411,6 +416,8 @@ const EditorCanvasTimelineActionsContext =
   createContext<EditorCanvasTimelineActionsContextValue | null>(null)
 const EditorCanvasSaveStatusContext =
   createContext<EditorCanvasSaveStatusContextValue | null>(null)
+const EditorCanvasCursorDataContext =
+  createContext<EditorCanvasCursorDataContextValue | null>(null)
 const EditorCanvasHistoryContext =
   createContext<EditorCanvasHistoryContextValue | null>(null)
 
@@ -458,118 +465,6 @@ function readVideoMetadata(objectUrl: string): Promise<VideoMetadata> {
   })
 }
 
-function getCoverVideoPlacement(
-  metadata: CanvasSize,
-  artboardSize: CanvasSize
-) {
-  const coverScale = Math.max(
-    artboardSize.width / metadata.width,
-    artboardSize.height / metadata.height
-  )
-  const width = metadata.width * coverScale
-  const height = metadata.height * coverScale
-
-  return {
-    x: (artboardSize.width - width) / 2,
-    y: (artboardSize.height - height) / 2,
-    width,
-    height,
-  }
-}
-
-// Padding is stored in artboard pixels for direct, one-to-one control. We
-// still clamp against the artboard's shorter edge so the inner rect can never
-// collapse to zero — leaving a 2px floor keeps `getScreenVideoPlacement`'s
-// `Math.max(1, ...)` from masking a too-aggressive value.
-function getPaddingInsetPx(artboard: EditorArtboard) {
-  const raw = Math.max(0, Math.min(ARTBOARD_PADDING_MAX, artboard.padding ?? 0))
-  if (raw <= 0) return 0
-  const maxInset = Math.max(
-    0,
-    Math.floor(Math.min(artboard.width, artboard.height) / 2) - 1
-  )
-  return Math.min(raw, maxInset)
-}
-
-function getScreenVideoPlacement(
-  metadata: CanvasSize,
-  artboard: EditorArtboard
-) {
-  const inset = getPaddingInsetPx(artboard)
-  // No padding → keep cover-fit: the screen recording fills the artboard
-  // edge-to-edge with whatever crop is needed. This preserves the existing
-  // "auto layout" behavior for users who never touch the padding slider.
-  if (inset <= 0) return getCoverVideoPlacement(metadata, artboard)
-
-  // With padding > 0 we switch to contain-fit inside the inner rect so the
-  // *entire* video is visible with breathing room on all four sides. Aspect
-  // ratio is always preserved by using the smaller of the two scales.
-  const innerWidth = Math.max(1, artboard.width - inset * 2)
-  const innerHeight = Math.max(1, artboard.height - inset * 2)
-  const containScale = Math.min(
-    innerWidth / metadata.width,
-    innerHeight / metadata.height
-  )
-  const width = metadata.width * containScale
-  const height = metadata.height * containScale
-  return {
-    x: (artboard.width - width) / 2,
-    y: (artboard.height - height) / 2,
-    width,
-    height,
-  }
-}
-
-function relayoutVideoForArtboard(
-  video: CanvasVideoItem,
-  prev: CanvasSize,
-  next: EditorArtboard
-): CanvasVideoItem {
-  if (prev.width <= 0 || prev.height <= 0) return video
-
-  if (video.role === "screen") {
-    const placement = getScreenVideoPlacement(
-      { width: video.intrinsicWidth, height: video.intrinsicHeight },
-      next
-    )
-    return { ...video, ...placement }
-  }
-
-  const scaleX = next.width / prev.width
-  const scaleY = next.height / prev.height
-  const uniformScale = Math.min(scaleX, scaleY)
-
-  if (video.role === "camera") {
-    const nextWidth = video.width
-    const nextHeight = video.height
-    const targetX = video.x * scaleX
-    const targetY = video.y * scaleY
-    const clampedX = Math.max(0, Math.min(next.width - nextWidth, targetX))
-    const clampedY = Math.max(0, Math.min(next.height - nextHeight, targetY))
-    return {
-      ...video,
-      x: clampedX,
-      y: clampedY,
-      width: nextWidth,
-      height: nextHeight,
-    }
-  }
-
-  const nextWidth = video.width * uniformScale
-  const nextHeight = video.height * uniformScale
-  const targetX = video.x * uniformScale
-  const targetY = video.y * uniformScale
-  const clampedX = Math.max(0, Math.min(next.width - nextWidth, targetX))
-  const clampedY = Math.max(0, Math.min(next.height - nextHeight, targetY))
-  return {
-    ...video,
-    x: clampedX,
-    y: clampedY,
-    width: nextWidth,
-    height: nextHeight,
-  }
-}
-
 function createCanvasId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID()
@@ -581,7 +476,7 @@ function createCanvasId() {
 // Per-role appearance defaults. Camera defaults to a fully-rounded squircle
 // at maximum smoothing, which visually matches the prior elliptical sceneFunc
 // without needing a separate `cropShape` field. Screen and media start at
-// radius 0 with `cornerSmoothing = 0.6` (the macOS look) so users get an
+// radius 0 with `cornerSmoothing = 1` (maximum smoothing) so users get an
 // already-correct curve the moment they nudge the radius slider.
 function createVideoAppearanceDefaults(
   role: CanvasVideoRole,
@@ -594,11 +489,6 @@ function createVideoAppearanceDefaults(
   | "borderColor"
   | "borderOffset"
   | "borderAlignment"
-  | "shadowColor"
-  | "shadowBlur"
-  | "shadowOffsetX"
-  | "shadowOffsetY"
-  | "shadowSpread"
 > {
   const borderDefaults: Pick<
     CanvasVideoItem,
@@ -610,24 +500,6 @@ function createVideoAppearanceDefaults(
     borderAlignment: "inside",
   }
 
-  // Shadow is rgba so the user can tune alpha alongside the color picker.
-  // All spatial fields start at 0 so the shadow pass short-circuits until
-  // the user moves a slider — no visible shadow on creation.
-  const shadowDefaults: Pick<
-    CanvasVideoItem,
-    | "shadowColor"
-    | "shadowBlur"
-    | "shadowOffsetX"
-    | "shadowOffsetY"
-    | "shadowSpread"
-  > = {
-    shadowColor: "rgba(0, 0, 0, 0.25)",
-    shadowBlur: 0,
-    shadowOffsetX: 0,
-    shadowOffsetY: 0,
-    shadowSpread: 0,
-  }
-
   if (role === "camera") {
     const radius = Math.max(
       0,
@@ -637,15 +509,13 @@ function createVideoAppearanceDefaults(
       cornerRadius: radius,
       cornerSmoothing: 1,
       ...borderDefaults,
-      ...shadowDefaults,
     }
   }
 
   return {
     cornerRadius: 0,
-    cornerSmoothing: 0.6,
+    cornerSmoothing: 1,
     ...borderDefaults,
-    ...shadowDefaults,
   }
 }
 
@@ -676,8 +546,44 @@ function buildVideoById(videos: CanvasVideoItem[]) {
   return new Map(videos.map((video) => [video.id, video]))
 }
 
-function buildTimelineClipByVideoId(clips: CanvasTimelineClip[]) {
-  return new Map(clips.map((clip) => [clip.videoId, clip]))
+function buildTimelineClipsByVideoId(clips: CanvasTimelineClip[]) {
+  const byVideoId = new Map<string, CanvasTimelineClip[]>()
+  for (const clip of clips) {
+    const list = byVideoId.get(clip.videoId)
+    if (list) list.push(clip)
+    else byVideoId.set(clip.videoId, [clip])
+  }
+  byVideoId.forEach((list) => {
+    list.sort((a, b) => a.start - b.start || a.end - b.end)
+  })
+  return byVideoId
+}
+
+function isTimelineClipActiveAt(
+  clip: CanvasTimelineClip,
+  time: number,
+  timelineEnd: number
+) {
+  const isPlayingThroughClip = time >= clip.start && time < clip.end
+  const isHoldingLastFrame =
+    !isPlayingThroughClip &&
+    time >= clip.start &&
+    time >= clip.end - TIMELINE_END_HOLD_EPSILON_SECONDS &&
+    clip.end >= timelineEnd - TIMELINE_END_HOLD_EPSILON_SECONDS
+
+  return isPlayingThroughClip || isHoldingLastFrame
+}
+
+function findTimelineClipAt(
+  clips: readonly CanvasTimelineClip[] | undefined,
+  time: number,
+  timelineEnd: number
+) {
+  if (!clips) return null
+  return (
+    clips.find((clip) => isTimelineClipActiveAt(clip, time, timelineEnd)) ??
+    null
+  )
 }
 
 function getTimelineDurationForClips(clips: readonly CanvasTimelineClip[]) {
@@ -717,6 +623,16 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const [detachedVideos, setDetachedVideos] = useState<CanvasVideoItem[]>([])
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null)
   const [artboard, setArtboard] = useState<EditorArtboard>(DEFAULT_ARTBOARD)
+  // Reactive mirror of `sourceVideoDimsRef` so editor chrome (the artboard
+  // preset dropdown's Auto row) can show what the Auto preset would resolve
+  // to without selecting it. Session-only — re-derived from the project's
+  // screen asset at hydration, never persisted. Must be written wherever the
+  // ref is written so the UI never disagrees with what `setArtboardPreset`
+  // would actually do.
+  const [sourceVideoDims, setSourceVideoDims] = useState<{
+    width: number
+    height: number
+  } | null>(null)
   const [viewportSize, setViewportSizeState] = useState<CanvasSize>(
     DEFAULT_VIEWPORT_SIZE
   )
@@ -725,7 +641,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   )
   // Session-only fullscreen preview flag. Not persisted, not in undo history.
   const [isPreviewMode, setIsPreviewMode] = useState(false)
-  const [importError, setImportError] = useState<string | null>(null)
+  // Session-only: the canvas reported that cursor sidecar data could not be
+  // loaded for the current screen recording. Not persisted.
+  const [cursorTrackUnavailable, setCursorTrackUnavailable] = useState(false)
   const [timelineClips, setTimelineClips] = useState<CanvasTimelineClip[]>([])
   // Manual Zoom-track clips (persisted) + the session-only selected zoom clip.
   // Selection is intentionally NOT persisted (mirrors `selectedItemId`).
@@ -756,8 +674,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const detachedVideosRef = useRef(detachedVideos)
   const videoByIdRef = useRef(buildVideoById(videos))
   const timelineClipsRef = useRef(timelineClips)
-  const timelineClipByVideoIdRef = useRef(
-    buildTimelineClipByVideoId(timelineClips)
+  const timelineClipsByVideoIdRef = useRef(
+    buildTimelineClipsByVideoId(timelineClips)
   )
   const zoomClipsRef = useRef(zoomClips)
   const selectedZoomClipIdRef = useRef(selectedZoomClipId)
@@ -766,7 +684,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const isTimelinePlayingRef = useRef(isTimelinePlaying)
   const isPreviewModeRef = useRef(isPreviewMode)
   const timelineVideoElementsRef = useRef(new Map<string, HTMLVideoElement>())
-  const timelineCanvasNodesRef = useRef(new Map<string, Konva.Image>())
+  const timelineCanvasNodesRef = useRef(new Map<string, PixiNodeHandle>())
   // Per-element source frame rate, measured lazily during playback. Session-
   // only: never persisted, cleared on project switch. Drives frame-stepping.
   const videoFpsRef = useRef(new Map<string, number>())
@@ -866,6 +784,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   // blank canvas is never an undo step and the user's first edit lands at
   // cursor 1.
   const hydrationSeedPendingRef = useRef(false)
+  // Armed in the slow path (first open of a fresh recording). The one-shot
+  // auto-zoom effect generates zoom clips from the captured cursor/click data
+  // once the screen recording and its timeline clip are committed, then clears
+  // this flag. The generated clips are persisted, so later opens hit the fast
+  // path and never re-detect. See docs/auto-zoom-plan.md.
+  const autoZoomPendingRef = useRef(false)
   // Maps video ids to their `file://` URLs for the lifetime of the session,
   // for both imported sources (URL returned by main on import) and recording
   // sources (the asset `fileUrl` passed to `addRemoteVideo`). Used to
@@ -1096,7 +1020,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   const commitTimelineClipsRef = useCallback(
     (nextClips: CanvasTimelineClip[]) => {
       timelineClipsRef.current = nextClips
-      timelineClipByVideoIdRef.current = buildTimelineClipByVideoId(nextClips)
+      timelineClipsByVideoIdRef.current = buildTimelineClipsByVideoId(nextClips)
       timelineVisibilityWindowRef.current = null
     },
     []
@@ -1219,7 +1143,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const resolveTimelineFrame = useCallback((videoId: string, time: number) => {
-    const clip = timelineClipByVideoIdRef.current.get(videoId)
+    const timelineEnd = timelineDurationRef.current
+    const clip = findTimelineClipAt(
+      timelineClipsByVideoIdRef.current.get(videoId),
+      time,
+      timelineEnd
+    )
     const video = videoByIdRef.current.get(videoId)
     if (!clip || !video) return null
 
@@ -1229,7 +1158,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       sourceIn,
       Math.min(clip.sourceOut, sourceDuration)
     )
-    const timelineEnd = timelineDurationRef.current
     const isPlayingThroughClip = time >= clip.start && time < clip.end
     // When the playhead lands on the very end of the timeline, keep any clip
     // that ends there visible and sample its trimmed-out frame instead of
@@ -1679,13 +1607,21 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
 
     const primaryId = primaryAudioVideoIdRef.current
     if (primaryId && visibleIds.has(primaryId)) {
-      const clip = timelineClipByVideoIdRef.current.get(primaryId)
-      if (clip && time >= clip.start && time < clip.end) return primaryId
+      const clip = findTimelineClipAt(
+        timelineClipsByVideoIdRef.current.get(primaryId),
+        time,
+        timelineDurationRef.current
+      )
+      if (clip) return primaryId
     }
 
     for (const videoId of visibleIds) {
-      const clip = timelineClipByVideoIdRef.current.get(videoId)
-      if (clip && time >= clip.start && time < clip.end) return videoId
+      const clip = findTimelineClipAt(
+        timelineClipsByVideoIdRef.current.get(videoId),
+        time,
+        timelineDurationRef.current
+      )
+      if (clip) return videoId
     }
     return null
   }, [])
@@ -1708,7 +1644,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
 
     for (const videoId of candidateIds) {
       const element = timelineVideoElementsRef.current.get(videoId)
-      const clip = timelineClipByVideoIdRef.current.get(videoId)
+      const clip = findTimelineClipAt(
+        timelineClipsByVideoIdRef.current.get(videoId),
+        fallbackTime,
+        timelineDurationRef.current
+      )
       if (!element || !clip || !Number.isFinite(element.currentTime)) continue
 
       const projectedTime = clip.start + (element.currentTime - clip.sourceIn)
@@ -1858,48 +1798,67 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  // Single seek-completion gate. The canvas-video-node hands every `seeked`
-  // event through here and we decide whether it counts as a valid hover paint
-  // or a committed paint. Either way the redrawLayer callback is what
-  // actually triggers the Konva batchDraw, so the canvas component stays
-  // unaware of hover vs committed.
+  const reissueHoverSeekToLiveTarget = useCallback(
+    (
+      videoId: string,
+      element: HTMLVideoElement,
+      landedHoverTimelineTime: number
+    ) => {
+      if (!hoverPreviewActiveRef.current) return
+      const liveHoverTime = hoverPreviewTimeRef.current
+      if (
+        liveHoverTime === null ||
+        Math.abs(liveHoverTime - landedHoverTimelineTime) <=
+          TIMELINE_FORCE_SEEK_EPSILON_SECONDS
+      ) {
+        return
+      }
+
+      const frame = resolveTimelineFrame(videoId, liveHoverTime)
+      if (!frame || !frame.active) return
+      const liveTarget = getSeekableTimelineSourceTime(
+        element,
+        frame.sourceTime,
+        frame.sourceDuration
+      )
+      if (
+        Math.abs(element.currentTime - liveTarget) <=
+        TIMELINE_FORCE_SEEK_EPSILON_SECONDS
+      ) {
+        return
+      }
+      if (hoverSeekStateRef.current.has(videoId)) return
+      issueHoverSeek(videoId, element, liveTarget, liveHoverTime)
+    },
+    [getSeekableTimelineSourceTime, issueHoverSeek, resolveTimelineFrame]
+  )
+
+  // Single seek-completion gate. The canvas video controller hands every
+  // `seeked` event through here and we decide whether it counts as a valid
+  // hover paint or a committed paint. Either way the redrawLayer callback
+  // keeps the canvas component unaware of hover vs committed.
   const onTimelineVideoSeeked = useCallback(
-    (videoId: string, element: HTMLVideoElement, redrawLayer: () => void) => {
+    (
+      videoId: string,
+      element: HTMLVideoElement,
+      redrawLayer: (afterDraw?: () => void) => void
+    ) => {
       const entry = hoverSeekStateRef.current.get(videoId)
       if (entry) {
         window.clearTimeout(entry.timeoutId)
         hoverSeekStateRef.current.delete(videoId)
-        const matched =
-          Math.abs(element.currentTime - entry.targetSourceTime) <=
-          TIMELINE_FORCE_SEEK_EPSILON_SECONDS
-        if (!matched) return // Stale hover seek — drop the paint.
-        redrawLayer()
 
-        // If the hover ref has moved past this entry's target, reissue
-        // immediately so the canvas keeps catching up without waiting for
-        // the next rAF.
-        if (!hoverPreviewActiveRef.current) return
-        const liveHoverTime = hoverPreviewTimeRef.current
-        if (
-          liveHoverTime === null ||
-          liveHoverTime === entry.hoverTimelineTime
-        ) {
-          return
-        }
-        const frame = resolveTimelineFrame(videoId, liveHoverTime)
-        if (!frame || !frame.active) return
-        const liveTarget = getSeekableTimelineSourceTime(
-          element,
-          frame.sourceTime,
-          frame.sourceDuration
-        )
-        if (
-          Math.abs(element.currentTime - liveTarget) <=
-          TIMELINE_FORCE_SEEK_EPSILON_SECONDS
-        ) {
-          return
-        }
-        issueHoverSeek(videoId, element, liveTarget, liveHoverTime)
+        // Paint the landed hover frame, then reissue toward the latest hover
+        // target if the pointer has moved. A seek can settle up to a decoded
+        // frame away from the requested time, so exact target matching would
+        // drop useful preview frames during fast ruler hover.
+        redrawLayer(() => {
+          reissueHoverSeekToLiveTarget(
+            videoId,
+            element,
+            entry.hoverTimelineTime
+          )
+        })
         return
       }
 
@@ -1942,7 +1901,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     [
       getSeekableTimelineSourceTime,
       issueCommittedSeek,
-      issueHoverSeek,
+      reissueHoverSeekToLiveTarget,
       resolveTimelineFrame,
       shouldDrawTimelineVideoFrame,
     ]
@@ -2081,7 +2040,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       let nextTime = timelineTimeRef.current + elapsedSeconds
       if (masterId) {
         const masterElement = timelineVideoElementsRef.current.get(masterId)
-        const masterClip = timelineClipByVideoIdRef.current.get(masterId)
+        const masterClip = findTimelineClipAt(
+          timelineClipsByVideoIdRef.current.get(masterId),
+          timelineTimeRef.current,
+          timelineDurationRef.current
+        )
         if (
           masterElement &&
           masterClip &&
@@ -2136,10 +2099,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     syncTimelineMediaPlayback,
   ])
 
-  // If the page is hidden or fullscreen preview loses focus, pause through the
-  // same committed-time path as the Pause button. This prevents rAF throttling
-  // or browser media suspension from leaving the cursor clock ahead of/behind
-  // the actual video frame when the app becomes visible again.
+  // If the page is hidden or the editor window loses focus, pause through the
+  // same committed-time path as the Pause button. Space switches and occlusion
+  // can throttle the renderer before `document.hidden` changes, so blur is the
+  // broader safety net. This prevents rAF throttling or browser media
+  // suspension from leaving the cursor clock ahead of/behind the actual video
+  // frame when the app becomes visible again.
   useEffect(() => {
     if (typeof document === "undefined" || typeof window === "undefined") {
       return
@@ -2164,16 +2129,16 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    const pauseBlurredPreview = () => {
-      if (!isPreviewModeRef.current || !isTimelinePlayingRef.current) return
+    const pauseBlurredPlayback = () => {
+      if (!isTimelinePlayingRef.current) return
       pauseTimeline()
     }
 
     document.addEventListener("visibilitychange", pauseHiddenPlayback)
-    window.addEventListener("blur", pauseBlurredPreview)
+    window.addEventListener("blur", pauseBlurredPlayback)
     return () => {
       document.removeEventListener("visibilitychange", pauseHiddenPlayback)
-      window.removeEventListener("blur", pauseBlurredPreview)
+      window.removeEventListener("blur", pauseBlurredPlayback)
     }
   }, [
     cancelInFlightHoverSeeks,
@@ -2198,14 +2163,19 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     const measured = videoFpsRef.current
     const primaryId = primaryAudioVideoIdRef.current
     if (primaryId) {
-      const clip = timelineClipByVideoIdRef.current.get(primaryId)
-      if (clip && time >= clip.start && time < clip.end) {
+      const clip = findTimelineClipAt(
+        timelineClipsByVideoIdRef.current.get(primaryId),
+        time,
+        timelineDurationRef.current
+      )
+      if (clip) {
         const fps = measured.get(primaryId)
         if (fps) return fps
       }
     }
+    const timelineEnd = timelineDurationRef.current
     for (const clip of timelineClipsRef.current) {
-      if (time >= clip.start && time < clip.end) {
+      if (isTimelineClipActiveAt(clip, time, timelineEnd)) {
         const fps = measured.get(clip.videoId)
         if (fps) return fps
       }
@@ -2268,9 +2238,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         // now that there's a decodable frame and the timeline has a real
         // duration. `playTimeline` clears the flag, so additional elements
         // registering later just keep in sync (they read the live playing
-        // state above) instead of restarting playback.
+        // state above) instead of restarting playback. The titlebar
+        // "Autoplay" preference is read here — at fire time, not arm time —
+        // so a toggle always applies to the very next open.
         if (
           autoplayPendingRef.current &&
+          getAutoplayOnOpenEnabled() &&
           !isTimelinePlayingRef.current &&
           timelineDurationRef.current > 0 &&
           !(typeof document !== "undefined" && document.hidden)
@@ -2296,7 +2269,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const registerTimelineCanvasNode = useCallback(
-    (id: string, node: Konva.Image | null) => {
+    (id: string, node: PixiNodeHandle | null) => {
       timelineVisibilityWindowRef.current = null
 
       if (node) {
@@ -2368,7 +2341,101 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     setCanRedo(false)
   }, [videos, timelineClips])
 
-  const setViewportSize = useCallback((size: CanvasSize) => {
+  // Shared core: read the recording's captured clicks and run the click-
+  // clustering auto-zoom generator (Cap's model). Returns the generated clips,
+  // or `null` when generation could not run at all (no active project / screen /
+  // folder / cursor data, or the project switched mid-read). Never throws.
+  const computeAutoZoomClips = useCallback(async (): Promise<
+    CanvasZoomClip[] | null
+  > => {
+    const activeProject = project
+    if (!activeProject) return null
+    try {
+      const screen = videosRef.current.find((video) => video.role === "screen")
+      if (!screen || screen.source.kind !== "recording") return null
+      const folder =
+        activeProject.path ?? projectFolderFromObjectUrl(screen.objectUrl)
+      if (!folder) return null
+      const data = await window.api?.projects.getCursorData(folder)
+      // The project may have switched during the async read.
+      if (hydratedProjectIdRef.current !== activeProject.id) return null
+      if (!data) return null
+      const screenClips = timelineClipsRef.current
+        .filter((clip) => clip.videoId === screen.id)
+        .sort((a, b) => a.start - b.start || a.end - b.end)
+      if (screenClips.length === 0) return null
+
+      const clicks = autoZoomClicksFromCursorData(data, screen, screenClips, {
+        width: artboardRef.current.width,
+        height: artboardRef.current.height,
+      })
+      return generateZoomClipsFromClicks(
+        clicks,
+        getTimelineDurationForClips(timelineClipsRef.current)
+      )
+    } catch (error) {
+      console.warn("[provider] auto-zoom generation failed:", error)
+      return null
+    }
+  }, [project])
+
+  // One-shot auto-zoom generation. On the first open of a fresh recording the
+  // slow path arms `autoZoomPendingRef`; once the screen recording and its
+  // timeline clip are committed, generate zoom clips and commit them like an
+  // ordinary edit (a single `zoom-auto-generate` undo step). Commits ONLY when
+  // there is something to add (the Zoom track is empty at first open). The
+  // output is persisted, so later opens restore it via the fast path and this
+  // never runs again. Detection failures emit no clips and never block the editor.
+  const runAutoZoomDetection = useCallback(async () => {
+    const activeProject = project
+    if (!activeProject) return
+    const clips = await computeAutoZoomClips()
+    if (
+      clips &&
+      clips.length > 0 &&
+      hydratedProjectIdRef.current === activeProject.id
+    ) {
+      historyCommitTagRef.current = "zoom-auto-generate"
+      commitZoomClipsRef(clips)
+      setZoomClips(clips)
+    }
+  }, [project, computeAutoZoomClips, commitZoomClipsRef])
+
+  // Manual "Regenerate auto-zoom": re-run the detector and REPLACE the Zoom
+  // track with the result (even when empty — that means "no zoom-worthy
+  // moments"), as a single `zoom-regenerate` undo step. Does nothing when
+  // detection could not run (cursor data unavailable), so it never silently
+  // wipes the track. Leaves `autoZoomPendingRef` untouched, so it never
+  // collides with the one-shot / fast-path coexistence.
+  const regenerateAutoZoom = useCallback(() => {
+    const activeProject = project
+    if (!activeProject) return
+    void (async () => {
+      const clips = await computeAutoZoomClips()
+      if (clips === null) return
+      if (hydratedProjectIdRef.current !== activeProject.id) return
+      historyCommitTagRef.current = "zoom-regenerate"
+      commitZoomClipsRef(clips)
+      setZoomClips(clips)
+      setSelectedZoomClipId(null)
+    })()
+  }, [project, computeAutoZoomClips, commitZoomClipsRef])
+
+  // Fire the one-shot detector once the recording's screen video AND its
+  // timeline clip exist. Armed only in the slow path, so fast-path re-opens
+  // (which restore the persisted clips) leave the ref false and never re-detect.
+  useEffect(() => {
+    if (!autoZoomPendingRef.current) return
+    const screen = videosRef.current.find((video) => video.role === "screen")
+    if (!screen) return
+    if (!timelineClipsRef.current.some((clip) => clip.videoId === screen.id)) {
+      return
+    }
+    autoZoomPendingRef.current = false
+    void runAutoZoomDetection()
+  }, [videos, timelineClips, runAutoZoomDetection])
+
+  const setViewportSize = useCallback((size: CanvasSize): ViewTransform => {
     const nextSize = {
       width: Math.max(0, Math.floor(size.width)),
       height: Math.max(0, Math.floor(size.height)),
@@ -2378,7 +2445,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       viewportSizeRef.current.width === nextSize.width &&
       viewportSizeRef.current.height === nextSize.height
     ) {
-      return
+      return viewTransformRef.current
     }
 
     setViewportSizeState((current) =>
@@ -2392,13 +2459,13 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     // In fullscreen preview the workspace owns the view transform imperatively
     // (a zero-padding fill-fit). Leave the persisted user transform untouched so
     // it can be restored on exit, and don't fight the imperative preview fit.
-    if (isPreviewModeRef.current) return
+    if (isPreviewModeRef.current) return viewTransformRef.current
 
     if (!hasCustomViewRef.current) {
       const fitTransform = getFitViewTransform(nextSize, artboardRef.current)
       viewTransformRef.current = fitTransform
       setViewTransformState(fitTransform)
-      return
+      return fitTransform
     }
 
     const clampedTransform = clampWorkspaceView(
@@ -2408,6 +2475,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     )
     viewTransformRef.current = clampedTransform
     setViewTransformState(clampedTransform)
+    return clampedTransform
   }, [])
 
   const setViewTransform = useCallback((transform: ViewTransform) => {
@@ -2458,43 +2526,45 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       flushAutosaveNow()
       historyCommitTagRef.current = "preset"
       const prevBackground = artboardRef.current.background
-      const prevGrain = artboardRef.current.grain
       const prevPadding = artboardRef.current.padding
+      const prevBackgroundEnabled = artboardRef.current.backgroundEnabled
       const prevCursorCustomRenderingEnabled =
         artboardRef.current.cursorCustomRenderingEnabled
       const prevCursorSetId = artboardRef.current.cursorSetId
       const prevCursorSize = artboardRef.current.cursorSizeMultiplier
       const prevCursorMotionBlur = artboardRef.current.cursorMotionBlur
       const prevCursorMotionRotation = artboardRef.current.cursorMotionRotation
-      const prevCursorMotionRotationMode =
-        artboardRef.current.cursorMotionRotationMode
-      const prevCursorMotionBlurBackend =
-        artboardRef.current.cursorMotionBlurBackend
       const prevCursorSmoothingMode = artboardRef.current.cursorSmoothingMode
       const prevCursorClickPressScale =
         artboardRef.current.cursorClickPressScale
       const prevCursorAlwaysUsePointer =
         artboardRef.current.cursorAlwaysUsePointer
+      const prevCursorTypeStabilization =
+        artboardRef.current.cursorTypeStabilization
       let nextArtboard: EditorArtboard
       if (id === AUTO_ARTBOARD_PRESET_ID) {
-        const auto = resolveAutoArtboard(sourceVideoDimsRef.current)
+        // Screen-source dims when hydration captured them, else the on-canvas
+        // video's intrinsic size (imported videos) — same chain the preset
+        // dropdown displays, so Auto applies exactly what it advertised.
+        const auto = resolveAutoArtboard(
+          resolveAutoSourceDims(sourceVideoDimsRef.current, videosRef.current)
+        )
         nextArtboard = {
           presetId: AUTO_ARTBOARD_PRESET_ID,
           width: auto.width,
           height: auto.height,
           background: prevBackground,
-          grain: prevGrain,
           padding: prevPadding,
+          backgroundEnabled: prevBackgroundEnabled,
           cursorCustomRenderingEnabled: prevCursorCustomRenderingEnabled,
           cursorSetId: prevCursorSetId,
           cursorSizeMultiplier: prevCursorSize,
           cursorMotionBlur: prevCursorMotionBlur,
           cursorMotionRotation: prevCursorMotionRotation,
-          cursorMotionRotationMode: prevCursorMotionRotationMode,
-          cursorMotionBlurBackend: prevCursorMotionBlurBackend,
           cursorSmoothingMode: prevCursorSmoothingMode,
           cursorClickPressScale: prevCursorClickPressScale,
           cursorAlwaysUsePointer: prevCursorAlwaysUsePointer,
+          cursorTypeStabilization: prevCursorTypeStabilization,
         }
       } else {
         const preset = getArtboardPreset(id)
@@ -2503,18 +2573,17 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           width: preset.width,
           height: preset.height,
           background: prevBackground,
-          grain: prevGrain,
           padding: prevPadding,
+          backgroundEnabled: prevBackgroundEnabled,
           cursorCustomRenderingEnabled: prevCursorCustomRenderingEnabled,
           cursorSetId: prevCursorSetId,
           cursorSizeMultiplier: prevCursorSize,
           cursorMotionBlur: prevCursorMotionBlur,
           cursorMotionRotation: prevCursorMotionRotation,
-          cursorMotionRotationMode: prevCursorMotionRotationMode,
-          cursorMotionBlurBackend: prevCursorMotionBlurBackend,
           cursorSmoothingMode: prevCursorSmoothingMode,
           cursorClickPressScale: prevCursorClickPressScale,
           cursorAlwaysUsePointer: prevCursorAlwaysUsePointer,
+          cursorTypeStabilization: prevCursorTypeStabilization,
         }
       }
 
@@ -2536,18 +2605,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         return
       }
 
+      // Placement is fully derived — re-run the auto layout for every video
+      // against the new artboard size (see `lib/video-placement.ts`).
       setVideos((current) => {
-        let didChange = false
-        const nextVideos = current.map((video) => {
-          const adjusted = relayoutVideoForArtboard(
-            video,
-            prevArtboard,
-            nextArtboard
-          )
-          if (adjusted !== video) didChange = true
-          return adjusted
-        })
-        if (!didChange) return current
+        const nextVideos = applyAutoLayout(current, nextArtboard)
+        if (nextVideos === current) return current
         commitVideosRef(nextVideos)
         return nextVideos
       })
@@ -2709,28 +2771,22 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     (id: string, start: number) => {
       const clip = zoomClipsRef.current.find((c) => c.id === id)
       if (!clip) return
-      const duration = Math.max(MIN_ZOOM_CLIP_SECONDS, clip.end - clip.start)
-      const timelineDuration = Math.max(0, timelineDurationRef.current)
-      const maxStart = Math.max(0, timelineDuration - duration)
-      const nextStart = Math.max(
-        0,
-        Math.min(Number.isFinite(start) ? start : 0, maxStart)
-      )
-      const nextEnd = nextStart + duration
-      if (nextStart === clip.start) return
-      // Safety net only — real-time `onActionMoving` blocks overlap during the
-      // drag, so the committed position should already be clear.
-      const overlaps = zoomSpanOverlaps(
+      // Neighbour-aware clamp + weld (same helper as the panel's real-time
+      // clamp, so dragged preview === committed span). A request that would
+      // overlap slides flush against the neighbour instead of silently
+      // reverting, and drag-end pixel→time float residue welds to exact
+      // adjacency so flush clips abut with a zero-second gap in project.json.
+      const placed = clampZoomMove(
         zoomClipsRef.current,
-        nextStart,
-        nextEnd,
-        id
+        Math.max(0, timelineDurationRef.current),
+        clip,
+        start
       )
-      if (overlaps) return
+      if (placed.start === clip.start && placed.end === clip.end) return
       historyCommitTagRef.current = "zoom-move"
       const next = zoomClipsRef.current
         .map((c) =>
-          c.id === id ? { ...c, start: nextStart, end: nextEnd } : c
+          c.id === id ? { ...c, start: placed.start, end: placed.end } : c
         )
         .sort((a, b) => a.start - b.start)
       commitZoomClipsRef(next)
@@ -2743,32 +2799,21 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     (id: string, start: number, end: number, direction: "left" | "right") => {
       const clip = zoomClipsRef.current.find((c) => c.id === id)
       if (!clip) return
-      const timelineDuration = Math.max(0, timelineDurationRef.current)
-      let nextStart = clip.start
-      let nextEnd = clip.end
-      if (direction === "left") {
-        nextStart = Math.max(
-          0,
-          Math.min(start, clip.end - MIN_ZOOM_CLIP_SECONDS)
-        )
-      } else {
-        nextEnd = Math.min(
-          timelineDuration,
-          Math.max(end, clip.start + MIN_ZOOM_CLIP_SECONDS)
-        )
-      }
-      if (nextStart === clip.start && nextEnd === clip.end) return
-      const overlaps = zoomSpanOverlaps(
+      // Neighbour-aware clamp + weld — see moveZoomClip. The moving edge
+      // stops flush at the neighbour / timeline bound / minimum duration; the
+      // anchored edge is kept exactly as committed.
+      const placed = clampZoomResize(
         zoomClipsRef.current,
-        nextStart,
-        nextEnd,
-        id
+        Math.max(0, timelineDurationRef.current),
+        clip,
+        { start, end },
+        direction
       )
-      if (overlaps) return
+      if (placed.start === clip.start && placed.end === clip.end) return
       historyCommitTagRef.current = "zoom-resize"
       const next = zoomClipsRef.current
         .map((c) =>
-          c.id === id ? { ...c, start: nextStart, end: nextEnd } : c
+          c.id === id ? { ...c, start: placed.start, end: placed.end } : c
         )
         .sort((a, b) => a.start - b.start)
       commitZoomClipsRef(next)
@@ -2786,6 +2831,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const nextClip = withZoomClipDefaults({ ...current, ...sanitized })
       const changed =
         nextClip.enabled !== current.enabled ||
+        nextClip.mode !== current.mode ||
         nextClip.focus.x !== current.focus.x ||
         nextClip.focus.y !== current.focus.y ||
         nextClip.scale !== current.scale ||
@@ -2822,132 +2868,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     [commitZoomClipsRef]
   )
 
-  const addVideoFile = useCallback(
-    async (file: File) => {
-      if (!file.type.startsWith("video/")) {
-        setImportError("Choose a video file to add it to the canvas.")
-        return
-      }
-
-      const currentProject = projectRef.current
-      if (!currentProject) {
-        setImportError(
-          "Open a project before adding videos so the file can be saved."
-        )
-        return
-      }
-      // Snapshot the project id so we can detect a switch during the async
-      // probe + copy. If the user opens a different project mid-import we
-      // would otherwise attach an asset whose path lives in the old folder
-      // to the new project's videos.
-      const expectedProjectId = currentProject.id
-
-      // Probe metadata from a transient blob URL — the renderer needs a URL
-      // it can hand to a `<video>` element to learn the intrinsic size and
-      // duration before the file is copied into the project folder.
-      const probeUrl = URL.createObjectURL(file)
-      let metadata: VideoMetadata
-      try {
-        metadata = await readVideoMetadata(probeUrl)
-      } catch (error) {
-        URL.revokeObjectURL(probeUrl)
-        setImportError(
-          error instanceof Error
-            ? error.message
-            : "The selected video could not be loaded."
-        )
-        return
-      } finally {
-        URL.revokeObjectURL(probeUrl)
-      }
-
-      if (projectRef.current?.id !== expectedProjectId) {
-        // Project switched during the probe — drop the import silently;
-        // the user has already moved on.
-        return
-      }
-
-      const id = createCanvasId()
-      let importResult
-      try {
-        const bytes = await file.arrayBuffer()
-        importResult = await window.api?.projects.importAsset(
-          currentProject.path,
-          { id, fileName: file.name, bytes }
-        )
-      } catch (error) {
-        setImportError(
-          error instanceof Error
-            ? error.message
-            : "The selected video could not be copied into the project."
-        )
-        return
-      }
-      if (!importResult) {
-        setImportError(
-          "The selected video could not be copied into the project."
-        )
-        return
-      }
-
-      if (projectRef.current?.id !== expectedProjectId) {
-        // Project switched after the copy completed. The asset file is now
-        // orphaned in the previous project's `assets/videos/<id>/` — accept
-        // the leak (we have no IPC to undo the copy yet) and refuse to wire
-        // the new project to a foreign file path.
-        console.warn(
-          "[provider] addVideoFile aborted after project switch; orphaning asset",
-          importResult.relativePath
-        )
-        return
-      }
-
-      const placement = getCoverVideoPlacement(metadata, artboardRef.current)
-      const item: CanvasVideoItem = {
-        id,
-        fileName: file.name,
-        objectUrl: importResult.fileUrl,
-        fileSize: importResult.fileSize,
-        source: {
-          kind: "imported",
-          relativePath: importResult.relativePath,
-          fileSize: importResult.fileSize,
-        },
-        intrinsicWidth: metadata.width,
-        intrinsicHeight: metadata.height,
-        durationMs: metadata.durationMs,
-        rotation: 0,
-        locked: false,
-        role: "media",
-        ...placement,
-        ...createVideoAppearanceDefaults("media", placement),
-      }
-
-      // Remember the file:// URL so a later undo of a delete can re-attach
-      // it without a new IPC round-trip. The map only ever holds strings.
-      sessionVideoUrlsRef.current.set(id, importResult.fileUrl)
-      // Add is destructive — flush any pending non-destructive edits as
-      // their own history entry first, then tag this mutation so the next
-      // autosave creates a separate entry for the add itself.
-      flushAutosaveNow()
-      historyCommitTagRef.current = "add"
-      setVideos((current) => {
-        const nextVideos = [...current, item]
-        commitVideosRef(nextVideos)
-        return nextVideos
-      })
-      setTimelineClips((current) => {
-        const clip = createTimelineClip(item)
-        const nextClips = [...current, clip]
-        commitTimelineClipsRef(nextClips)
-        return nextClips
-      })
-      selectedItemIdRef.current = id
-      setSelectedItemId(id)
-      setImportError(null)
-    },
-    [commitTimelineClipsRef, commitVideosRef, flushAutosaveNow]
-  )
+  // Reported by the canvas's cursor-track loader; React bails on same-value
+  // sets so repeated reports are free.
+  const reportCursorTrackUnavailable = useCallback((unavailable: boolean) => {
+    setCursorTrackUnavailable(unavailable)
+  }, [])
 
   const addRemoteVideo = useCallback(
     async (input: AddRemoteVideoInput): Promise<string | null> => {
@@ -2990,41 +2915,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         return null
       }
 
-      const artboardSize = artboardRef.current
-
-      let placement: { x: number; y: number; width: number; height: number }
-      if (input.role === "camera") {
-        const width = input.placement?.width ?? CAMERA_DEFAULT_DIAMETER
-        const height = input.placement?.height ?? CAMERA_DEFAULT_DIAMETER
-        const x =
-          input.placement?.x ??
-          artboardSize.width - width - CAMERA_DEFAULT_MARGIN
-        const y =
-          input.placement?.y ??
-          artboardSize.height - height - CAMERA_DEFAULT_MARGIN
-        placement = { x, y, width, height }
-      } else {
-        // Screen-role videos honor the artboard's padding so the hydrated
-        // recording lands inside the padded inner rect (contain-fit). Other
-        // media roles continue to use cover-fit since padding only describes
-        // the framing of the screen recording itself.
-        const fit =
-          input.role === "screen"
-            ? getScreenVideoPlacement(
-                { width: input.intrinsicWidth, height: input.intrinsicHeight },
-                artboardSize
-              )
-            : getCoverVideoPlacement(
-                { width: input.intrinsicWidth, height: input.intrinsicHeight },
-                artboardSize
-              )
-        placement = {
-          x: input.placement?.x ?? fit.x,
-          y: input.placement?.y ?? fit.y,
-          width: input.placement?.width ?? fit.width,
-          height: input.placement?.height ?? fit.height,
-        }
-      }
+      // Placement is fully derived from the artboard settings for every role
+      // (cover-fit at padding 0, padded contain-fit otherwise).
+      const placement = computeVideoPlacement(
+        { width: input.intrinsicWidth, height: input.intrinsicHeight },
+        artboardRef.current
+      )
 
       const role: CanvasVideoRole =
         input.role === "screen" || input.role === "camera"
@@ -3050,7 +2946,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         ...createVideoAppearanceDefaults(role, placement),
       }
 
-      // Same treatment as `addVideoFile`: cache the URL so undo/redo can
+      // Cache the URL so undo/redo can
       // re-attach it. Recordings need this too — a freshly recorded project
       // has no `project.json` yet, so `assetUrlsByVideoId` is empty and this
       // session cache is the only thing that survives a restore onto a snapshot
@@ -3088,16 +2984,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const setArtboardGrain = useCallback((grain: number) => {
-    const current = artboardRef.current
-    const clamped = Math.max(0, Math.min(100, Math.round(grain)))
-    if (current.grain === clamped) return
-    historyCommitTagRef.current = "grain"
-    const nextArtboard: EditorArtboard = { ...current, grain: clamped }
-    artboardRef.current = nextArtboard
-    setArtboard(nextArtboard)
-  }, [])
-
   // Recorded-cursor render size. Pure appearance — it scales the cursor's
   // render box only; position, hotspot, and timing are unaffected (see
   // `placeCursor`), so accuracy is preserved at every size. Stored on the
@@ -3133,7 +3019,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   }, [])
 
   // Target scale for the cursor while a captured click is pressed. `1` means no
-  // shrink; the current default remains 0.88. Stored on the artboard and passed
+  // shrink; the current default is 0.78 (22 % downscale). Stored on the artboard and passed
   // through shared `placeCursor` so preview/export agree.
   const setCursorClickPressScale = useCallback((scale: number) => {
     const current = artboardRef.current
@@ -3161,6 +3047,36 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     setArtboard(nextArtboard)
   }, [])
 
+  // Master switch for the background treatment (Background tab header). Only
+  // the flag flips — background/padding values stay stored so they come
+  // back when re-enabled (mirrors setCursorCustomRenderingEnabled).
+  const setArtboardBackgroundEnabled = useCallback(
+    (enabled: boolean) => {
+      const current = artboardRef.current
+      const nextEnabled = Boolean(enabled)
+      if (current.backgroundEnabled === nextEnabled) return
+      historyCommitTagRef.current = "background-enabled"
+      const nextArtboard: EditorArtboard = {
+        ...current,
+        backgroundEnabled: nextEnabled,
+      }
+      artboardRef.current = nextArtboard
+      setArtboard(nextArtboard)
+
+      // The switch also turns the padding *effect* on/off (off ⇒ full-bleed
+      // cover-fit): placement is derived, so re-fit every video against the
+      // effective padding (`getPaddingInsetPx` reads `backgroundEnabled`) —
+      // same flow as setArtboardPadding.
+      setVideos((currentVideos) => {
+        const nextVideos = applyAutoLayout(currentVideos, nextArtboard)
+        if (nextVideos === currentVideos) return currentVideos
+        commitVideosRef(nextVideos)
+        return nextVideos
+      })
+    },
+    [commitVideosRef]
+  )
+
   const setCursorSetId = useCallback((setId: CursorSetId) => {
     const current = artboardRef.current
     const clamped = clampCursorSetId(setId)
@@ -3187,6 +3103,19 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     setArtboard(nextArtboard)
   }, [])
 
+  const setCursorTypeStabilization = useCallback((enabled: boolean) => {
+    const current = artboardRef.current
+    const nextEnabled = Boolean(enabled)
+    if (current.cursorTypeStabilization === nextEnabled) return
+    historyCommitTagRef.current = "cursor-type-stabilization"
+    const nextArtboard: EditorArtboard = {
+      ...current,
+      cursorTypeStabilization: nextEnabled,
+    }
+    artboardRef.current = nextArtboard
+    setArtboard(nextArtboard)
+  }, [])
+
   // Cursor motion-rotation amount (0..1). Shared placement math derives the
   // tilt from the trailing horizontal velocity, so preview/export stay in sync
   // without adding per-frame React state.
@@ -3202,22 +3131,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     artboardRef.current = nextArtboard
     setArtboard(nextArtboard)
   }, [])
-
-  const setCursorMotionRotationMode = useCallback(
-    (mode: CursorMotionRotationMode) => {
-      const current = artboardRef.current
-      const clamped = clampCursorMotionRotationMode(mode)
-      if (current.cursorMotionRotationMode === clamped) return
-      historyCommitTagRef.current = "cursor-motion-rotation-mode"
-      const nextArtboard: EditorArtboard = {
-        ...current,
-        cursorMotionRotationMode: clamped,
-      }
-      artboardRef.current = nextArtboard
-      setArtboard(nextArtboard)
-    },
-    []
-  )
 
   // Cursor motion-blur intensity (0..1). The blur velocity is derived from
   // cursor speed (see cursor-scene.ts `computeCursorBlur`); this is the single
@@ -3235,25 +3148,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     setArtboard(nextArtboard)
   }, [])
 
-  // Renderer backend for cursor blur. The hot path reads this through the
-  // overlay's persistent renderer ref, so changing it swaps one renderer
-  // instance without adding React work to each timeline tick.
-  const setCursorMotionBlurBackend = useCallback(
-    (backend: CursorMotionBlurBackend) => {
-      const current = artboardRef.current
-      const clamped = clampCursorMotionBlurBackend(backend)
-      if (current.cursorMotionBlurBackend === clamped) return
-      historyCommitTagRef.current = "cursor-motion-blur-backend"
-      const nextArtboard: EditorArtboard = {
-        ...current,
-        cursorMotionBlurBackend: clamped,
-      }
-      artboardRef.current = nextArtboard
-      setArtboard(nextArtboard)
-    },
-    []
-  )
-
   const setArtboardPadding = useCallback(
     (padding: number) => {
       const current = artboardRef.current
@@ -3267,32 +3161,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       artboardRef.current = nextArtboard
       setArtboard(nextArtboard)
 
-      // Re-fit any screen-role videos to the new padded inner rect. Locked
-      // videos are skipped on purpose — `updateVideoTransform` already treats
-      // a locked video as immovable, and overriding that from a slider would
-      // surprise the user. Other roles (camera, media) are untouched by
-      // padding since it only frames the screen recording.
+      // Placement is fully derived — re-fit every video (all roles) to the
+      // new padded inner rect (cover-fit at padding 0, contain-fit otherwise).
       setVideos((currentVideos) => {
-        let didChange = false
-        const nextVideos = currentVideos.map((video) => {
-          if (video.role !== "screen") return video
-          if (video.locked) return video
-          const placement = getScreenVideoPlacement(
-            { width: video.intrinsicWidth, height: video.intrinsicHeight },
-            nextArtboard
-          )
-          if (
-            placement.x === video.x &&
-            placement.y === video.y &&
-            placement.width === video.width &&
-            placement.height === video.height
-          ) {
-            return video
-          }
-          didChange = true
-          return { ...video, ...placement }
-        })
-        if (!didChange) return currentVideos
+        const nextVideos = applyAutoLayout(currentVideos, nextArtboard)
+        if (nextVideos === currentVideos) return currentVideos
         commitVideosRef(nextVideos)
         return nextVideos
       })
@@ -3323,39 +3196,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     []
   )
 
-  const updateVideoTransform = useCallback(
-    (id: string, patch: CanvasVideoTransformPatch) => {
-      historyCommitTagRef.current = "transform"
-      setVideos((current) => {
-        let didChange = false
-        const nextVideos = current.map((video) => {
-          if (video.id !== id) return video
-          if (video.locked) return video
-
-          const nextVideo = { ...video, ...patch }
-          didChange =
-            nextVideo.x !== video.x ||
-            nextVideo.y !== video.y ||
-            nextVideo.width !== video.width ||
-            nextVideo.height !== video.height ||
-            nextVideo.rotation !== video.rotation
-
-          return didChange ? nextVideo : video
-        })
-
-        if (!didChange) return current
-
-        commitVideosRef(nextVideos)
-        return nextVideos
-      })
-    },
-    [commitVideosRef]
-  )
-
-  // Appearance updates (radius, smoothing) bypass the `locked` gate — locking
-  // only prevents geometry edits. Bail out early when every patched field
-  // already matches so the same slider value dragged at its current position
-  // never triggers a downstream redraw.
+  // Appearance updates (radius, smoothing, border). Bail out early
+  // when every patched field already matches so the same slider value dragged
+  // at its current position never triggers a downstream redraw.
   const updateVideoAppearance = useCallback(
     (id: string, patch: CanvasVideoAppearancePatch) => {
       historyCommitTagRef.current = "appearance"
@@ -3371,12 +3214,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
             nextVideo.borderWidth === video.borderWidth &&
             nextVideo.borderColor === video.borderColor &&
             nextVideo.borderOffset === video.borderOffset &&
-            nextVideo.borderAlignment === video.borderAlignment &&
-            nextVideo.shadowColor === video.shadowColor &&
-            nextVideo.shadowBlur === video.shadowBlur &&
-            nextVideo.shadowOffsetX === video.shadowOffsetX &&
-            nextVideo.shadowOffsetY === video.shadowOffsetY &&
-            nextVideo.shadowSpread === video.shadowSpread
+            nextVideo.borderAlignment === video.borderAlignment
           ) {
             return video
           }
@@ -3392,72 +3230,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       })
     },
     [commitVideosRef]
-  )
-
-  const setVideoLocked = useCallback(
-    (id: string, locked: boolean) => {
-      historyCommitTagRef.current = "lock"
-      setVideos((current) => {
-        let didChange = false
-        const nextVideos = current.map((video) => {
-          if (video.id !== id || video.locked === locked) return video
-
-          didChange = true
-          return {
-            ...video,
-            locked,
-          }
-        })
-
-        if (!didChange) return current
-
-        commitVideosRef(nextVideos)
-        return nextVideos
-      })
-    },
-    [commitVideosRef]
-  )
-
-  const duplicateVideo = useCallback(
-    (id: string) => {
-      const currentVideos = videosRef.current
-      const selectedIndex = currentVideos.findIndex((video) => video.id === id)
-      const selectedVideo = currentVideos[selectedIndex]
-      if (!selectedVideo) return
-
-      flushAutosaveNow()
-      historyCommitTagRef.current = "duplicate"
-      const duplicate: CanvasVideoItem = {
-        ...selectedVideo,
-        id: createCanvasId(),
-        x: selectedVideo.x + DUPLICATED_VIDEO_OFFSET,
-        y: selectedVideo.y + DUPLICATED_VIDEO_OFFSET,
-      }
-      const nextVideos = [
-        ...currentVideos.slice(0, selectedIndex + 1),
-        duplicate,
-        ...currentVideos.slice(selectedIndex + 1),
-      ]
-
-      commitVideosRef(nextVideos)
-      selectedItemIdRef.current = duplicate.id
-      const selectedClip = timelineClipsRef.current.find(
-        (clip) => clip.videoId === selectedVideo.id
-      )
-      const duplicateClip: CanvasTimelineClip = selectedClip
-        ? {
-            ...selectedClip,
-            id: createTimelineClipId(duplicate.id),
-            videoId: duplicate.id,
-          }
-        : createTimelineClip(duplicate)
-      const nextClips = [...timelineClipsRef.current, duplicateClip]
-      commitTimelineClipsRef(nextClips)
-      setVideos(nextVideos)
-      setTimelineClips(nextClips)
-      setSelectedItemId(duplicate.id)
-    },
-    [commitTimelineClipsRef, commitVideosRef, flushAutosaveNow]
   )
 
   // "Delete" from the canvas / timeline does NOT remove the video from the
@@ -3504,8 +3276,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   )
 
   // Inverse of `deleteVideo`: put a detached video back on the canvas and
-  // timeline. The stored item keeps its prior position / size / appearance;
-  // we mint a fresh full-length timeline clip (the trim from before removal is
+  // timeline. The stored item keeps its appearance, but placement is derived
+  // — it is recomputed against the *current* artboard settings so the video
+  // lands per today's padding/preset, not wherever it sat before removal. We
+  // mint a fresh full-length timeline clip (the trim from before removal is
   // intentionally not preserved) and select the restored video.
   const addVideoToCanvas = useCallback(
     (id: string) => {
@@ -3522,15 +3296,23 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       flushAutosaveNow()
       historyCommitTagRef.current = "add"
 
+      const restored: CanvasVideoItem = {
+        ...detached,
+        ...computeVideoPlacement(
+          { width: detached.intrinsicWidth, height: detached.intrinsicHeight },
+          artboardRef.current
+        ),
+        rotation: 0,
+      }
       const nextDetached = detachedVideosRef.current.filter(
         (video) => video.id !== id
       )
       commitDetachedVideosRef(nextDetached)
-      const nextVideos = [...videosRef.current, detached]
+      const nextVideos = [...videosRef.current, restored]
       commitVideosRef(nextVideos)
       const nextClips = [
         ...timelineClipsRef.current,
-        createTimelineClip(detached),
+        createTimelineClip(restored),
       ]
       commitTimelineClipsRef(nextClips)
 
@@ -3612,8 +3394,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         width: savedState.artboard.width,
         height: savedState.artboard.height,
         background: savedState.artboard.background,
-        grain: savedState.artboard.grain,
         padding: savedState.artboard.padding,
+        backgroundEnabled: savedState.artboard.backgroundEnabled !== false,
         cursorCustomRenderingEnabled:
           savedState.artboard.cursorCustomRenderingEnabled !== false,
         cursorSetId: clampCursorSetId(savedState.artboard.cursorSetId),
@@ -3625,12 +3407,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           savedState.artboard.cursorMotionRotation ??
             CURSOR_MOTION_ROTATION_DEFAULT
         ),
-        cursorMotionRotationMode: clampCursorMotionRotationMode(
-          savedState.artboard.cursorMotionRotationMode
-        ),
-        cursorMotionBlurBackend: clampCursorMotionBlurBackend(
-          savedState.artboard.cursorMotionBlurBackend
-        ),
         cursorSmoothingMode: clampCursorSmoothingMode(
           savedState.artboard.cursorSmoothingMode
         ),
@@ -3640,6 +3416,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         ),
         cursorAlwaysUsePointer:
           savedState.artboard.cursorAlwaysUsePointer === true,
+        cursorTypeStabilization:
+          savedState.artboard.cursorTypeStabilization === true,
       }
       const toCanvasVideo = (video: ProjectStateV1["videos"][number]) =>
         projectVideoToCanvasVideo(
@@ -3663,6 +3441,17 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         (savedState.zoomClips ?? []).map(projectZoomClipToCanvasClip),
         getTimelineDurationForClips(restoredClips)
       )
+
+      // Prune measured-fps entries for videos the restored snapshot no
+      // longer contains (on-canvas or detached). Without this, undoing past
+      // an add leaves a stale fps keyed by the removed id; frame-stepping a
+      // later video that reuses the id would read the wrong rate.
+      const snapshotVideoIds = new Set(
+        savedState.videos.map((video) => video.id)
+      )
+      for (const id of Array.from(videoFpsRef.current.keys())) {
+        if (!snapshotVideoIds.has(id)) videoFpsRef.current.delete(id)
+      }
 
       restoringFromHistoryRef.current = true
       historyRef.current = {
@@ -3779,16 +3568,16 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       detachedVideos,
       selectedItemId,
       selectedVideo,
-      importError,
     }),
-    [detachedVideos, importError, selectedItemId, selectedVideo, videos]
+    [detachedVideos, selectedItemId, selectedVideo, videos]
   )
 
   const artboardValue = useMemo<EditorCanvasArtboardContextValue>(
     () => ({
       artboard,
+      sourceVideoDims,
     }),
-    [artboard]
+    [artboard, sourceVideoDims]
   )
 
   const saveStatusValue = useMemo<EditorCanvasSaveStatusContextValue>(
@@ -3797,6 +3586,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       error: saveError,
     }),
     [saveStatus, saveError]
+  )
+
+  const cursorDataValue = useMemo<EditorCanvasCursorDataContextValue>(
+    () => ({ cursorTrackUnavailable }),
+    [cursorTrackUnavailable]
   )
 
   const historyValue = useMemo<EditorCanvasHistoryContextValue>(
@@ -3848,18 +3642,15 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
 
   const actionsValue = useMemo<EditorCanvasActionsContextValue>(
     () => ({
-      addVideoFile,
       addRemoteVideo,
+      reportCursorTrackUnavailable,
       selectItem,
-      updateVideoTransform,
       updateVideoAppearance,
-      setVideoLocked,
-      duplicateVideo,
       deleteVideo,
       addVideoToCanvas,
       setArtboardPreset,
       setArtboardBackground,
-      setArtboardGrain,
+      setArtboardBackgroundEnabled,
       setArtboardPadding,
       setCursorCustomRenderingEnabled,
       setCursorSetId,
@@ -3867,10 +3658,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setCursorSmoothingMode,
       setCursorClickPressScale,
       setCursorAlwaysUsePointer,
+      setCursorTypeStabilization,
       setCursorMotionRotation,
-      setCursorMotionRotationMode,
       setCursorMotionBlur,
-      setCursorMotionBlurBackend,
       setViewportSize,
       setViewTransform,
       fitArtboardToViewport,
@@ -3878,18 +3668,15 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       exitPreview,
     }),
     [
-      addVideoFile,
       addRemoteVideo,
+      reportCursorTrackUnavailable,
       selectItem,
-      updateVideoTransform,
       updateVideoAppearance,
-      setVideoLocked,
-      duplicateVideo,
       deleteVideo,
       addVideoToCanvas,
       setArtboardPreset,
       setArtboardBackground,
-      setArtboardGrain,
+      setArtboardBackgroundEnabled,
       setArtboardPadding,
       setCursorCustomRenderingEnabled,
       setCursorSetId,
@@ -3897,10 +3684,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setCursorSmoothingMode,
       setCursorClickPressScale,
       setCursorAlwaysUsePointer,
+      setCursorTypeStabilization,
       setCursorMotionRotation,
-      setCursorMotionRotationMode,
       setCursorMotionBlur,
-      setCursorMotionBlurBackend,
       setViewportSize,
       setViewTransform,
       fitArtboardToViewport,
@@ -3931,6 +3717,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       updateZoomClip,
       removeZoomClip,
       selectZoomClip,
+      regenerateAutoZoom,
       subscribeTimelineTicks,
       stepTimelineFrame,
       registerTimelineVideoFps,
@@ -3956,6 +3743,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       updateZoomClip,
       removeZoomClip,
       selectZoomClip,
+      regenerateAutoZoom,
       subscribeTimelineTicks,
       stepTimelineFrame,
       registerTimelineVideoFps,
@@ -4016,6 +3804,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       historyCommitTagRef.current = null
       restoringFromHistoryRef.current = false
       hydrationSeedPendingRef.current = false
+      autoZoomPendingRef.current = false
       sessionVideoUrlsRef.current.clear()
       setCanUndo(false)
       setCanRedo(false)
@@ -4037,6 +3826,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       isPreviewModeRef.current = false
       selectedItemIdRef.current = null
       selectedZoomClipIdRef.current = null
+      // Source dims belong to the previous project's screen recording — clear
+      // them (ref + mirror) so a project without a screen asset resolves Auto
+      // to the Wide fallback instead of the stale dims.
+      sourceVideoDimsRef.current = null
       setVideos([])
       setDetachedVideos([])
       setTimelineClips([])
@@ -4046,6 +3839,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setIsPreviewMode(false)
       setSelectedItemId(null)
       setSelectedZoomClipId(null)
+      setSourceVideoDims(null)
+      // Cursor-data health belongs to the previous project's recording; the
+      // canvas re-reports for the new one once its track loads (or fails).
+      setCursorTrackUnavailable(false)
     }
 
     hydrationGenerationRef.current += 1
@@ -4064,8 +3861,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         width: savedState.artboard.width,
         height: savedState.artboard.height,
         background: savedState.artboard.background,
-        grain: savedState.artboard.grain,
         padding: savedState.artboard.padding,
+        backgroundEnabled: savedState.artboard.backgroundEnabled !== false,
         cursorCustomRenderingEnabled:
           savedState.artboard.cursorCustomRenderingEnabled !== false,
         cursorSetId: clampCursorSetId(savedState.artboard.cursorSetId),
@@ -4077,12 +3874,6 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           savedState.artboard.cursorMotionRotation ??
             CURSOR_MOTION_ROTATION_DEFAULT
         ),
-        cursorMotionRotationMode: clampCursorMotionRotationMode(
-          savedState.artboard.cursorMotionRotationMode
-        ),
-        cursorMotionBlurBackend: clampCursorMotionBlurBackend(
-          savedState.artboard.cursorMotionBlurBackend
-        ),
         cursorSmoothingMode: clampCursorSmoothingMode(
           savedState.artboard.cursorSmoothingMode
         ),
@@ -4092,6 +3883,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         ),
         cursorAlwaysUsePointer:
           savedState.artboard.cursorAlwaysUsePointer === true,
+        cursorTypeStabilization:
+          savedState.artboard.cursorTypeStabilization === true,
       }
       artboardRef.current = savedArtboard
       // Hydration is a one-shot synchronization from disk into React state —
@@ -4117,6 +3910,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           width: screenAsset.width,
           height: screenAsset.height,
         }
+        setSourceVideoDims({
+          width: screenAsset.width,
+          height: screenAsset.height,
+        })
       }
 
       const toCanvasVideo = (video: ProjectStateV1["videos"][number]) =>
@@ -4129,9 +3926,20 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       // the project; hydrate them into the detached list so the Video tab can
       // offer to add them back. Everything else (including legacy records with
       // no `onCanvas` field) lands on the canvas.
-      const restoredVideos: CanvasVideoItem[] = savedState.videos
-        .filter((video) => video.onCanvas !== false)
-        .map(toCanvasVideo)
+      //
+      // Placement is derived, not trusted: saved x/y/width/height/rotation are
+      // recomputed from the artboard settings (`applyAutoLayout`), so legacy
+      // projects with manually-positioned or rotated videos snap to the
+      // settings-driven layout on load. The recomputed list feeds both React
+      // state and the hydrated snapshot below, keeping the autosave
+      // fingerprint in sync with memory (no redundant save on open; the disk
+      // file converges on the next genuine edit).
+      const restoredVideos: CanvasVideoItem[] = applyAutoLayout(
+        savedState.videos
+          .filter((video) => video.onCanvas !== false)
+          .map(toCanvasVideo),
+        savedArtboard
+      )
       const restoredDetached: CanvasVideoItem[] = savedState.videos
         .filter((video) => video.onCanvas === false)
         .map(toCanvasVideo)
@@ -4214,6 +4022,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         width: screenAsset.width,
         height: screenAsset.height,
       }
+      setSourceVideoDims({
+        width: screenAsset.width,
+        height: screenAsset.height,
+      })
 
       // Display captures inherit the source's aspect via the Auto preset so
       // the recording fills the artboard with no letterboxing. Window /
@@ -4222,8 +4034,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       // odd-shaped artboard.
       const useAuto = project.recordingType === "display"
       const previousBackground = artboardRef.current.background
-      const previousGrain = artboardRef.current.grain
       const previousPadding = artboardRef.current.padding
+      const previousBackgroundEnabled = artboardRef.current.backgroundEnabled
       const previousCursorCustomRenderingEnabled =
         artboardRef.current.cursorCustomRenderingEnabled
       const previousCursorSetId = artboardRef.current.cursorSetId
@@ -4231,16 +4043,14 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const previousCursorMotionBlur = artboardRef.current.cursorMotionBlur
       const previousCursorMotionRotation =
         artboardRef.current.cursorMotionRotation
-      const previousCursorMotionRotationMode =
-        artboardRef.current.cursorMotionRotationMode
-      const previousCursorMotionBlurBackend =
-        artboardRef.current.cursorMotionBlurBackend
       const previousCursorSmoothingMode =
         artboardRef.current.cursorSmoothingMode
       const previousCursorClickPressScale =
         artboardRef.current.cursorClickPressScale
       const previousCursorAlwaysUsePointer =
         artboardRef.current.cursorAlwaysUsePointer
+      const previousCursorTypeStabilization =
+        artboardRef.current.cursorTypeStabilization
       const nextArtboard: EditorArtboard = useAuto
         ? (() => {
             const auto = resolveAutoArtboard(sourceVideoDimsRef.current)
@@ -4249,19 +4059,18 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               width: auto.width,
               height: auto.height,
               background: previousBackground,
-              grain: previousGrain,
               padding: previousPadding,
+              backgroundEnabled: previousBackgroundEnabled,
               cursorCustomRenderingEnabled:
                 previousCursorCustomRenderingEnabled,
               cursorSetId: previousCursorSetId,
               cursorSizeMultiplier: previousCursorSize,
               cursorMotionBlur: previousCursorMotionBlur,
               cursorMotionRotation: previousCursorMotionRotation,
-              cursorMotionRotationMode: previousCursorMotionRotationMode,
-              cursorMotionBlurBackend: previousCursorMotionBlurBackend,
               cursorSmoothingMode: previousCursorSmoothingMode,
               cursorClickPressScale: previousCursorClickPressScale,
               cursorAlwaysUsePointer: previousCursorAlwaysUsePointer,
+              cursorTypeStabilization: previousCursorTypeStabilization,
             }
           })()
         : (() => {
@@ -4271,19 +4080,18 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               width: preset.width,
               height: preset.height,
               background: previousBackground,
-              grain: previousGrain,
               padding: previousPadding,
+              backgroundEnabled: previousBackgroundEnabled,
               cursorCustomRenderingEnabled:
                 previousCursorCustomRenderingEnabled,
               cursorSetId: previousCursorSetId,
               cursorSizeMultiplier: previousCursorSize,
               cursorMotionBlur: previousCursorMotionBlur,
               cursorMotionRotation: previousCursorMotionRotation,
-              cursorMotionRotationMode: previousCursorMotionRotationMode,
-              cursorMotionBlurBackend: previousCursorMotionBlurBackend,
               cursorSmoothingMode: previousCursorSmoothingMode,
               cursorClickPressScale: previousCursorClickPressScale,
               cursorAlwaysUsePointer: previousCursorAlwaysUsePointer,
+              cursorTypeStabilization: previousCursorTypeStabilization,
             }
           })()
       artboardRef.current = nextArtboard
@@ -4326,6 +4134,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       screenAsset.width > 0 &&
       screenAsset.height > 0
     ) {
+      // First open of a fresh recording → run auto-zoom once. The kick-off
+      // effect waits until the screen video AND its timeline clip are committed.
+      autoZoomPendingRef.current = true
       void addRemoteVideo({
         id: `${project.id}:screen`,
         url: screenAsset.fileUrl,
@@ -4484,9 +4295,13 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
             <EditorCanvasArtboardContext.Provider value={artboardValue}>
               <EditorCanvasViewContext.Provider value={viewValue}>
                 <EditorCanvasSaveStatusContext.Provider value={saveStatusValue}>
-                  <EditorCanvasHistoryContext.Provider value={historyValue}>
-                    {children}
-                  </EditorCanvasHistoryContext.Provider>
+                  <EditorCanvasCursorDataContext.Provider
+                    value={cursorDataValue}
+                  >
+                    <EditorCanvasHistoryContext.Provider value={historyValue}>
+                      {children}
+                    </EditorCanvasHistoryContext.Provider>
+                  </EditorCanvasCursorDataContext.Provider>
                 </EditorCanvasSaveStatusContext.Provider>
               </EditorCanvasViewContext.Provider>
             </EditorCanvasArtboardContext.Provider>
@@ -4554,6 +4369,13 @@ export function useEditorCanvasSaveStatus() {
   return useRequiredEditorCanvasContext(
     useContext(EditorCanvasSaveStatusContext),
     "useEditorCanvasSaveStatus"
+  )
+}
+
+export function useEditorCanvasCursorData() {
+  return useRequiredEditorCanvasContext(
+    useContext(EditorCanvasCursorDataContext),
+    "useEditorCanvasCursorData"
   )
 }
 

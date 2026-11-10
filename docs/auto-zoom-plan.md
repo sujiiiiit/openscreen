@@ -1,433 +1,293 @@
-# Auto-Zoom — Implementation Plan
+# Auto-Zoom — Implementation Plan (v2)
 
-> Status: **plan / not yet implemented.** Authored 2026-05-29 from a 3-researcher
-> design pass (detection / motion / architecture). This document is the
-> single source of truth for the build; update it as the implementation lands,
-> then fold the shipped behaviour into `docs/editor-canvas.md` (Auto-Zoom +
-> Export Pipeline + Project Persistence) and `docs/normal-term.md` per the
-> repo's doc rules.
+> Status: **superseded — see `docs/auto-zoom-algorithm.md`.** The P1 rewrite
+> (staged pipeline + importance model + two detectors + Regenerate) shipped
+> 2026-06-09; this file is kept for historical design context only. Rewritten
+> 2026-06-08 after the user locked the approach. **This supersedes the 2026-05-29
+> plan**, which predated
+> the PixiJS cutover and the manual Zoom-track and proposed a *separate*
+> `autoZoom` keyframe representation + its own camera. That separate model is
+> **dropped.** Auto-zoom is now a pure **generator of ordinary manual zoom
+> clips** (`CanvasZoomClip`). When this ships, fold the behaviour into
+> `docs/editor-canvas.md` (Auto-Zoom + Project Persistence) and add terminology
+> to `docs/normal-term.md` per the repo doc rules.
 
-## Goal
+## What it is (one sentence)
 
-After a recording, analyse the captured cursor + keyboard data and generate a
-handful of **cinematic, editable zoom keyframes** — Screen-Studio-style "push in
-on the action, hold, ease back out." The bar is *calm and intentional*, never a
-follow-cam. The detector is offline (post-recording), which is the whole
-advantage: it can see the future and place the push-in so it lands exactly as a
-click happens.
+After a recording finishes and opens in the editor for the first time, analyse
+the captured cursor moves + clicks and **emit a handful of ordinary
+`CanvasZoomClip` objects into the existing manual Zoom track** — choosing only
+*from-where-to-where* (`start`/`end`), *what point* (`focus`), and *how much*
+(`scale`). Everything else — the whole-composite camera, easing, blur,
+persistence, the editable Zoom panel, export — is the manual system, unchanged.
 
-## Decisions locked by the user (2026-05-29)
+## Decisions locked by the user (2026-06-08)
 
-1. **Whole-composite zoom** — background, grain, video, and cursor scale
-   together as one camera (matches Screen Studio). Accepted trade-off: the
-   fixed-density grain pattern magnifies (gets coarser) at high zoom; documented
-   limitation, not fixed in v1.
-2. **The tuned palette** — `1.6×` on clicks, `2.0×` on text entry, hard cap
-   `2.5×`; asymmetric ease `600 ms` in / `750 ms` (lazier) out.
-3. The keyframes are **suggestions the user can edit/disable/delete** — never a
-   locked black box.
+1. **Manual architecture only.** Auto-zoom is a generator. It produces plain
+   `CanvasZoomClip`s and changes **nothing** in the renderer/sampler. No
+   separate representation, no follow-cam, no asymmetric ease. A generated clip
+   is indistinguishable in kind from one dragged in by hand and is fully
+   editable / movable / deletable afterward.
+2. **Runs automatically, exactly once** — on the first editor open of a freshly
+   completed recording (the provider's slow-path hydration). It never re-runs:
+   the generated clips are autosaved into `project.json`, so every later open
+   restores them via the fast path. **No button, no Regenerate, no confirm, no
+   auto-vs-manual marker** (the Zoom track is empty at first open — nothing to
+   overwrite).
+3. **One tuned "calm & sparse" default** (no sensitivity UI in v1). Fewer,
+   longer, confident holds; most of the timeline stays wide. A global intensity
+   knob is a later add.
+4. **Built from data we already have** — clicks (+ `pointingHand` link targets),
+   drags, dwell/settle, and the `iBeam` text-cursor as a typing hint. **No
+   recorder, IPC, or schema changes.** Scroll-wheel and real keystroke capture
+   are deferred (see Deferred).
 
-## Guiding principle
+## Data inputs (verified against a real 34 s recording, 2026-06-08)
 
-Make **fewer, longer, more-confident** zooms. A static wide shot is the default;
-most of the timeline has no zoom. Every threshold biases toward *not* zooming.
-Motion polish (anticipation, hysteresis, smoothstep) matters more than detection
-accuracy — a mediocre detector with beautiful motion beats the reverse.
-
----
-
-## Data inputs (verified on a real recording)
-
-Written by the mac-addon to the recording folder, time-aligned so
-`processTimeMs − processTimeStartMs == screen-video source time` (alignment
-already solved; see `project_input_capture` memory):
-
-- **`mousemoves-0.json`** — `{x, y, cursorId, activeModifiers, processTimeMs, type:"mouseMoved"}`,
-  ~120 Hz. `x/y` are logical display points, top-left origin, clamped to display bounds.
-- **`mouseclicks-0.json`** — `{button, type:"mouseDown"|"mouseUp", x, y, cursorId, processTimeMs}`.
-- **`keystrokes-0.json`** — **opt-in**, may be absent/empty. `{character, processTimeMs, activeModifiers}`.
-- **`cursorId`** is semantic: `arrow`, `pointingHand` (link/button), `iBeam`/text
-  (typing), `resize*` (dragging a handle) — used to disambiguate intent.
-- Display bounds + `scaleFactor` (backing scale) come from `recording.json`.
-
-The existing cursor pipeline (`getCursorData` IPC → `CursorTrackData`) already
-parses `mousemoves-0.json` + the input manifest entry. Auto-zoom adds a sibling
-`getInputData` that also returns clicks + keystrokes (one round-trip).
-
----
-
-## Architecture — three pure modules, mirroring the cursor pattern
-
-The cursor feature is the exact template to copy: a pure deterministic
-`lib/cursors/cursor-track.ts` (detect/sample) + a shared
-`components/editor/canvas/cursor-scene.ts` (`placeCursor`, used by **both** the
-editor overlay and the exporter). Auto-zoom is the same shape.
-
-### 1. `lib/auto-zoom/zoom-track.ts` (pure detector + sampler)
-
-No React / DOM / `Date.now()` / `Math.random()`. Stable sort, deterministic ids,
-fixed reducer order, specified summation order — identical input ⇒ byte-identical
-keyframes.
+All already reachable in the renderer via `window.api.projects.getCursorData(folder)`
+→ `CursorTrackData` (`electron/ipc/projects.ts:346`, mirrored `types/api.d.ts:423`):
 
 ```ts
-// Recording-relative events (t = processTimeMs − processTimeStartMs, ms).
-export interface ZoomInputEvent {
-  t: number
-  x: number            // display points, top-left origin
-  y: number
-  kind: 'click' | 'drag' | 'key' | 'move'
-  cursorId: string
-  dragEndT?: number    // for kind:'drag', the mouseUp time
-  dragEndX?: number
-  dragEndY?: number
-}
-
-// Persisted INTENT keyframe — NOT the baked ramp. Lead-in/ease times are
-// re-derived at sample time, so tuning LEAD_IN_MS/EASE_*_MS later improves
-// already-saved projects.
-export interface ZoomKeyframe {
-  id: string                 // deterministic hash of (round(tStartMs), focus)
-  tStartMs: number           // hold-window start in source time (lead-in folded in)
-  tEndMs: number             // hold-window end in source time
-  focus: { x: number; y: number }   // NORMALIZED 0..1 in display space
-  scale: number              // quantized to the palette, ≤ ZOOM_MAX
-  kind: 'click' | 'drag' | 'typing' | 'dwell'
-  confidence: number         // 0..1
-  enabled: boolean
-}
-
-export interface ZoomGeometry {
-  displayWidth: number
+CursorTrackData = {
+  moves:   Array<{ processTimeMs; x; y; cursorId?; type? }>   // ~120 Hz, display points, top-left
+  clicks:  Array<{ processTimeMs; x; y; cursorId?; type?; button? }>  // down & up, display points
+  processTimeStartMs: number   // == screen-video source-time 0 (native re-anchors to first frame)
+  displayWidth: number         // display POINTS (not pixels)
   displayHeight: number
-  durationMs: number
 }
-
-export function rawEventsFromSidecars(
-  moves: Array<{ processTimeMs: number; x: number; y: number; cursorId?: string }>,
-  clicks: Array<{ processTimeMs: number; x: number; y: number; type: string; cursorId?: string }>,
-  keystrokes: Array<{ processTimeMs: number }> | null,
-  processTimeStartMs: number,
-): ZoomInputEvent[]
-
-export function buildAutoZoomKeyframes(
-  events: ZoomInputEvent[],
-  geom: ZoomGeometry,
-  params?: Partial<AutoZoomParams>,
-): ZoomKeyframe[]
-
-// Closed-form smoothstep ease-in → hold → ease-out around each enabled
-// keyframe's window. Total over any keyframe set (overlap-safe). Returns the
-// camera in DISPLAY POINTS (focus) + scale; identity {scale:1} between zooms.
-export function sampleAutoZoomAtTime(
-  keyframes: ZoomKeyframe[],
-  sourceMs: number,
-  params?: Partial<AutoZoomParams>,
-): { scale: number; focusX: number; focusY: number }
 ```
 
-### 2. `components/editor/canvas/zoom-scene.ts` (shared geometry, used by both render paths)
+- `x/y` are **display-relative logical points, top-left origin** (not pixels,
+  not normalized). `t_source_ms = processTimeMs − processTimeStartMs`.
+- `clicks` carries its own `x/y` per event — no need to re-sample moves. `type`
+  normalizes to `down`/`up`; **filter to `down`** to count discrete clicks.
+- `cursorId` is semantic: `arrow`, `pointingHand` (link/button → strong "real
+  target" signal), `iBeam` (text field → typing context), `resize*`, etc.
+- Keystrokes sidecar (`keystrokes-0.json`) is **opt-in and NOT surfaced** to the
+  renderer today (and was off in the sample) — typing is inferred from `iBeam`.
+- Native already records `captureInput`/`captureCursorShapes` (confirmed in the
+  sample manifest), so no capture change is needed for v1.
 
-First, **extract** the display-point→artboard block currently inlined in
-`placeCursor` (`cursor-scene.ts:123-144`) into a shared
-`displayPointToArtboard()` and have `placeCursor` call it — so the cursor and the
-camera map points through *the same* cover-crop + transform math and can never
-drift.
+## Modules & wiring (the entire build surface)
+
+### 1. `lib/auto-zoom/zoom-detect.ts` — pure detector (NEW)
+
+No React / DOM / `Date.now()` / `Math.random()`. Deterministic: stable sort,
+fixed reducer order, ids derived from `round(tStartMs)`+focus (so re-running is
+idempotent and never churns the autosave fingerprint).
 
 ```ts
-export interface DisplayToArtboard {
-  artboardX: number
-  artboardY: number
-  /** uniform px-per-display-point scale (cover crop preserves aspect) */
-  scale: number
-}
-export function displayPointToArtboard(
-  displayX: number, displayY: number,
-  video: CursorVideoGeometry,     // already exported from cursor-scene.ts
-  displayWidth: number, displayHeight: number,
-): DisplayToArtboard
-
-export interface AutoZoomCamera {
-  scale: number      // 1 = no zoom (identity-snapped within EPSILON)
-  offsetX: number    // artboard-space translation
-  offsetY: number
+export interface AutoZoomInput {
+  clicks: Array<{ tSourceMs: number; x: number; y: number; cursorId?: string; button?: string | number }>
+  moves:  Array<{ tSourceMs: number; x: number; y: number; cursorId?: string }>
+  // Pre-resolved geometry so the detector stays pure (no scene access):
+  toFocus: (x: number, y: number) => { x: number; y: number; onScreen: boolean } // display pt → artboard-normalized
+  toTimelineSeconds: (tSourceMs: number) => number | null  // source ms → timeline s, or null if trimmed out
+  timelineDurationSeconds: number
+  params?: Partial<AutoZoomParams>
 }
 
-// Sample the keyframes at source time, map the normalized focus → artboard
-// space, build the scale + translation, and CLAMP so the visible window
-// (artboard W/scale × H/scale) stays inside the artboard (no exposed edges).
-// Pure: editor tick and export loop call it at the same source time.
-export function placeAutoZoomCamera(
-  keyframes: ZoomKeyframe[],
-  video: CursorVideoGeometry,
-  artboard: { width: number; height: number },
-  geom: { displayWidth: number; displayHeight: number },
-  sourceSeconds: number,
-): AutoZoomCamera
-
-// Tiny helper that writes the camera onto a Konva node (Layer or Group).
-// scale + position; identity-snaps to {1,0,0}.
-export function applyCamera(node: Konva.Node, cam: AutoZoomCamera): void
+// Returns ready-to-commit clips, already non-overlapping & defaulted.
+export function buildAutoZoomClips(input: AutoZoomInput): CanvasZoomClip[]
 ```
 
-**Camera math.** Choose the focus point `c` in artboard space (focus normalized
-→ display points → `displayPointToArtboard`). The viewer always sees the fixed
-artboard `W×H`; a zoom of `S` shows a window `W/S × H/S` centred on `c`. So
-`scale = S`, and the translation pins `c` to the artboard centre:
-`offset = center − S·c`. **Pan-clamp:** clamp `c.x ∈ [W/(2S), W − W/(2S)]`
-(and y) *before* computing the offset, so the window never exposes outside the
-artboard. If the clamp interval is empty (focus too near an edge at that scale),
-reduce `S` toward 1 until it fits; if even `S=1` can't contain, emit identity.
-`placeAutoZoomCamera` owns this clamp identically for both paths.
+The detector calls **`withZoomClipDefaults`** (`lib/zoom-clips.ts`) per clip and
+runs the final list through **`normalizeZoomClips(list, durationSeconds)`** so
+the non-overlap lane invariant the whole manual system assumes is guaranteed.
 
-### 3. Thin callers (editor + export) — see Wiring.
+### 2. Share the display→artboard focus math (export an existing helper)
 
----
+`mapCursorSampleToArtboard` (`components/editor/canvas/cursor-scene.ts:308`) is
+currently internal. **Extract/export a pure `displayPointToArtboard(x, y,
+video: CursorVideoGeometry, displayWidth, displayHeight)`** returning
+`{ x, y, onScreen }` in artboard px, and have both `placeCursor` and the
+detector's `toFocus` call it — so an auto-zoom focus lands on **exactly** the
+pixel the cursor overlay shows. CLAUDE.md forbids duplicating this cover-crop
+math; we share it. `toFocus` then divides by `artboard.{width,height}` and
+`clampZoomFocus`-clamps to `[0,1]`.
 
-## Detection pipeline (inside `buildAutoZoomKeyframes`)
+### 3. Provider one-shot trigger (`components/editor/canvas/provider.tsx`)
 
-| # | Stage | What |
-|---|---|---|
-| 1 | Parse | `rawEventsFromSidecars`: normalize to recording-relative ms, drop `t < 0`, stable-sort by `(t, click > key > move)`. Reuse `rawSamplesFromMoves`' shape. Tolerate missing/empty keystrokes. |
-| 2 | Score intent | Weight each non-move event: click `1.0`, drag(travel > `DRAG_MIN_TRAVEL`) `1.2`, typing-burst/iBeam `1.0`, dwell `0.5`, raw moves **`0`**. cursorId multipliers: `pointingHand ×1.15`, `iBeam ×1.1`. Collapse `mouseDown→mouseUp` with travel > `DRAG_MIN_TRAVEL` into one drag event spanning the gesture. |
-| 3 | Temporal segment | Single linear pass; new segment when the gap to the previous scored event > `SEGMENT_GAP_MS`. Accumulate weighted events per segment. Optional **one** spatial split per segment when it spans far-apart locations with a clear internal temporal seam. |
-| 4 | Resolve focus + scale | Focus = the **settle point** (3-sample median speed low-pass; first sustained-low after a ballistic peak) or directly the click `x/y` (ground-truth settle) — *never the mid-flight arc*. Focus = intent-weighted centroid dominated by clicks/settle, clamped in-frame, stored **normalized**. Scale from the 80th-percentile spatial spread mapped via `FRAME_FILL`, quantized to the palette, capped at `ZOOM_MAX`. |
-| 5 | Reduce (fixed order) | (a) drop segment weight < `MIN_SEGMENT_WEIGHT`; (b) **merge** segments closer than `MERGE_GAP_MS` with focus within `MERGE_DIST` into one continuous hold; (c) drop/extend windows shorter than `MIN_HOLD_MS`; (d) keep top-N by confidence under `MAX_ZOOMS_PER_MIN`; (e) re-sort by time. Snapshot-tested. |
-| 6 | Emit | `ZoomKeyframe[]` with lead-in folded into `tStartMs` (shift earlier by `LEAD_IN_MS`), `tEndMs` extended for hysteresis and clamped to `durationMs − TAIL_GUARD_MS`. |
+The screen video + its timeline clip are added **asynchronously** in the slow
+path (`void addRemoteVideo(...)`, ~`provider.tsx:4020`), so detection cannot run
+inline. Instead, piggyback on the **first-recording-committed** moment:
 
-### When / Where / How much / Typing
+- **Arm** in the slow path: when a `screen` asset exists, set
+  `autoZoomPendingRef.current = true` (alongside `hydrationSeedPendingRef`).
+- **Run once** in an effect keyed on `[videos, timelineClips]` (sibling of the
+  history-seed effect at `provider.tsx:2306`): when `autoZoomPendingRef` is set
+  and the screen video + its screen timeline clip are present, clear the flag
+  and kick off async detection:
+  1. `getCursorData(projectFolder)` → `CursorTrackData` (or `null` → emit no
+     clips, never throw/block open).
+  2. Build `CursorVideoGeometry` from the committed screen `CanvasVideoItem`
+     (`x,y,width,height,rotation,intrinsicWidth,intrinsicHeight`) + `artboardRef`,
+     and the screen timeline clip (`start,end,sourceIn,sourceOut`).
+  3. `toFocus` = `displayPointToArtboard(...) ÷ artboard`; `toTimelineSeconds` =
+     **inverse of `CursorController.getSourceSeconds`**:
+     `timelineS = clip.start + (sourceS − clip.sourceIn)`, returning `null` when
+     `sourceS ∉ [sourceIn, sourceOut)` (trimmed-out → drop the click).
+  4. `buildAutoZoomClips(...)` → `CanvasZoomClip[]`.
+  5. Commit internally via `commitZoomClipsRef(next)` + `setZoomClips(next)` (the
+     same pair every mutator uses). The `zoomClips` change triggers the existing
+     autosave debounce → `project.json` now carries the clips → never re-runs.
+- **Reset:** `autoZoomPendingRef.current = false` is already covered by the
+  project-switch reset block (extend it alongside the other refs at
+  `provider.tsx:3692`).
 
-- **When** — a segment must clear `MIN_SEGMENT_WEIGHT`, survive the reducer, and
-  the clip must be ≥ `MIN_CLIP_MS`. Raw moves never trigger.
-- **Where** — settle point or click position; typing anchors to the preceding
-  `iBeam` click / pre-burst settle (the mouse is *still* during typing — never
-  use the live mouse position).
-- **How much** — tight cluster → palette top; broad activity → gentler; capped
-  at `2.5×` (source-sharpness ceiling at the recording backing scale).
-- **Typing** — burst = ≥2 keys within `TYPE_GAP_MS`, or any key while
-  `cursorId == 'iBeam'`. Use `ZOOM_TYPING` and a longer hold (cover the keystroke
-  span + a short tail). No keystrokes sidecar → fall back to `iBeam` on
-  clicks/moves; tabbed-into-field with no anchor → accept a missed zoom in v1.
+No change to `EditorCanvasTimelineActions` — the trigger is internal, so no
+public bulk mutator is exposed.
 
----
+#### Undo / baseline behaviour — pick one (recommend **fold-into-baseline**)
 
-## Motion (inside `sampleAutoZoomAtTime`)
+The history baseline is seeded the instant the recording commits
+(`provider.tsx:2306`). Two options for where the auto-zoom clips sit relative to
+it:
 
-- **Easing** — closed-form **smoothstep** (cubic, C1-continuous, zero overshoot)
-  over explicit ease-in → hold → ease-out windows. **No physics spring in v1.**
-  Overshoot/bounce easing banned (the cheap-motion tell on a full-frame camera).
-- **Anticipation** — lead-in folded into `tStartMs` at generate time, so the
-  push-in lands as the click happens, and a trim clips it naturally like any
-  other window.
-- **Hysteresis** — asymmetric eager-in / lazy-out (`EASE_OUT_MS > EASE_IN_MS`);
-  `tEndMs` extended before the ease-out so the camera holds through short pauses.
-  Adjacent segments within `MERGE_GAP_MS`/`MERGE_DIST` are merged at detection
-  time, so the camera never zooms out only to immediately zoom back in.
-- **No deadzone pan in v1** — every zoom is a **static hold** on a fixed focus.
-  The only motion is segment-to-segment transitions (direct eased retarget).
-  Deadzone lazy-follow is deferred.
-- **Rate limit** — `MAX_ZOOMS_PER_MIN` + `MIN_HOLD_MS` + the merge step, all at
-  plan time (deterministic).
+- **(B) Fold into baseline (recommended).** Defer the baseline seed until
+  detection resolves (gate the seed effect on an `autoZoomResolvedRef`), so the
+  recording's cursor-0 baseline *includes* the auto-zoom clips. Then auto-zoom
+  is "just how the recording opens" — `Cmd+Z` does not strip it, and there's no
+  spurious undo step or "saving…" flash on open. Slightly more coordination.
+- **(A) Post-hydration edit (simpler).** Let detection land as a normal commit
+  on top of the baseline, tagged (e.g. `zoom-auto`). `Cmd+Z` right after open
+  removes all auto-zooms in one step. Simplest; defensible if "undo the auto
+  zooms" is considered a feature.
 
----
+**Implemented: (A)** — the simpler, lower-risk option (it leaves the delicate
+history-seed flow untouched). On first open `Cmd+Z` removes all generated zooms
+in one atomic step (`zoom-auto-generate` ∈ `ALWAYS_NEW_ENTRY_TAGS`). Switching to
+(B) later is a contained change (gate the seed effect on an auto-zoom-resolved
+flag). The 2026-05-29 "fold into baseline" preference is recorded above as the
+follow-up.
 
-## Persistence — persist the intent keyframes, do NOT derive-on-load
+## Coordinate & time mapping (the correctness core — get this exactly right)
 
-The user can edit/disable keyframes, so they must survive a refresh ⇒ persist.
-Persist **only** the detector's intent (window + normalized focus + scale + kind
-+ enabled), not the baked ramps, so motion-constant tuning improves old projects.
-Export reads the persisted keyframes and **never re-detects**, so future detector
-tuning can't desync preview from MP4.
-
-Add an **optional** field — no version bump (mirrors `cursorSizeMultiplier` /
-`onCanvas` precedent; `parseProjectState` tolerates absent optionals, old
-`project.json` keeps loading):
-
-```ts
-// project-schema.ts — ProjectArtboard
-autoZoom?: { keyframes: ProjectZoomKeyframe[] }
-```
-
-Wire in lock-step (per CLAUDE.md persistence rules):
-
-- **`electron/ipc/project-schema.ts`** — `ProjectZoomKeyframe` type + `parseArtboard`
-  reads `autoZoom` via a tolerant `parseZoomKeyframe` (clamp scale to `[1, ZOOM_MAX]`,
-  focus to `[0,1]`, drop malformed entries; absent → `undefined`). No reject on missing.
-- **`types/api.d.ts`** — mirror `ProjectZoomKeyframe` + the `autoZoom` field.
-- **`components/editor/canvas/persistence.ts`** — `serializeArtboard` emits
-  `autoZoom` (omit when empty, to keep legacy `project.json` byte-identical and
-  the post-hydration autosave a no-op); add the deserialize half. **Include
-  `autoZoom` in `fingerprintProjectState`** so edits trigger a save — this is why
-  the keyframe `id` MUST be deterministic (a re-stamped id would churn the
-  fingerprint into a save loop).
-- **`components/editor/canvas/provider.tsx`** — hold the keyframes in editor
-  state; apply in **both** hydration paths (fast-path restore + slow-path
-  synthesis), **reset** in the project-switch block, and add to the
-  **autosave-effect dependency** list. (Detection itself runs only on the
-  explicit button, below — hydration just restores what was saved.)
-- **Save-status** — the "Auto-zoom" generate writes through the normal autosave
-  debounce; no parallel save mechanism.
-
----
-
-## Wiring the camera into the two render paths
-
-The **math is shared** (`placeAutoZoomCamera` → `{scale, offsetX, offsetY}`);
-only the *application site* differs, because the two stages are structured
-differently (same situation as `placeCursor` today).
-
-### Editor (`editor-workspace.tsx`)
-
-Whole-composite ⇒ transform **background + content together**, but **not** the
-snap-guide / overlay chrome layers.
-
-- The background lives in the first `<Layer listening={false}>` (`ArtboardBackground`
-  + `ArtboardGrain` + `ArtboardPixelGrid`, line ~1366). Add a `backgroundLayerRef`.
-- The content lives in `contentLayerRef`, inside an **artboard-clip `Group`**
-  (`clipX/Y/Width/Height`, line ~1393) holding the videos + `CanvasCursorOverlay`.
-- **Keep the artboard viewport fixed while its contents scale:** introduce one
-  **inner camera `Group`** *inside* the existing clip group (wrapping the videos +
-  cursor) and apply the camera to it — so the clip rect and the artboard border
-  stay put while the content scales. Apply the same camera to the background
-  group/layer. Do **not** apply it to the clip group itself (its clip would scale)
-  nor to the layer wholesale (the artboard-fill hit-rect + border rect would move).
-- Drive it imperatively from the existing timeline tick (the same hot path
-  `CanvasCursorOverlay` uses via `subscribeTimelineTicks` / `subscribeHoverTime`):
-  sample the keyframes, `applyCamera(...)` to the background group + inner camera
-  group, `batchDraw()`. **No per-frame React state.**
-- The camera composes **under** the user's stage-level `ViewTransform` (pan/zoom
-  for inspection) — so the user can still inspect while the camera animates inside
-  the artboard the viewer will see. Pixel grid note: it currently sits in the
-  background group and will zoom with it; if that's unwanted it should move to an
-  overlay (chrome) layer — flag, not v1-critical.
-
-### Export (`build-stage.ts` + `run-export.ts`)
-
-The export stage is exactly artboard-sized (`stage.scale = outputW/artboardW`),
-has **no** clip group, and the background/content are separate `Konva.Layer`s —
-so apply the camera **at layer level** to `handles.backgroundLayer` and
-`handles.contentLayer` (both children of the stage, composing under the stage
-scale). Build a `ZoomCameraHandle` in `buildExportStage` analogous to the cursor
-handle (carry the keyframes + geometry).
-
-In the `run-export.ts` frame loop, per frame:
-1. Compute `cam = placeAutoZoomCamera(keyframes, screenVideo, artboard, geom, screenEntry.sourceTimeSec)` using the active screen clip's source time (honours trims/splits via the frame plan).
-2. `applyCamera(handles.contentLayer, cam)` **and** `applyCamera(handles.backgroundLayer, cam)`.
-3. **Background redraw fix:** today the background is drawn **once** (`run-export.ts:290`)
-   and only `contentLayer.draw()` runs per frame. With whole-composite zoom the
-   background transforms too, so it must be **re-drawn on frames where the camera
-   transform changed** (track the previous `cam`; if equal — e.g. an identity
-   stretch between zooms — keep the draw-once optimization). On `scale==1`
-   (identity-snap) the background can stay as last drawn.
-
-### Generate trigger
-
-An explicit **"Auto-zoom" button** runs the detector once
-(`getInputData` → `buildAutoZoomKeyframes`) and writes `enabled:true` keyframes so
-the effect shows immediately. **"Regenerate"** re-runs with a confirm and
-overwrites. (Auto-on-first-open is a one-line follow-up once tuning is trusted.)
-
----
-
-## Tunable constants (taste lives here, not in code complexity)
+`CanvasZoomClip.focus` is normalized **against the ARTBOARD**, proven by
+`zoom-scene.ts:239` (`offsetX = focus.x * artboard.width * (1 − scale)`) — NOT
+the video frame, NOT the display. So a click's display point converts via the
+five-space chain already in `mapCursorSampleToArtboard`:
 
 ```
-ZOOM_SCALE / ZOOM_TYPING / ZOOM_MAX = 1.6 / 2.0 / 2.5   (quantize scale to 0.05)
-EASE_IN_MS / EASE_OUT_MS            = 600 / 750          (asymmetric — calm pull-back)
-LEAD_IN_MS                          = 400               (push-in lands AS the action)
+display point (top-left, pts)
+  → /displayWidth,/displayHeight        (normalized display fraction)
+  → ×intrinsicW,×intrinsicH             (source pixels)
+  → object-fit:cover crop               (getVideoCoverCrop)
+  → node-local → rotate+translate       (artboard pixels)
+  → /artboard.width,/artboard.height    (FOCUS, clampZoomFocus to [0,1])
+```
+
+Drop clicks whose mapping is `onScreen === false` (cropped-away region).
+
+Time: clicks are **source ms**; zoom clips are **timeline seconds**. Convert per
+the screen timeline clip: `timelineS = clip.start + (sourceS − clip.sourceIn)`,
+dropping clicks outside `[sourceIn, sourceOut)`. At first open there is one
+untrimmed screen clip (`start=0, sourceIn=0`), so this is identity — but write
+the general form so later trims/splits stay correct.
+
+## Detection algorithm (when / where / how much)
+
+Calm & sparse. Every threshold biases toward **not** zooming; motion polish
+(merge, lead-in, min-hold) matters more than detector cleverness.
+
+1. **Events.** Keep `clicks` with `type==='down'`; map each to
+   `(tTimeline, focus, cursorId)`; drop trimmed-out / off-screen. Pair
+   `down→up` with travel `> DRAG_MIN_TRAVEL` into one **drag** spanning the
+   gesture. Moves feed dwell/settle only.
+2. **Segment.** New segment when the gap to the previous click `> SEGMENT_GAP`
+   **or** the focus jumps `> SEGMENT_FOCUS_JUMP` (normalized). Accumulate clicks
+   per segment.
+3. **Focus.** The segment's **settle/action point**: the last click's position
+   (ground-truth), or the click-weighted centroid (`pointingHand ×1.15`,
+   `iBeam ×1.1`), clamped in-frame. Never a mid-flight move.
+4. **Window.** `start = firstClickT − LEAD_IN` (push-in lands as the click
+   happens); `end = lastClickT + HOLD_TAIL`; enforce `MIN_HOLD`; clamp
+   `end ≤ timelineDuration − TAIL_GUARD` (ignore a trailing Stop-button click).
+5. **Scale.** Tight cluster → palette top; broad spread → gentler. `iBeam`
+   typing context → `ZOOM_TYPING`. Quantize 0.05, cap `ZOOM_MAX`.
+6. **Reduce (fixed order).** (a) merge segments within `MERGE_GAP` whose focus
+   is within `MERGE_DIST` into one continuous hold *(biggest anti-pump lever)*;
+   (b) drop segments below `MIN_SEGMENT_CLICKS`/weight; (c) enforce
+   `MIN_ZOOM_CLIP_SECONDS` (0.5, the manual floor) and `MIN_HOLD`; (d) keep top-N
+   by confidence under `MAX_ZOOMS_PER_MIN`; (e) re-sort by time.
+7. **Emit.** `withZoomClipDefaults({ id, start, end, focus, scale, enabled:true,
+   transition:{ durationMs: EASE_MS, curve:'smootherstep' } })`, then
+   `normalizeZoomClips`. (The renderer reads only `transition.durationMs` +
+   `transition.curve`; `easePreset`/`speed`/`easeIn`/`easeOut` are ignored — set
+   `durationMs`+`curve` explicitly.)
+
+### Tunable constants (taste lives here) — starting values
+
+```
+ZOOM_SCALE / ZOOM_TYPING / ZOOM_MAX = 1.8 / 2.0 / 2.5   (manual default is 2.0, max 4)
+EASE_MS                             = 600   (symmetric in/out — the manual sampler is symmetric)
+LEAD_IN_MS                          = 350
 MIN_HOLD_MS                         = 1200
-SEGMENT_GAP_MS                      = 1200
-MERGE_GAP_MS / MERGE_DIST           = 2500 / 0.25·min(W,H)   (biggest anti-pump lever)
-MIN_CLIP_MS                         = 3000              (below this → zero zooms)
+SEGMENT_GAP_MS / SEGMENT_FOCUS_JUMP = 1200 / 0.22
+MERGE_GAP_MS / MERGE_DIST           = 2500 / 0.18   (normalized)
+MIN_ZOOM_CLIP_SECONDS               = 0.5   (hard floor from lib/zoom-clips)
 MAX_ZOOMS_PER_MIN                   = 4
-SETTLE_SPEED / BALLISTIC_SPEED      = 0.15 / 1.5 pts/ms (measured: p50=0.40, p90=2.40)
-DRAG_MIN_TRAVEL / DWELL_MIN_MS / TYPE_GAP_MS = 40 pts / 600 / 1000
-MIN_SEGMENT_WEIGHT / CONF_MIN       = 1.0 / 0.3
-FRAME_FILL / TAIL_GUARD_MS          = 0.70 / 800        (spread→scale; ignore trailing Stop click)
+DRAG_MIN_TRAVEL                     = 0.04  (normalized)
+TAIL_GUARD_MS                       = 800
+MIN_RECORDING_MS                    = 3000  (below this → zero zooms)
 ```
 
----
+## What is explicitly NOT changed
 
-## Edge cases
+Render/sampler (`zoom-scene.ts`), blur (`zoom-blur.ts`), the editor scene, the
+**export pipeline** (`run-export.ts`/`build-stage.ts` already sample
+`state.zoomClips` with the shared `sampleZoomCameraAtTime`), the **schema**
+(`project-schema.ts` `zoomClips` already persists), the **IPC** (`getCursorData`
+already returns clicks), the **native addon**, and the **Zoom UI** (panel +
+timeline render auto clips for free). Auto clips inherit all of it.
 
-**Handled in v1**
+## Edge cases (v1)
 
 | Case | Handling |
 |---|---|
-| `mousemoves-0.json` missing/empty | `buildAutoZoomKeyframes` → `[]`; identity transform; never throws/blocks open. |
-| `keystrokes-0.json` absent (opt-in off) | Treat as null; typing detection no-ops, falls back to `iBeam`; clicks/drags/dwell unaffected. |
-| No clicks at all (pure reading) | Dwell-only; if none clears `MIN_SEGMENT_WEIGHT`, **zero** keyframes (a static wide shot is correct). Never invent a zoom from moves. |
-| Trailing park on Stop button | Clamp every `tEndMs` to `durationMs − TAIL_GUARD_MS`. |
-| Rapid-fire / double-click | One segment (gap ≪ `SEGMENT_GAP`), tiny spread → one tight zoom. No chatter. |
-| Click → far drag (resize/window move) | `resize*` cursorId forces drag treatment; the drag span feeds spread → one wider, gentler framing. |
-| Focus too near a display edge | Clamp focus into the interior box; if it collapses, reduce scale toward 1; else identity (never expose outside the video). |
-| Recording < `MIN_CLIP_MS` | Suppress generation entirely (zero keyframes). |
-| `scale == 1.0` between zooms | `placeAutoZoomCamera` identity-snaps to `{1,0,0}`; non-zoomed footage byte-identical to today. Regression-tested. |
-| Disabled keyframe + refresh | `enabled:false` persists; sampler filters disabled keyframes before building the curve → holds scale 1, eases into the next enabled zoom. |
-| Manually overlapping keyframes | Sampler is total: at any `t` the active window is the one whose `[tStart,tEnd]` contains it with the **latest** `tStart` (last-start-wins); smoothstep blends the seam. |
-| Trim inside a lead-in/hold | Camera sampled by source time through the frame plan; a trimmed-out window never samples active. Trim inside a lead-in → slightly abrupt push from the clip's first active time (seed scale 1). Document; snap-trim-to-keyframe is a later nicety. |
-| Sidecars deleted but keyframes persisted | Self-contained keyframes play/export from `project.json`; only "Regenerate" is disabled. (Payoff of persist-not-derive.) |
-| User pans/zooms `ViewTransform` mid-camera-move | Composes: `stage(view) · layer(camera)`; export has no view transform, so editor-at-view-identity == the export frame. Parity-tested. |
-| Cursor magnifies under zoom | `cameraScale · cursorSizeMultiplier` is geometrically correct (pinned + proportional). Accepted; do **not** counter-scale (would break the shared-layer parity). |
-| 5000+ node scene | O(1) per tick: two layer/group transforms + one keyframe lookup. No `getClientRect` loops, no new layers, no per-frame React. Do **not** `cache()` the content layer (changes every frame). |
+| `getCursorData` null / no moves | emit `[]`; never throw or block first open. |
+| No clicks (pure reading) | dwell-only; if nothing clears the threshold → **zero** zooms (a wide shot is correct). |
+| Recording `< MIN_RECORDING_MS` | suppress (zero zooms). |
+| Off-screen / cropped clicks | dropped via `onScreen`. |
+| Trailing Stop-button click | clamped by `TAIL_GUARD`. |
+| Rapid-fire / double-click | one segment, tight spread → one tight zoom. |
+| Far drag (resize/window move) | drag span feeds a wider, gentler framing. |
+| Overlap / sub-floor spans | `normalizeZoomClips` trims to one lane (earlier wins); detector pre-spaces to avoid loss. |
+| User edits/deletes an auto clip | it's an ordinary clip — edits persist; deletes are permanent (no re-trigger in v1). |
+| Video later resized/moved on artboard | focus (artboard-normalized, baked at gen time) drifts — same as manual clips; documented, not fixed. |
 
-**Deferred + documented**
+## Deferred (documented, not v1)
 
-- Grain magnifies under zoom (whole-composite consequence; re-applying grain
-  post-camera is deferred).
-- Multi-display / region recording (single coord space matching the cursor track).
-- Physics-spring camera; deadzone lazy-follow; zoom-out-travel-zoom-in for far
-  jumps; ML/learned saliency; clustering (k-means/DBSCAN); content-fit continuous
-  zoom; auto-generate-on-open; schema version bump; cursor counter-scaling;
-  snap-trim-to-keyframe.
-
----
+Scroll-wheel capture (native + IPC); real keystroke-driven typing zooms (new
+IPC + capture-on); a manual "Regenerate"/intensity control; pan-within-a-zoom /
+follow-cam (needs a sampler change, out of "manual architecture only"); content
+saliency / ML; multi-display & window/region focus (whole-display only, matching
+the cursor overlay — window/region would need target-rect normalization, not
+`displayBoundsPoints`).
 
 ## Verification
 
-- `lib/auto-zoom/__tests__/zoom-track.test.ts` — snapshot a fixed synthetic
-  sidecar input → exact `ZoomKeyframe[]` (determinism + stable ids).
-- Reducer-pipeline snapshots near the rate/confidence caps (reproducible plans).
-- Identity-frame regression: `placeAutoZoomCamera` at a no-zoom time → exactly
-  `{scale:1, offsetX:0, offsetY:0}`; export of a no-keyframe project is
-  byte-identical to current output.
-- Editor-vs-export parity: same keyframes + same source time → identical
-  artboard-space camera from both call sites (with editor `ViewTransform = identity`).
-- Pan-clamp: focus near a corner at high scale never exposes outside artboard
-  bounds; clamp identical in both paths.
-- Empty/absent sidecar tests (missing moves → `[]`; absent keystrokes → iBeam
-  fallback; no throw).
-- Targeted vitest on touched `canvas/__tests__` + `export/__tests__`, then
-  `pnpm typecheck`.
-- Manual: record ~30 s with clicks + a typing burst, click Auto-zoom, scrub for
-  calm holds, export, diff MP4 motion vs scrubbed preview at several timestamps.
-- Docs: update `docs/editor-canvas.md` (new Auto-Zoom section + Export Pipeline +
-  Project Persistence: list `autoZoom` as persisted; grain/cursor magnification +
-  single-display as limitations) and `docs/normal-term.md` (camera / zoom
-  keyframe terminology).
+- `lib/auto-zoom/__tests__/zoom-detect.test.ts` — fixed synthetic
+  clicks/moves → exact `CanvasZoomClip[]` (determinism + stable ids); reducer
+  snapshots near the rate/merge caps; empty/`null` input → `[]`.
+- Focus parity: a click at a known display point → the **same** artboard point
+  the cursor overlay places (shared `displayPointToArtboard`).
+- Non-overlap: generated output is unchanged by a second `normalizeZoomClips`.
+- One-shot: second open uses the fast path and does **not** re-detect.
+- Targeted vitest on touched `canvas/__tests__`, then `pnpm typecheck`.
+- Manual: record ~30 s with clicks + a typing burst, open the editor, scrub for
+  calm holds, export, diff MP4 motion vs preview at several timestamps.
+- Docs: `docs/editor-canvas.md` (Auto-Zoom section + Project Persistence note
+  that `zoomClips` now also originate from auto-zoom; focus-drift + whole-display
+  limitations) and `docs/normal-term.md` (auto-zoom terminology).
 
----
+## Build order
 
-## Still-open product decisions (recommended defaults in **bold**)
-
-1. **Trigger UX** — **explicit "Auto-zoom" button** (no surprise) vs
-   auto-generate on first open.
-2. **Low-confidence suggestions** (below `CONF_MIN`) — ship **enabled** /
-   shipped-but-disabled (dimmed) / hidden. *(Recommend: shipped-but-disabled.)*
-3. **Regenerate policy after edits** — **generate once, treat as user data,
-   manual Regenerate overwrites with a confirm** (no silent re-generation).
-4. **`ZOOM_MAX` adaptivity** — adapt to the recording's backing scale (lower cap
-   for low-DPI sources to avoid visible softening) vs **fixed `2.5×`** for v1.
-5. **Tuning budget** — defaults are tuned against one ~33 s sample; confirm
-   appetite to re-tune the named constants after testing 4K, trackpad-vs-mouse,
-   and fast-vs-slow recordings before locking them.
-
-## Suggested build order
-
-1. `lib/auto-zoom/zoom-track.ts` + unit tests (pure, no UI) — validate on the
-   real recording first.
-2. `zoom-scene.ts`: extract `displayPointToArtboard`, add `placeAutoZoomCamera` +
-   `applyCamera` + parity/clamp tests.
-3. Schema + persistence + provider wiring (field round-trips, autosave).
-4. Editor wiring (inner camera group + background, tick-driven) + "Auto-zoom" button.
-5. Export wiring (layer-level camera + background-redraw fix) + parity test.
-6. Docs (`editor-canvas.md`, `normal-term.md`) + manual verification.
+1. `lib/auto-zoom/zoom-detect.ts` + unit tests (pure; validate on the real
+   recording first).
+2. Extract/export `displayPointToArtboard` from `cursor-scene.ts`; reuse in
+   `placeCursor`; add focus-parity test.
+3. Provider wiring: arm in slow path, one-shot detect effect after the screen
+   recording commits, internal `commitZoomClipsRef`+`setZoomClips` under the
+   `zoom-auto-generate` undo tag (option A), reset-block entry.
+4. Docs (`editor-canvas.md`, `normal-term.md`) + manual verification.

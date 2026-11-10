@@ -58,7 +58,10 @@ export interface ProjectArtboard {
   height: number
   background: ProjectArtboardBackground | null
   padding: number
-  grain: number
+  // Master switch for the background treatment (fill/wallpaper).
+  // Optional + defaulted to true for old project.json files so existing
+  // projects keep rendering their background.
+  backgroundEnabled?: boolean
   // Master switch for the custom cursor overlay. Optional + defaulted to true
   // for old project.json files so existing projects keep rendering the cursor.
   cursorCustomRenderingEnabled?: boolean
@@ -76,12 +79,11 @@ export interface ProjectArtboard {
   // Cursor motion-rotation amount, 0..1 (0 = off). Optional + defaulted by
   // `parseArtboard`, same back-compat rationale as cursorSizeMultiplier.
   cursorMotionRotation?: number
-  // Cursor motion-rotation behavior. Optional + defaulted to 'side-lean' for
-  // old project.json files.
+  // LEGACY (kept for v1 compatibility, ignored by the editor): the
+  // direction-follow "rotation" mode was removed 2026-06-06 — side lean is the
+  // only cursor motion behavior. Old files carrying either value still parse;
+  // new saves omit the field.
   cursorMotionRotationMode?: "side-lean" | "rotation"
-  // Cursor motion-blur renderer backend. Optional + defaulted to 'gpu' for
-  // old project.json files.
-  cursorMotionBlurBackend?: "gpu" | "cpu"
   // Cursor path smoothing preset. Optional + defaulted to 'default' for old
   // project.json files.
   cursorSmoothingMode?: "rapid" | "quick" | "default" | "slow"
@@ -91,6 +93,9 @@ export interface ProjectArtboard {
   // Force every captured cursor id to render as the themed pointer. Optional +
   // defaulted to false for old project.json files.
   cursorAlwaysUsePointer?: boolean
+  // Debounce brief cursor-shape flickers at track-build time. Optional +
+  // defaulted to false for old project.json files.
+  cursorTypeStabilization?: boolean
 }
 
 export type ProjectVideoRole = "screen" | "camera" | "media"
@@ -129,11 +134,6 @@ export interface ProjectVideo {
   borderColor: string
   borderOffset: number
   borderAlignment: ProjectBorderAlignment
-  shadowColor: string
-  shadowBlur: number
-  shadowOffsetX: number
-  shadowOffsetY: number
-  shadowSpread: number
 }
 
 export interface ProjectTimelineClip {
@@ -153,9 +153,13 @@ export interface ProjectZoomClip {
   start: number
   end: number
   enabled?: boolean
-  // Normalized full-artboard anchor point. Preview/export scale around this
-  // fixed point instead of panning toward a separately clamped center.
+  // Normalized full-artboard anchor point. In `manual` mode the camera scales
+  // around this fixed point; in `auto` mode it is the ease-in anchor and the
+  // camera then spring-follows the recorded cursor.
   focus?: { x: number; y: number }
+  // Auto (cursor-follow) vs manual (fixed `focus`). Optional + additive: legacy
+  // clips have none and default to `auto` (their historical follow behavior).
+  mode?: "auto" | "manual"
   scale?: number
   radialBlur?: number
   // Legacy zoom-blur knobs. New saves no longer write this object; these fields
@@ -178,6 +182,15 @@ export interface ProjectZoomClip {
   }
   // Legacy preset field. New saves prefer explicit `transition`.
   easePreset?: "smooth" | "snappy" | "slow"
+  // Detected content rects (a menu/popover's artboard-normalized bounds) keyed
+  // by interaction time, from auto-zoom frame-analysis (or, later, Accessibility).
+  // Optional + additive (no version bump): legacy clips simply have none. The
+  // predictive cursor-follow planner reads these at render time to drive the
+  // zoom-out-to-fit reveal, so they must persist to reach the export window.
+  engagedRects?: Array<{
+    t: number
+    rect: { x: number; y: number; width: number; height: number }
+  }>
 }
 
 export interface ProjectStateV1 {
@@ -191,18 +204,6 @@ export interface ProjectStateV1 {
 }
 
 export type ProjectState = ProjectStateV1
-
-export interface ImportAssetPayload {
-  id: string
-  fileName: string
-  bytes: ArrayBuffer
-}
-
-export interface ImportAssetResult {
-  relativePath: string
-  fileUrl: string
-  fileSize: number
-}
 
 export type SaveProjectStateResult =
   | { ok: true; writtenAtUnixMs: number }
@@ -291,8 +292,7 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
   if (
     !isFiniteNumber(value["width"]) ||
     !isFiniteNumber(value["height"]) ||
-    !isFiniteNumber(value["padding"]) ||
-    !isFiniteNumber(value["grain"])
+    !isFiniteNumber(value["padding"])
   ) {
     return null
   }
@@ -306,20 +306,20 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
   // the renderer module can't be imported into the main process).
   const cursorSizeMultiplier = (() => {
     const raw = value["cursorSizeMultiplier"]
-    // Default (absent/invalid) mirrors cursor-scene.ts CURSOR_SIZE_DEFAULT (2.7)
+    // Default (absent/invalid) mirrors cursor-scene.ts CURSOR_SIZE_DEFAULT (2.2)
     // so legacy projects open at the same size as new ones. Clamp to [1, 4]
     // mirrors CURSOR_SIZE_MIN/MAX (hand-synced — renderer module can't import).
-    if (!isFiniteNumber(raw)) return 2.7
+    if (!isFiniteNumber(raw)) return 2.2
     return Math.min(4, Math.max(1, raw))
   })()
 
   // Cursor motion-blur intensity is optional + defaulted (same back-compat
   // rationale). Default (absent/invalid) mirrors cursor-scene.ts
-  // CURSOR_MOTION_BLUR_DEFAULT (0.6); clamp to [0, 1] (hand-synced — the
+  // CURSOR_MOTION_BLUR_DEFAULT (0.2); clamp to [0, 1] (hand-synced — the
   // renderer module can't be imported into the main process).
   const cursorMotionBlur = (() => {
     const raw = value["cursorMotionBlur"]
-    if (!isFiniteNumber(raw)) return 0.6
+    if (!isFiniteNumber(raw)) return 0.2
     return Math.min(1, Math.max(0, raw))
   })()
 
@@ -334,10 +334,7 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
   const cursorMotionRotationMode =
     value["cursorMotionRotationMode"] === "rotation" ? "rotation" : "side-lean"
 
-  // Renderer backend is optional + defaulted. Unknown values fall back to GPU
-  // so old and hand-edited projects keep loading.
-  const cursorMotionBlurBackend =
-    value["cursorMotionBlurBackend"] === "cpu" ? "cpu" : "gpu"
+  const backgroundEnabled = value["backgroundEnabled"] === false ? false : true
   const cursorCustomRenderingEnabled =
     value["cursorCustomRenderingEnabled"] === false ? false : true
   const cursorSetId = CURSOR_SET_IDS.includes(
@@ -352,12 +349,13 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     : "default"
   const cursorClickPressScale = (() => {
     const raw = value["cursorClickPressScale"]
-    // Default mirrors cursor-scene.ts CURSOR_CLICK_PRESS_SCALE_DEFAULT (0.88);
+    // Default mirrors cursor-scene.ts CURSOR_CLICK_PRESS_SCALE_DEFAULT (0.78);
     // clamp to [0.5, 1]. `1` disables the press shrink.
-    if (!isFiniteNumber(raw)) return 0.88
+    if (!isFiniteNumber(raw)) return 0.78
     return Math.min(1, Math.max(0.5, raw))
   })()
   const cursorAlwaysUsePointer = value["cursorAlwaysUsePointer"] === true
+  const cursorTypeStabilization = value["cursorTypeStabilization"] === true
 
   return {
     presetId: presetId as ProjectArtboardPresetId,
@@ -365,17 +363,17 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     height: value["height"] as number,
     background,
     padding: value["padding"] as number,
-    grain: value["grain"] as number,
+    backgroundEnabled,
     cursorCustomRenderingEnabled,
     cursorSetId,
     cursorSizeMultiplier,
     cursorMotionBlur,
     cursorMotionRotation,
     cursorMotionRotationMode,
-    cursorMotionBlurBackend,
     cursorSmoothingMode,
     cursorClickPressScale,
     cursorAlwaysUsePointer,
+    cursorTypeStabilization,
   }
 }
 
@@ -414,7 +412,6 @@ function parseVideo(value: unknown): ProjectVideo | null {
   const fileName = value["fileName"]
   const role = value["role"]
   const borderColor = value["borderColor"]
-  const shadowColor = value["shadowColor"]
   const borderAlignment = value["borderAlignment"]
 
   if (typeof id !== "string" || !id) return null
@@ -426,7 +423,6 @@ function parseVideo(value: unknown): ProjectVideo | null {
     return null
   }
   if (typeof borderColor !== "string") return null
-  if (typeof shadowColor !== "string") return null
   if (
     typeof borderAlignment !== "string" ||
     !BORDER_ALIGNMENTS.includes(borderAlignment as ProjectBorderAlignment)
@@ -446,10 +442,6 @@ function parseVideo(value: unknown): ProjectVideo | null {
     "cornerSmoothing",
     "borderWidth",
     "borderOffset",
-    "shadowBlur",
-    "shadowOffsetX",
-    "shadowOffsetY",
-    "shadowSpread",
   ] as const
   for (const field of numericFields) {
     if (!isFiniteNumber(value[field])) return null
@@ -486,11 +478,6 @@ function parseVideo(value: unknown): ProjectVideo | null {
     borderColor,
     borderOffset: value["borderOffset"] as number,
     borderAlignment: borderAlignment as ProjectBorderAlignment,
-    shadowColor,
-    shadowBlur: value["shadowBlur"] as number,
-    shadowOffsetX: value["shadowOffsetX"] as number,
-    shadowOffsetY: value["shadowOffsetY"] as number,
-    shadowSpread: value["shadowSpread"] as number,
   }
 }
 
@@ -573,6 +560,10 @@ function parseZoomClip(value: unknown): ProjectZoomClip | null {
       y: clampUnit(raw["y"] as number),
     }
   })()
+  const mode =
+    value["mode"] === "auto" || value["mode"] === "manual"
+      ? (value["mode"] as "auto" | "manual")
+      : undefined
   const scale = isFiniteNumber(value["scale"])
     ? Math.min(4, Math.max(1, value["scale"] as number))
     : undefined
@@ -628,6 +619,34 @@ function parseZoomClip(value: unknown): ProjectZoomClip | null {
     ? (value["easePreset"] as (typeof ZOOM_EASE_PRESETS)[number])
     : undefined
 
+  // Tolerant: drop malformed entries and clamp each rect inside the artboard,
+  // mirroring the other optional zoom-clip fields. Absent → undefined (omitted).
+  const engagedRects = (() => {
+    const raw = value["engagedRects"]
+    if (!Array.isArray(raw)) return undefined
+    const out: NonNullable<ProjectZoomClip["engagedRects"]> = []
+    for (const item of raw) {
+      if (!isRecord(item) || !isFiniteNumber(item["t"])) continue
+      const r = item["rect"]
+      if (!isRecord(r)) continue
+      if (
+        !isFiniteNumber(r["x"]) ||
+        !isFiniteNumber(r["y"]) ||
+        !isFiniteNumber(r["width"]) ||
+        !isFiniteNumber(r["height"])
+      ) {
+        continue
+      }
+      const x = clampUnit(r["x"] as number)
+      const y = clampUnit(r["y"] as number)
+      const width = clampRange(r["width"] as number, 0, 1 - x)
+      const height = clampRange(r["height"] as number, 0, 1 - y)
+      if (width <= 0 || height <= 0) continue
+      out.push({ t: item["t"] as number, rect: { x, y, width, height } })
+    }
+    return out.length > 0 ? out : undefined
+  })()
+
   return {
     id: value["id"] as string,
     start,
@@ -636,11 +655,13 @@ function parseZoomClip(value: unknown): ProjectZoomClip | null {
       ? { enabled: value["enabled"] as boolean }
       : {}),
     ...(focus ? { focus } : {}),
+    ...(mode ? { mode } : {}),
     ...(typeof scale === "number" ? { scale } : {}),
     ...(typeof radialBlur === "number" ? { radialBlur } : {}),
     ...(radialBlurSettings ? { radialBlurSettings } : {}),
     ...(transition ? { transition } : {}),
     ...(easePreset ? { easePreset } : {}),
+    ...(engagedRects ? { engagedRects } : {}),
   }
 }
 

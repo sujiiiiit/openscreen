@@ -2,18 +2,34 @@ import type {
   CanvasZoomClip,
   CanvasZoomClipPatch,
   CanvasZoomEasePreset,
+  CanvasZoomEngagedRect,
   CanvasZoomFocus,
+  CanvasZoomMode,
   CanvasZoomRadialBlurSettings,
   CanvasZoomTransitionCurve,
   CanvasZoomTransitionSettings,
 } from "@/types/editor-canvas"
 
 // Floor on a manual Zoom-track clip's duration, in timeline (composition)
-// seconds. Keep this frame-sized, not interaction-sized: in fit-width views a
-// real available gap can be visually tiny, and the hover ghost should still
-// cover it instead of disappearing.
-export const MIN_ZOOM_CLIP_SECONDS = 1 / 60
+// seconds, enforced when **creating** (hover ghost / click-add) and
+// **resizing**. Interaction-sized on purpose: a zoom clip is
+// normal → zoom → hold → normal, so a sub-half-second clip cannot even express
+// the minimum 150 ms in/out ramps — and it renders as a sub-pixel sliver that
+// is impossible to grab, swallows the resize handles, and defeats guide-line
+// snapping. (Was 1/60 s; that frame-sized floor produced exactly those
+// slivers — see docs/editor-canvas.md → "Tiny Zoom Clips".)
+export const MIN_ZOOM_CLIP_SECONDS = 0.5
+// Absolute validity floor. Legacy projects can hold clips created under the
+// old 1/60 s floor; hydration keeps any clip at least this long instead of
+// silently dropping user data, and move preserves their real duration. They
+// grow to MIN_ZOOM_CLIP_SECONDS the first time an edge is resized.
+export const ZOOM_CLIP_DEGENERATE_SECONDS = 1 / 60
 const ZOOM_CLIP_EPSILON_SECONDS = 1e-6
+// Edges this close to a neighbour / timeline bound weld to it exactly. This is
+// a float-residue eraser (pixel↔time round trips leave sub-millisecond noise),
+// not a magnet: anything a user could perceive (one frame is ≥ 16.7 ms) is far
+// above this threshold, so welding never overrides an intentional gap.
+export const ZOOM_WELD_EPSILON_SECONDS = 1e-3
 export const ZOOM_SCALE_MIN = 1
 export const ZOOM_SCALE_MAX = 4
 export const ZOOM_SCALE_DEFAULT = 2
@@ -53,8 +69,23 @@ export const ZOOM_RADIAL_BLUR_SHADER: CanvasZoomRadialBlurSettings = {
 // more blur for the same zoom speed. Kept conservative so short/snappy clips —
 // which have high zoom velocity — streak tastefully instead of smearing the
 // whole frame. See sampleZoomCameraAtTime in zoom-scene.
-export const ZOOM_BLUR_MOTION_GAIN = 0.14
+//
+// Retuned 0.14 → 0.05 (2026-06-06): at the old gain a default clip (Strength
+// 0.5, scale 2, 600 ms ramps) peaked at ZoomBlurFilter strength ≈ 0.146 —
+// every pixel smeared ~15 % of its distance to the focus, which averaged
+// dark-mode screen recordings into a near-black frame for the middle of every
+// ramp. 0.05 keeps the streak clearly visible while text-heavy dark content
+// stays legible. See docs/editor-canvas.md → "Zoom Blur Reads As Black On
+// Dark Recordings".
+export const ZOOM_BLUR_MOTION_GAIN = 0.05
 export const ZOOM_FOCUS_DEFAULT: CanvasZoomFocus = { x: 0.5, y: 0.5 }
+// Default zoom mode. `auto` (cursor-follow) matches the historical behavior —
+// before the mode field existed, every clip's camera followed the cursor — so
+// legacy clips with no persisted `mode` keep following after this change. New
+// hand-added clips are created as `manual` (a fixed point where the user
+// dropped them); auto-generated clips are created as `auto`.
+export const ZOOM_MODE_DEFAULT: CanvasZoomMode = "auto"
+export const ZOOM_MODES: CanvasZoomMode[] = ["auto", "manual"]
 export const ZOOM_EASE_PRESET_DEFAULT: CanvasZoomEasePreset = "smooth"
 export const ZOOM_EASE_PRESETS: CanvasZoomEasePreset[] = [
   "smooth",
@@ -76,7 +107,11 @@ export const ZOOM_TRANSITION_FRACTION_MIN = 0
 export const ZOOM_TRANSITION_FRACTION_MAX = 0.75
 export const ZOOM_TRANSITION_DURATION_MS_MIN = 150
 export const ZOOM_TRANSITION_DURATION_MS_MAX = 2000
-export const ZOOM_TRANSITION_DURATION_MS_DEFAULT = 600
+// Default ramp duration. Matches Cap's `ZOOM_DURATION` (1.0 s): the spring amount
+// ramp (`pixi/zoom-spring.ts`) is fit into this window, so a default clip eases in
+// / out over ~1 s exactly like Cap. (Was 600 ms, which read noticeably snappier
+// than Cap.)
+export const ZOOM_TRANSITION_DURATION_MS_DEFAULT = 1000
 export const ZOOM_TRANSITION_DEFAULT: CanvasZoomTransitionSettings = {
   easeIn: 0.3,
   easeOut: 0.3,
@@ -114,11 +149,12 @@ export type CanvasZoomClipInput = Pick<CanvasZoomClip, "id" | "start" | "end"> &
   Partial<
     Pick<
       CanvasZoomClip,
-      "enabled" | "focus" | "scale" | "radialBlur" | "easePreset"
+      "enabled" | "focus" | "mode" | "scale" | "radialBlur" | "easePreset"
     >
   > & {
     radialBlurSettings?: Partial<CanvasZoomRadialBlurSettings>
     transition?: Partial<CanvasZoomTransitionSettings>
+    engagedRects?: readonly CanvasZoomEngagedRect[]
   }
 
 let zoomClipIdCounter = 0
@@ -188,6 +224,12 @@ export function clampZoomEasePreset(preset: unknown): CanvasZoomEasePreset {
   return ZOOM_EASE_PRESETS.includes(preset as CanvasZoomEasePreset)
     ? (preset as CanvasZoomEasePreset)
     : ZOOM_EASE_PRESET_DEFAULT
+}
+
+export function clampZoomMode(mode: unknown): CanvasZoomMode {
+  return ZOOM_MODES.includes(mode as CanvasZoomMode)
+    ? (mode as CanvasZoomMode)
+    : ZOOM_MODE_DEFAULT
 }
 
 export function clampZoomTransitionCurve(
@@ -319,6 +361,37 @@ export function zoomRadialBlurSettingsEqual(
   )
 }
 
+/**
+ * Sanitize engaged-content rects: drop non-finite / empty entries and clamp each
+ * rect inside the artboard [0,1]. Keeps a clip's persisted rects well-formed
+ * regardless of source (frame-analysis, Accessibility, or a hand-edited file).
+ */
+export function clampZoomEngagedRects(
+  rects: readonly CanvasZoomEngagedRect[] | undefined
+): CanvasZoomEngagedRect[] {
+  if (!rects || rects.length === 0) return []
+  const out: CanvasZoomEngagedRect[] = []
+  for (const r of rects) {
+    if (!r || !Number.isFinite(r.t) || !r.rect) continue
+    const { x, y, width, height } = r.rect
+    if (
+      !Number.isFinite(x) ||
+      !Number.isFinite(y) ||
+      !Number.isFinite(width) ||
+      !Number.isFinite(height)
+    ) {
+      continue
+    }
+    const cx = clamp(x, 0, 1)
+    const cy = clamp(y, 0, 1)
+    const w = clamp(width, 0, 1 - cx)
+    const h = clamp(height, 0, 1 - cy)
+    if (w <= 0 || h <= 0) continue
+    out.push({ t: r.t, rect: { x: cx, y: cy, width: w, height: h } })
+  }
+  return out
+}
+
 export function withZoomClipDefaults(
   clip: CanvasZoomClipInput
 ): CanvasZoomClip {
@@ -335,6 +408,7 @@ export function withZoomClipDefaults(
     end: clip.end,
     enabled: clip.enabled ?? true,
     focus: clampZoomFocus(clip.focus ?? ZOOM_FOCUS_DEFAULT),
+    mode: clampZoomMode(clip.mode),
     scale: clampZoomScale(clip.scale ?? ZOOM_SCALE_DEFAULT),
     radialBlur: clampZoomRadialBlur(
       clip.radialBlur ?? ZOOM_RADIAL_BLUR_DEFAULT
@@ -342,6 +416,7 @@ export function withZoomClipDefaults(
     radialBlurSettings: clampZoomRadialBlurSettings(clip.radialBlurSettings),
     transition,
     easePreset: legacyPreset,
+    engagedRects: clampZoomEngagedRects(clip.engagedRects),
   }
 }
 
@@ -351,6 +426,7 @@ export function sanitizeZoomClipPatch(
   const next: CanvasZoomClipPatch = {}
   if (typeof patch.enabled === "boolean") next.enabled = patch.enabled
   if (patch.focus) next.focus = clampZoomFocus(patch.focus)
+  if (patch.mode) next.mode = clampZoomMode(patch.mode)
   if (typeof patch.scale === "number") next.scale = clampZoomScale(patch.scale)
   if (typeof patch.radialBlur === "number") {
     next.radialBlur = clampZoomRadialBlur(patch.radialBlur)
@@ -379,7 +455,13 @@ function isUsableZoomClip(clip: CanvasZoomClipInput, ignoreId: string | null) {
   if (clip.id === ignoreId) return false
   if (!clip.id) return false
   if (!isFiniteTime(clip.start) || !isFiniteTime(clip.end)) return false
-  if (clip.end - clip.start < MIN_ZOOM_CLIP_SECONDS) return false
+  // Any positive span counts. Deliberately NOT gated on a duration floor: a
+  // clip that drifted below the floor (float residue from a resize-to-minimum
+  // — `(start + MIN) - start` can land one ulp short — or legacy data) must
+  // still block placement and clamping, or the hover ghost and drags silently
+  // overlap it. Duration floors are enforced where spans are created/kept,
+  // not here.
+  if (clip.end - clip.start <= 0) return false
   return true
 }
 
@@ -397,7 +479,9 @@ function getSortedUsableZoomClips(clips: readonly CanvasZoomClip[]) {
 /**
  * Sort and trim persisted/restored zoom clips into a single non-overlapping
  * lane. Earlier clips win; later clips that collide are trimmed to the previous
- * end and dropped if they become shorter than the minimum duration.
+ * end. The keep threshold is `ZOOM_CLIP_DEGENERATE_SECONDS`, not the larger
+ * creation floor, so legacy clips created under the old 1/60 s minimum survive
+ * hydration instead of silently vanishing from the user's project.
  */
 export function normalizeZoomClips(
   clips: readonly CanvasZoomClip[],
@@ -419,7 +503,7 @@ export function normalizeZoomClips(
       occupiedUntil
     )
 
-    if (end - start < MIN_ZOOM_CLIP_SECONDS) continue
+    if (end - start < ZOOM_CLIP_DEGENERATE_SECONDS) continue
 
     normalized.push({ ...withZoomClipDefaults(clip), start, end })
     occupiedUntil = end
@@ -436,6 +520,15 @@ export function normalizeZoomClips(
  * minimum. `ignoreId` excludes one clip from the test (unused for add; reserved
  * for callers that re-place an existing clip).
  *
+ * `snapSeconds` (optional) magnetizes the placement to its gap: an anchor
+ * within that distance after the previous clip's end (or the timeline start)
+ * snaps back flush to it, and an end stopping within that distance of the next
+ * clip's start (or the timeline end) extends flush to it — so click-adds near
+ * a neighbour land exactly adjacent instead of leaving an unfillable
+ * micro-gap. Snapping only ever moves the span to positions that re-validate
+ * identically with `snapSeconds = 0`, so a snapped ghost preview and its
+ * snapless `addZoomClip` re-check always agree.
+ *
  * This is the single source of truth shared by the provider's `addZoomClip`
  * commit and the timeline panel's hover-ghost preview, so the previewed block
  * and the committed clip are always identical.
@@ -445,7 +538,8 @@ export function placeZoomSpan(
   timelineDuration: number,
   start: number,
   end: number,
-  ignoreId: string | null = null
+  ignoreId: string | null = null,
+  snapSeconds = 0
 ): { start: number; end: number } | null {
   const safeTimelineDuration = Math.max(
     0,
@@ -456,32 +550,176 @@ export function placeZoomSpan(
   const requestedDuration =
     isFiniteTime(end) && end > start ? end - start : MIN_ZOOM_CLIP_SECONDS
   const desiredDuration = Math.max(MIN_ZOOM_CLIP_SECONDS, requestedDuration)
-  const anchor = clamp(start, 0, safeTimelineDuration)
+  const rawAnchor = clamp(start, 0, safeTimelineDuration)
 
   let gapEnd = safeTimelineDuration
+  // End of the nearest clip at or before the anchor; 0 doubles as the
+  // timeline start so the anchor snap also magnetizes to t = 0.
+  let previousEnd = 0
 
   for (const clip of clips) {
     if (!isUsableZoomClip(clip, ignoreId)) continue
 
     if (
-      anchor >= clip.start - ZOOM_CLIP_EPSILON_SECONDS &&
-      anchor < clip.end - ZOOM_CLIP_EPSILON_SECONDS
+      rawAnchor >= clip.start - ZOOM_CLIP_EPSILON_SECONDS &&
+      rawAnchor < clip.end - ZOOM_CLIP_EPSILON_SECONDS
     ) {
       return null
     }
 
-    if (clip.start >= anchor - ZOOM_CLIP_EPSILON_SECONDS) {
+    if (clip.start >= rawAnchor - ZOOM_CLIP_EPSILON_SECONDS) {
       gapEnd = Math.min(gapEnd, clip.start)
     }
+    if (clip.end <= rawAnchor + ZOOM_CLIP_EPSILON_SECONDS) {
+      previousEnd = Math.max(previousEnd, clip.end)
+    }
   }
+
+  const anchor =
+    snapSeconds > 0 && rawAnchor - previousEnd < snapSeconds
+      ? previousEnd
+      : rawAnchor
 
   const availableDuration = gapEnd - anchor
   if (availableDuration < MIN_ZOOM_CLIP_SECONDS) return null
 
   const placedDuration = Math.min(desiredDuration, availableDuration)
   const placedStart = anchor
-  const placedEnd = placedStart + placedDuration
+  let placedEnd = placedStart + placedDuration
+  if (snapSeconds > 0 && gapEnd - placedEnd < snapSeconds) {
+    placedEnd = gapEnd
+  }
 
   if (placedEnd - placedStart < MIN_ZOOM_CLIP_SECONDS) return null
   return { start: placedStart, end: placedEnd }
+}
+
+/**
+ * The open gap `[lo, hi]` that the reference span occupies: bounded by the
+ * nearest neighbour edges (excluding `ignoreId`) and the timeline `[0, end]`.
+ * The reference span is normally non-overlapping (a committed clip position);
+ * a clip that nevertheless overlaps it (legacy/corrupt state) is treated as a
+ * wall on the side where most of it lies, so dragging the reference resolves
+ * the overlap instead of preserving it.
+ */
+export function getZoomGapBounds(
+  clips: readonly CanvasZoomClip[],
+  timelineDuration: number,
+  refStart: number,
+  refEnd: number,
+  ignoreId: string | null
+): { lo: number; hi: number } {
+  const safeTimelineDuration = Math.max(
+    0,
+    Number.isFinite(timelineDuration) ? timelineDuration : 0
+  )
+  let lo = 0
+  let hi = safeTimelineDuration
+
+  for (const clip of clips) {
+    if (!isUsableZoomClip(clip, ignoreId)) continue
+    if (clip.end <= refStart + ZOOM_CLIP_EPSILON_SECONDS) {
+      lo = Math.max(lo, clip.end)
+    } else if (clip.start >= refEnd - ZOOM_CLIP_EPSILON_SECONDS) {
+      hi = Math.min(hi, clip.start)
+    } else if (
+      clip.start + clip.end <=
+      refStart + refEnd // midpoint comparison ×2
+    ) {
+      lo = Math.max(lo, clip.end)
+    } else {
+      hi = Math.min(hi, clip.start)
+    }
+  }
+
+  return { lo, hi }
+}
+
+/**
+ * Clamp a move of `reference` (its committed span) to `requestedStart` so the
+ * clip slides flush against its neighbours / the timeline bounds instead of
+ * the step being rejected. Duration is preserved; edges within
+ * `ZOOM_WELD_EPSILON_SECONDS` of a gap bound weld to it exactly so "flush" is
+ * exact in the data, not float-approximate.
+ *
+ * Shared by the timeline panel's real-time `onActionMoving` clamp and the
+ * provider's `moveZoomClip` commit so the dragged preview and the persisted
+ * span are always identical.
+ */
+export function clampZoomMove(
+  clips: readonly CanvasZoomClip[],
+  timelineDuration: number,
+  reference: Pick<CanvasZoomClip, "id" | "start" | "end">,
+  requestedStart: number
+): { start: number; end: number } {
+  // Preserve the clip's real duration — legacy clips shorter than the
+  // creation floor must not silently grow on move (only the degenerate floor
+  // guards corrupt zero/negative spans).
+  const duration = Math.max(
+    ZOOM_CLIP_DEGENERATE_SECONDS,
+    reference.end - reference.start
+  )
+  const { lo, hi } = getZoomGapBounds(
+    clips,
+    timelineDuration,
+    reference.start,
+    reference.end,
+    reference.id
+  )
+  const maxStart = Math.max(lo, hi - duration)
+  let start = clamp(
+    isFiniteTime(requestedStart) ? requestedStart : reference.start,
+    lo,
+    maxStart
+  )
+  if (Math.abs(start - lo) < ZOOM_WELD_EPSILON_SECONDS) start = lo
+  else if (Math.abs(start - maxStart) < ZOOM_WELD_EPSILON_SECONDS) {
+    start = maxStart
+  }
+  return { start, end: start + duration }
+}
+
+/**
+ * Clamp a resize of `reference` so the moving edge stops flush at the
+ * neighbour / timeline bound and never crosses the minimum duration, instead
+ * of the step being rejected. The anchored edge is returned exactly as
+ * committed (no pixel↔time float drift). Same weld rule as `clampZoomMove`.
+ */
+export function clampZoomResize(
+  clips: readonly CanvasZoomClip[],
+  timelineDuration: number,
+  reference: Pick<CanvasZoomClip, "id" | "start" | "end">,
+  requested: { start: number; end: number },
+  dir: "left" | "right"
+): { start: number; end: number } {
+  const { lo, hi } = getZoomGapBounds(
+    clips,
+    timelineDuration,
+    reference.start,
+    reference.end,
+    reference.id
+  )
+
+  if (dir === "left") {
+    const maxStart = reference.end - MIN_ZOOM_CLIP_SECONDS
+    let start = clamp(
+      isFiniteTime(requested.start) ? requested.start : reference.start,
+      lo,
+      Math.max(lo, maxStart)
+    )
+    if (Math.abs(start - lo) < ZOOM_WELD_EPSILON_SECONDS) start = lo
+    return { start, end: reference.end }
+  }
+
+  // The wall beats the duration floor: when the available gap is smaller
+  // than the minimum (legacy short clip boxed in by its neighbour), the edge
+  // fills the gap instead of crossing into the neighbour.
+  const minEnd = reference.start + MIN_ZOOM_CLIP_SECONDS
+  let end = clamp(
+    isFiniteTime(requested.end) ? requested.end : reference.end,
+    Math.min(minEnd, hi),
+    hi
+  )
+  if (Math.abs(end - hi) < ZOOM_WELD_EPSILON_SECONDS) end = hi
+  return { start: reference.start, end }
 }

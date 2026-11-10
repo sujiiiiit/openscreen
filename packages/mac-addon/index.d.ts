@@ -199,8 +199,8 @@ export type CameraDevice = CaptureDevice
 export type AudioDevice = CaptureDevice
 
 export interface RecordingFiles {
-  // Single .mov containing screen video plus, when enabled, system audio and
-  // microphone (all muxed by SCRecordingOutput).
+  // Single .mov/.mp4 containing screen video plus, when enabled, system audio
+  // and macOS 15+ microphone audio. Written by the screen AVAssetWriter.
   screen: string
   camera?: string
   manifest: string
@@ -245,9 +245,8 @@ export interface RecordingOutputMetadata {
   displayId?: number
   displayBoundsPoints?: { x: number; y: number; width: number; height: number }
   session?: InputSessionMetadata
-  // True once SCRecordingOutput / AVAssetWriter has actually accepted a sample
-  // (per-source; camera reports its writer state, screen reports the
-  // SCRecordingOutput didStartRecordingAtFileURL callback).
+  // True once the writer has actually accepted a sample (per-source; camera
+  // reports its writer state, screen reports the first AVAssetWriter session).
   started?: boolean
   finished?: boolean
   samples?: number
@@ -311,6 +310,9 @@ export interface RecordingOutputMetadata {
 }
 
 export interface RecordingManifest {
+  // Manifest schema version. Absent in recordings made before the field
+  // shipped (treat as the original/unversioned shape).
+  version?: number
   sessionId: string
   startedAtUnixMs: number
   hostStartMs: number

@@ -1,4 +1,4 @@
-import { BrowserWindow, app, ipcMain, shell } from 'electron'
+import { BrowserWindow, app, ipcMain, powerSaveBlocker, shell } from 'electron'
 import {
   mkdirSync,
   readFileSync,
@@ -19,6 +19,76 @@ import {
 } from './export-schema'
 import type { ProjectStateV1 } from './project-schema'
 
+// ─── Streamed output ────────────────────────────────────────────────────
+// The renderer encodes into a Mediabunny StreamTarget whose chunks arrive
+// here as positional writes (`export:streamWrite`) against a hidden
+// `.pending-…` temp file in the exports folder. `export:reportDone` renames
+// the temp file into place; cancel / error / window-close discard it. This
+// replaces the old BufferTarget → ArrayBuffer-over-IPC handoff, which held
+// the entire output in renderer memory (plus an IPC clone plus a Buffer
+// copy) and stalled multi-GB exports at finalize.
+
+// Sanity bounds for positional stream writes from the renderer. The chunk
+// size Mediabunny gathers is 16 MiB; positions beyond 64 GiB or chunks
+// beyond 64 MiB indicate a corrupted/hostile payload, not a real export.
+const MAX_STREAM_POSITION = 64 * 1024 * 1024 * 1024
+const MAX_STREAM_CHUNK_BYTES = 64 * 1024 * 1024
+
+interface ActiveExportStream {
+  handle: fs.FileHandle
+  tmpPath: string
+  /** Container extension resolved at streamBegin from the coerced format. */
+  ext: string
+  /** Settled-safe copies of every write, awaited before the final rename. */
+  pending: Promise<unknown>[]
+}
+
+let activeExportStream: ActiveExportStream | null = null
+
+/**
+ * Drop the active stream (if any) and delete its temp file. Callable from
+ * sync paths — the file-handle close + unlink run detached, which is fine
+ * because nothing reads the temp file afterwards.
+ */
+function discardActiveStream(): void {
+  const stream = activeExportStream
+  activeExportStream = null
+  if (!stream) return
+  void (async () => {
+    await Promise.allSettled(stream.pending)
+    try {
+      await stream.handle.close()
+    } catch {
+      // best-effort
+    }
+    try {
+      rmSync(stream.tmpPath, { force: true })
+    } catch {
+      // best-effort
+    }
+  })()
+}
+
+// ─── Power-save blocker ─────────────────────────────────────────────────
+// macOS App Nap / occlusion throttling can starve a minimized export
+// window's renderer mid-encode. Block app suspension (NOT display sleep)
+// for the duration of the job; every terminal path stops it.
+let powerBlockerId: number | null = null
+
+function startExportPowerBlocker(): void {
+  if (powerBlockerId !== null && powerSaveBlocker.isStarted(powerBlockerId)) {
+    return
+  }
+  powerBlockerId = powerSaveBlocker.start('prevent-app-suspension')
+}
+
+function stopExportPowerBlocker(): void {
+  if (powerBlockerId !== null && powerSaveBlocker.isStarted(powerBlockerId)) {
+    powerSaveBlocker.stop(powerBlockerId)
+  }
+  powerBlockerId = null
+}
+
 // IMPORTANT: the exported types below are mirrored in `types/api.d.ts` so
 // the renderer can typecheck the preload bridge without importing from
 // `electron/`. Edits here MUST be reflected there.
@@ -28,6 +98,9 @@ export interface ExportStartPayload {
   state: ProjectStateV1
   assetUrlsByVideoId: Record<string, string>
   outputBaseName?: string
+  // Absolute project folder — lets the export stage load cursor sidecars
+  // directly instead of re-deriving the folder from a video file URL.
+  projectPath?: string
 }
 
 interface RegisterExportHandlersOptions {
@@ -79,10 +152,28 @@ function persistExportSettings(value: ExportSettings): void {
 }
 
 function loadExportSettings(): ExportSettings {
-  return coerceExportSettings({
+  const persisted = readPersistedExportSettings()
+  const settings = coerceExportSettings({
     ...defaultExportSettings(),
-    ...readPersistedExportSettings(),
+    ...persisted,
   })
+  // Surface what coercion changed so a corrupt / hand-edited settings file
+  // is debuggable. Keys absent from the file are normal defaults — silent.
+  const coercedKeys = (Object.keys(persisted) as (keyof ExportSettings)[]).filter(
+    (key) => persisted[key] !== undefined && settings[key] !== persisted[key]
+  )
+  if (coercedKeys.length > 0) {
+    console.warn(
+      '[export] invalid persisted export-settings values coerced:',
+      Object.fromEntries(
+        coercedKeys.map((key) => [
+          key,
+          { persisted: persisted[key], coerced: settings[key] },
+        ])
+      )
+    )
+  }
+  return settings
 }
 
 let cachedExportsDir: string | null = null
@@ -160,6 +251,24 @@ export function getExportSourceEditorWindow(): BrowserWindow | null {
 }
 
 export function registerExportHandlers(options: RegisterExportHandlersOptions): void {
+  // Sweep orphaned streamed-output temp files from a previous hard crash
+  // (normal teardown paths discard them; a SIGKILL mid-encode cannot).
+  void (async () => {
+    try {
+      const entries = await fs.readdir(exportsDir())
+      for (const entry of entries) {
+        if (!entry.startsWith('.pending-export-')) continue
+        try {
+          rmSync(path.join(exportsDir(), entry), { force: true })
+        } catch {
+          // best-effort
+        }
+      }
+    } catch {
+      // best-effort
+    }
+  })()
+
   ipcMain.handle('export:openWindow', (event, payload: ExportStartPayload) => {
     // If the export window is already open, just bring it forward —
     // regardless of whether an encode is in flight. We don't reset state
@@ -239,28 +348,101 @@ export function registerExportHandlers(options: RegisterExportHandlersOptions): 
     },
   )
 
+  // Open the streamed-output temp file. Always supersedes a stale stream
+  // (e.g. "Export again" after a failure path that never reached cleanup).
+  ipcMain.handle('export:streamBegin', async (_event, format: unknown) => {
+    discardActiveStream()
+    const coerced = coerceExportSettings({
+      ...defaultExportSettings(),
+      ...(typeof format === 'string' ? { format: format as ExportSettings['format'] } : {}),
+    })
+    const ext = exportContainerExtension(coerced.format)
+    const tmpPath = path.join(
+      exportsDir(),
+      `.pending-export-${timestampSuffix()}.${ext}`,
+    )
+    const handle = await fs.open(tmpPath, 'w')
+    activeExportStream = { handle, tmpPath, ext, pending: [] }
+  })
+
+  // One positional write per Mediabunny chunk (~16 MiB). Awaiting the disk
+  // write before resolving propagates disk backpressure all the way up into
+  // the renderer's encode loop. Positional (not append) because the MP4/WebM
+  // muxers seek back to patch sizes and write the index at finalize.
+  ipcMain.handle(
+    'export:streamWrite',
+    async (_event, position: unknown, data: unknown) => {
+      const stream = activeExportStream
+      if (!stream) {
+        throw new Error('No export output stream is open.')
+      }
+      if (
+        typeof position !== 'number' ||
+        !Number.isSafeInteger(position) ||
+        position < 0 ||
+        position > MAX_STREAM_POSITION
+      ) {
+        throw new Error('Invalid export stream write position.')
+      }
+      let buf: Buffer
+      if (data instanceof Uint8Array) {
+        buf = Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+      } else if (data instanceof ArrayBuffer) {
+        buf = Buffer.from(data)
+      } else {
+        throw new Error('Export stream chunk must be a Uint8Array.')
+      }
+      if (buf.byteLength === 0) return
+      if (buf.byteLength > MAX_STREAM_CHUNK_BYTES) {
+        throw new Error('Export stream chunk too large.')
+      }
+      const write = stream.handle.write(buf, 0, buf.byteLength, position)
+      stream.pending.push(write.catch(() => undefined))
+      await write
+    },
+  )
+
+  // Renderer-driven cleanup for failed/cancelled encodes. Idempotent — the
+  // cancel/error/closed paths here also discard, whichever lands first.
+  ipcMain.handle('export:streamAbort', () => {
+    discardActiveStream()
+  })
+
   ipcMain.handle(
     'export:reportDone',
-    async (_event, bytes: ArrayBuffer): Promise<{ outputPath: string }> => {
-      if (!(bytes instanceof ArrayBuffer)) {
-        throw new Error('Export output payload must be an ArrayBuffer.')
-      }
+    async (): Promise<{ outputPath: string }> => {
       // If the user clicked Cancel while finalize was in flight, the cancel
       // handler has already moved us to a terminal state. Honour that:
-      // don't write the file, don't resurrect the job.
+      // don't keep the file, don't resurrect the job.
       if (TERMINAL_PHASES.has(state.phase)) {
+        discardActiveStream()
         throw new Error(`Export is ${state.phase}; output discarded.`)
+      }
+      const stream = activeExportStream
+      if (!stream) {
+        throw new Error('Export finished without an open output stream.')
       }
       state.phase = 'finalizing'
       broadcastState(options.getExportWindow())
 
-      const ext = exportContainerExtension(state.settings.format)
       const baseName = sanitizeBaseName(pendingStartPayload?.outputBaseName)
-      const fileName = `${baseName}-${timestampSuffix()}.${ext}`
+      const fileName = `${baseName}-${timestampSuffix()}.${stream.ext}`
       const target = path.join(exportsDir(), fileName)
       try {
-        await fs.writeFile(target, Buffer.from(bytes))
+        // Every chunk the renderer submitted has been awaited individually,
+        // but settle the tracked copies anyway so an out-of-order failure
+        // can't slip a truncated file past the rename.
+        activeExportStream = null
+        await Promise.allSettled(stream.pending)
+        await stream.handle.close()
+        await fs.rename(stream.tmpPath, target)
       } catch (error) {
+        try {
+          rmSync(stream.tmpPath, { force: true })
+        } catch {
+          // best-effort
+        }
+        stopExportPowerBlocker()
         state.phase = 'error'
         state.lastError = errorMessage(error)
         broadcastState(options.getExportWindow())
@@ -268,6 +450,7 @@ export function registerExportHandlers(options: RegisterExportHandlersOptions): 
         throw error
       }
 
+      stopExportPowerBlocker()
       state.phase = 'done'
       state.outputPath = target
       broadcastState(options.getExportWindow())
@@ -279,6 +462,8 @@ export function registerExportHandlers(options: RegisterExportHandlersOptions): 
   )
 
   ipcMain.handle('export:reportError', (_event, message: string) => {
+    stopExportPowerBlocker()
+    discardActiveStream()
     if (TERMINAL_PHASES.has(state.phase)) return
     state.phase = 'error'
     state.lastError = typeof message === 'string' ? message : 'Export failed.'
@@ -295,6 +480,10 @@ export function registerExportHandlers(options: RegisterExportHandlersOptions): 
     // because phase !== 'done'. Honouring terminal states stops that
     // resurrection and keeps a successful export permanent.
     if (TERMINAL_PHASES.has(state.phase)) return
+    stopExportPowerBlocker()
+    // The streamed temp file is the partial output — discard it. (The
+    // renderer's abort path also calls streamAbort; both are idempotent.)
+    discardActiveStream()
     if (!isExportActive()) {
       // Idle / fresh window — nothing to cancel, but flip to a terminal
       // state so the UI surface reflects the user's intent.
@@ -305,10 +494,6 @@ export function registerExportHandlers(options: RegisterExportHandlersOptions): 
     }
     state.phase = 'cancelled'
     state.lastError = null
-    // Best-effort: if the worker wrote a partial file we won't know its path
-    // (BufferTarget is in-memory; FilePath/StreamTarget could be added in
-    // v2). reportDone is the only place we touch disk, so cancellation
-    // before that is a clean teardown.
     broadcastState(options.getExportWindow())
     options.showEditorWindow(getSourceEditorWindow(options.getEditorWindow))
   })
@@ -347,6 +532,7 @@ export function registerExportHandlers(options: RegisterExportHandlersOptions): 
   // encode. We flip the phase + hide the editor here so the toggle is
   // centralised.
   ipcMain.handle('export:markPreparing', () => {
+    startExportPowerBlocker()
     state.phase = 'preparing'
     state.progress = defaultProgress()
     state.outputPath = null
@@ -376,6 +562,12 @@ export function registerExportHandlers(options: RegisterExportHandlersOptions): 
 export function disposeExportPendingPayload(): void {
   pendingStartPayload = null
   sourceEditorWindow = null
+  // Window closed mid-encode (OS quit, devtools, crash): stop blocking app
+  // suspension and drop any half-written streamed temp file. After a
+  // successful reportDone the stream is already null, so the user's file is
+  // never touched.
+  stopExportPowerBlocker()
+  discardActiveStream()
   if (
     state.outputPath &&
     state.phase !== 'done' &&

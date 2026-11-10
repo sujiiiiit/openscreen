@@ -28,11 +28,6 @@ function projectVideo(partial: Partial<ProjectVideo> & { id: string }) {
     borderColor: "#000000",
     borderOffset: 0,
     borderAlignment: "inside",
-    shadowColor: "rgba(0, 0, 0, 0.25)",
-    shadowBlur: 0,
-    shadowOffsetX: 0,
-    shadowOffsetY: 0,
-    shadowSpread: 0,
     ...rest,
   } satisfies ProjectVideo
 }
@@ -64,9 +59,7 @@ function state(partial: Partial<ProjectStateV1>): ProjectStateV1 {
       width: 1920,
       height: 1080,
       background: null,
-      padding: 0,
-      grain: 0,
-    },
+      padding: 0,    },
     videos: [],
     timelineClips: [],
     updatedAtUnixMs: 0,

@@ -13,6 +13,7 @@ import type {
 } from "@/types/editor-canvas"
 import {
   ZOOM_FOCUS_DEFAULT,
+  ZOOM_MODE_DEFAULT,
   ZOOM_RADIAL_BLUR_DEFAULT,
   ZOOM_SCALE_DEFAULT,
   ZOOM_TRANSITION_DEFAULT,
@@ -41,9 +42,12 @@ export function fingerprintProjectState(
       videos: snapshot.videos,
       timelineClips: snapshot.timelineClips,
       // Included so a zoom-clip edit changes the fingerprint and triggers a
-      // save. `undefined` (empty/omitted) stringifies away, so legacy projects
-      // with no zoom clips keep a stable, no-op fingerprint.
-      zoomClips: snapshot.zoomClips,
+      // save. Normalized to `[]` because "absent" and "present but empty"
+      // are the same state: `serializeProjectState` omits the key when the
+      // array is empty while a hand-rolled or round-tripped file may carry
+      // an explicit `[]` — without normalization an add-then-delete cycle
+      // produced one spurious save.
+      zoomClips: snapshot.zoomClips ?? [],
     })
   } catch {
     return null
@@ -59,17 +63,19 @@ export function serializeArtboard(artboard: EditorArtboard): ProjectArtboard {
       ? cloneBackground(artboard.background)
       : null,
     padding: artboard.padding,
-    grain: artboard.grain,
+    backgroundEnabled: artboard.backgroundEnabled,
     cursorCustomRenderingEnabled: artboard.cursorCustomRenderingEnabled,
     cursorSetId: artboard.cursorSetId,
     cursorSizeMultiplier: artboard.cursorSizeMultiplier,
     cursorMotionBlur: artboard.cursorMotionBlur,
     cursorMotionRotation: artboard.cursorMotionRotation,
-    cursorMotionRotationMode: artboard.cursorMotionRotationMode,
-    cursorMotionBlurBackend: artboard.cursorMotionBlurBackend,
+    // `cursorMotionRotationMode` is no longer written: the direction-follow
+    // "rotation" mode was removed (side lean is the only behavior). The field
+    // stays optional in the v1 schema so legacy files keep parsing.
     cursorSmoothingMode: artboard.cursorSmoothingMode,
     cursorClickPressScale: artboard.cursorClickPressScale,
     cursorAlwaysUsePointer: artboard.cursorAlwaysUsePointer,
+    cursorTypeStabilization: artboard.cursorTypeStabilization,
   }
 }
 
@@ -117,11 +123,6 @@ export function serializeVideo(
     borderColor: video.borderColor,
     borderOffset: video.borderOffset,
     borderAlignment: video.borderAlignment,
-    shadowColor: video.shadowColor,
-    shadowBlur: video.shadowBlur,
-    shadowOffsetX: video.shadowOffsetX,
-    shadowOffsetY: video.shadowOffsetY,
-    shadowSpread: video.shadowSpread,
   }
 }
 
@@ -158,6 +159,10 @@ function serializeZoomTransition(
 // centerSharpness for the symmetric shader. The Pixi-style ZoomBlurFilter path
 // now bakes the inner radius at 2%; all radialBlurSettings fields are legacy
 // hydration fields and are no longer written by new saves.
+// Round normalized values for tidy, stable JSON (frame-analysis rects are
+// already deterministic; this just trims float noise from the serialized form).
+const round4 = (value: number) => Math.round(value * 1e4) / 1e4
+
 export function serializeZoomClip(clip: CanvasZoomClip): ProjectZoomClip {
   const normalized = withZoomClipDefaults(clip)
   const transition = serializeZoomTransition(normalized.transition)
@@ -170,6 +175,9 @@ export function serializeZoomClip(clip: CanvasZoomClip): ProjectZoomClip {
     normalized.focus.y !== ZOOM_FOCUS_DEFAULT.y
       ? { focus: { x: normalized.focus.x, y: normalized.focus.y } }
       : {}),
+    // Omitted when default so legacy `project.json` files stay byte-identical
+    // until a clip's mode is changed away from the default.
+    ...(normalized.mode !== ZOOM_MODE_DEFAULT ? { mode: normalized.mode } : {}),
     ...(normalized.scale !== ZOOM_SCALE_DEFAULT
       ? { scale: normalized.scale }
       : {}),
@@ -177,6 +185,21 @@ export function serializeZoomClip(clip: CanvasZoomClip): ProjectZoomClip {
       ? { radialBlur: normalized.radialBlur }
       : {}),
     ...(transition ? { transition } : {}),
+    // Omitted when empty so legacy `project.json` files (and clips with no
+    // detected content) stay byte-identical.
+    ...(normalized.engagedRects.length > 0
+      ? {
+          engagedRects: normalized.engagedRects.map((r) => ({
+            t: round4(r.t),
+            rect: {
+              x: round4(r.rect.x),
+              y: round4(r.rect.y),
+              width: round4(r.rect.width),
+              height: round4(r.rect.height),
+            },
+          })),
+        }
+      : {}),
   }
 }
 
@@ -246,11 +269,6 @@ export function projectVideoToCanvasVideo(
     borderColor: video.borderColor,
     borderOffset: video.borderOffset,
     borderAlignment: video.borderAlignment,
-    shadowColor: video.shadowColor,
-    shadowBlur: video.shadowBlur,
-    shadowOffsetX: video.shadowOffsetX,
-    shadowOffsetY: video.shadowOffsetY,
-    shadowSpread: video.shadowSpread,
   }
 }
 
@@ -276,10 +294,12 @@ export function projectZoomClipToCanvasClip(
     end: clip.end,
     enabled: clip.enabled,
     focus: clip.focus,
+    mode: clip.mode,
     scale: clip.scale,
     radialBlur: clip.radialBlur,
     radialBlurSettings: clip.radialBlurSettings,
     transition: clip.transition,
     easePreset: clip.easePreset,
+    engagedRects: clip.engagedRects,
   })
 }

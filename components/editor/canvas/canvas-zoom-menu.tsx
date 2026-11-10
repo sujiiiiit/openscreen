@@ -3,10 +3,10 @@
 import { HugeiconsIcon } from "@hugeicons/react"
 import {
   ArrowDown01Icon,
+  ArrowExpandIcon,
   EyeIcon,
-  FitToScreenIcon,
-  ZoomInAreaIcon,
-  ZoomOutAreaIcon,
+  SearchAddIcon,
+  SearchMinusIcon,
 } from "@hugeicons/core-free-icons"
 
 import {
@@ -76,14 +76,14 @@ export function CanvasZoomMenu() {
         <DropdownMenuItem
           closeOnClick
           onClick={() => zoomBy(WORKSPACE_ZOOM_STEP)}
-          icon={<HugeiconsIcon icon={ZoomInAreaIcon} />}
+          icon={<HugeiconsIcon icon={SearchAddIcon} />}
           text="Zoom in"
           shortcut="⌘+"
         />
         <DropdownMenuItem
           closeOnClick
           onClick={() => zoomBy(1 / WORKSPACE_ZOOM_STEP)}
-          icon={<HugeiconsIcon icon={ZoomOutAreaIcon} />}
+          icon={<HugeiconsIcon icon={SearchMinusIcon} />}
           text="Zoom out"
           shortcut="⌘−"
         />
@@ -98,7 +98,7 @@ export function CanvasZoomMenu() {
         <DropdownMenuItem
           closeOnClick
           onClick={() => zoomToScale(2)}
-          icon={<HugeiconsIcon icon={ZoomInAreaIcon} />}
+          icon={<HugeiconsIcon icon={SearchAddIcon} />}
           text="Zoom to 200%"
           shortcut="⇧2"
         />
@@ -106,7 +106,7 @@ export function CanvasZoomMenu() {
         <DropdownMenuItem
           closeOnClick
           onClick={fitArtboardToViewport}
-          icon={<HugeiconsIcon icon={FitToScreenIcon} />}
+          icon={<HugeiconsIcon icon={ArrowExpandIcon} />}
           text="Zoom to Fit"
           shortcut="⇧F"
         />

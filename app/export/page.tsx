@@ -165,10 +165,13 @@ export default function ExportPage() {
 
     await api.markPreparing()
     try {
-      const result = await runExport({
+      // runExport streams the encoded file to disk through the export
+      // stream IPC as it encodes; nothing is returned to this renderer.
+      await runExport({
         state: session.payload.state,
         settings: session.settings,
         assetUrlsByVideoId: session.payload.assetUrlsByVideoId,
+        projectPath: session.payload.projectPath,
         container,
         signal: abortController.signal,
         onStage: (next) => setStage(next),
@@ -183,7 +186,8 @@ export default function ExportPage() {
         setPhase("cancelled")
         return
       }
-      const done = await api.reportDone(result.bytes)
+      // Renames the streamed temp file into its final exports-folder name.
+      const done = await api.reportDone()
       setOutputPath(done.outputPath)
       setPhase("done")
     } catch (error) {
@@ -337,9 +341,9 @@ export default function ExportPage() {
       </footer>
 
       {/*
-        Off-screen render surface. The export pipeline attaches its vanilla
-        Konva stage here. We hide it visually but keep it in the document
-        so the <video> elements + canvas composite work normally.
+        Off-screen render surface. The export pipeline attaches its offscreen
+        PixiJS application canvas here. We hide it visually but keep it in the
+        document so the <video> elements + canvas composite work normally.
       */}
       <div
         ref={offscreenRef}
@@ -456,7 +460,6 @@ const STAGE_PHRASES: Record<ExportStage, readonly string[]> = {
     "Encoding frames",
     "Composing",
     "Painting frames",
-    "Wiring shadows",
     "Buffering encoder",
     "Tuning bitrate",
     "Squeezing bytes",

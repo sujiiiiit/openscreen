@@ -63,7 +63,8 @@ struct RecordingOptions {
   //   "hevc" → HEVC (H.265), VideoToolbox default profile.
   //   "h264" → H.264 (AVC), High AutoLevel by default.
   std::string videoCodec;
-  // "low" | "medium" | "high" — bits-per-pixel multiplier for the encoder.
+  // "low" | "medium" | "high" | "xhigh" | "max" — bits-per-pixel multiplier
+  // for the encoder.
   std::string videoQuality = "high";
   // "mov" | "mp4". Both codecs work in both containers.
   std::string container = "mov";

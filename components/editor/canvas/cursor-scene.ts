@@ -1,9 +1,5 @@
 import type { CursorTrackData } from "@/types/api"
-import type {
-  CursorMotionBlurBackend,
-  CursorMotionRotationMode,
-  CursorSmoothingMode,
-} from "@/types/editor-canvas"
+import type { CursorSmoothingMode } from "@/types/editor-canvas"
 import type {
   CursorAssetEntry,
   CursorSetId,
@@ -11,10 +7,12 @@ import type {
 import type { MotionBlurOptions } from "@/lib/motion-blur/types"
 import { isCursorSetId, resolveCursorAsset } from "@/lib/cursors/cursor-set"
 import {
+  CURSOR_TYPE_STABILIZE_MS,
   buildSmoothedTrack,
   clickEventsFromClicks,
   rawSamplesFromMoves,
   sampleCursorAtTime,
+  stabilizeCursorIds,
   type CursorSmoothingParams,
   type SmoothedCursorTrack,
 } from "@/lib/cursors/cursor-track"
@@ -52,9 +50,9 @@ const CURSOR_OPTICAL_SCALE_MAX = 1.25
 export const CURSOR_SIZE_MIN = 1
 export const CURSOR_SIZE_MAX = 4
 // New projects (and legacy project.json files that predate the setting) open at
-// 270% — a comfortable emphasis size. `CURSOR_SIZE_MIN` is still the reference-
+// 220% — a comfortable emphasis size. `CURSOR_SIZE_MIN` is still the reference-
 // frame 1:1 floor the slider can be dragged down to.
-export const CURSOR_SIZE_DEFAULT = 2.7
+export const CURSOR_SIZE_DEFAULT = 2.2
 
 /** Clamp any externally-supplied size multiplier into the supported range,
  * falling back to the default for non-finite input. */
@@ -94,6 +92,22 @@ const CURSOR_MOTION_ROTATION_SMOOTHING_PARAMS: Record<
   slow: { windowSec: 0.36, samples: 9 },
 }
 
+// Click-press timing follows the same smoothing preset, so the cursor reads as
+// one coherent motion personality: a Rapid path glides snappily AND clicks
+// crisply, while Slow cushions both. Only the press/release *durations* and the
+// release *overshoot* scale here — the press depth stays the user's Click
+// downscale slider (`cursorClickPressScale`). `default` is pinned to the
+// previously-shipped 70 / 220 / 0.09 so existing projects look identical.
+const CURSOR_CLICK_PRESS_PARAMS: Record<
+  CursorSmoothingMode,
+  { pressInMs: number; releaseMs: number; overshoot: number }
+> = {
+  rapid: { pressInMs: 45, releaseMs: 150, overshoot: 0.06 },
+  quick: { pressInMs: 58, releaseMs: 185, overshoot: 0.075 },
+  default: { pressInMs: 70, releaseMs: 220, overshoot: 0.09 },
+  slow: { pressInMs: 95, releaseMs: 300, overshoot: 0.12 },
+}
+
 export function clampCursorSmoothingMode(value: unknown): CursorSmoothingMode {
   return CURSOR_SMOOTHING_MODES.includes(value as CursorSmoothingMode)
     ? (value as CursorSmoothingMode)
@@ -115,27 +129,17 @@ function cursorOpticalScale(asset: CursorAssetEntry): number {
   )
 }
 
-// --- Cursor motion rotation ----------------------------------------------
-// Subtle cursor rotation derived from recent velocity. The amount is a single
-// persisted 0..1 slider, and the mode chooses whether that amount means the
-// original horizontal side-lean or a bounded full-direction follow. The velocity
-// estimate is deterministic: no per-frame state, no easing timers, and the same
-// result while scrubbing or exporting.
-export const CURSOR_MOTION_ROTATION_MODE_DEFAULT: CursorMotionRotationMode =
-  "side-lean"
-export const CURSOR_MOTION_ROTATION_MODES: CursorMotionRotationMode[] = [
-  "side-lean",
-  "rotation",
-]
+// --- Cursor motion rotation (side lean) -----------------------------------
+// Subtle Screen-Studio-style horizontal lean derived from recent velocity. The
+// amount is a single persisted 0..1 slider. The velocity estimate is
+// deterministic: no per-frame state, no easing timers, and the same result
+// while scrubbing or exporting. (The full direction-follow "rotation" mode was
+// removed 2026-06-06 — side lean is the only behavior; the legacy persisted
+// `cursorMotionRotationMode` field is ignored.)
 export const CURSOR_MOTION_ROTATION_DEFAULT = 0.35
 export const CURSOR_MOTION_ROTATION_SIDE_LEAN_MAX_DEG = 10
-export const CURSOR_MOTION_ROTATION_DIRECTION_MAX_DEG = 45
-export const CURSOR_MOTION_ROTATION_MAX_DEG =
-  CURSOR_MOTION_ROTATION_SIDE_LEAN_MAX_DEG
 export const CURSOR_MOTION_ROTATION_WINDOW_SEC = 0.08
 export const CURSOR_MOTION_ROTATION_SATURATION_PX_PER_SEC = 900
-const CURSOR_DIRECTION_ROTATION_MIN_TIP_DISTANCE = 0.04
-const CURSOR_DIRECTION_ROTATION_FULL_TIP_DISTANCE = 0.22
 
 // --- Cursor motion blur ---------------------------------------------------
 // Screen-Studio-style directional blur on the moving cursor. A single user
@@ -146,12 +150,8 @@ const CURSOR_DIRECTION_ROTATION_FULL_TIP_DISTANCE = 0.22
 // rationale as `placeCursor` and `video-scene-draw.ts`.
 //
 // New projects (and legacy project.json files that predate the setting) open at
-// 0.6 — a tasteful, clearly-visible amount.
-export const CURSOR_MOTION_BLUR_DEFAULT = 0.6
-
-// GPU keeps the interactive Konva preview responsive; CPU is available as an
-// explicit fallback/comparison mode and uses the same Pixi-derived math.
-export const CURSOR_MOTION_BLUR_BACKEND_DEFAULT: CursorMotionBlurBackend = "gpu"
+// 0.2 — a subtle smear that reads as motion without softening the pointer.
+export const CURSOR_MOTION_BLUR_DEFAULT = 0.2
 
 // Tuning knobs (not user-facing):
 // - finite-difference window for estimating cursor speed; small + fixed so the
@@ -174,10 +174,7 @@ const CURSOR_BLUR_KERNEL_MAX = 25
 // sprite. `1` disables the shrink; the current shipped value stays the default.
 export const CURSOR_CLICK_PRESS_SCALE_MIN = 0.5
 export const CURSOR_CLICK_PRESS_SCALE_MAX = 1
-export const CURSOR_CLICK_PRESS_SCALE_DEFAULT = 0.88
-const CURSOR_CLICK_PRESS_IN_MS = 70
-const CURSOR_CLICK_RELEASE_MS = 220
-const CURSOR_CLICK_RELEASE_OVERSHOOT = 0.09
+export const CURSOR_CLICK_PRESS_SCALE_DEFAULT = 0.78
 
 /** Clamp the user motion-blur intensity into [0, 1], defaulting on bad input. */
 export function clampCursorMotionBlur(value: number): number {
@@ -191,13 +188,6 @@ export function clampCursorMotionRotation(value: number): number {
   return Math.min(1, Math.max(0, value))
 }
 
-/** Clamp unknown persisted/UI rotation-mode input, defaulting to side lean. */
-export function clampCursorMotionRotationMode(
-  value: unknown
-): CursorMotionRotationMode {
-  return value === "rotation" ? "rotation" : CURSOR_MOTION_ROTATION_MODE_DEFAULT
-}
-
 /** Clamp the clicked cursor's target scale; 1 means no press shrink. */
 export function clampCursorClickPressScale(value: number): number {
   if (!Number.isFinite(value)) return CURSOR_CLICK_PRESS_SCALE_DEFAULT
@@ -205,13 +195,6 @@ export function clampCursorClickPressScale(value: number): number {
     CURSOR_CLICK_PRESS_SCALE_MAX,
     Math.max(CURSOR_CLICK_PRESS_SCALE_MIN, value)
   )
-}
-
-/** Clamp unknown persisted/UI backend input, defaulting to GPU. */
-export function clampCursorMotionBlurBackend(
-  value: unknown
-): CursorMotionBlurBackend {
-  return value === "cpu" ? "cpu" : CURSOR_MOTION_BLUR_BACKEND_DEFAULT
 }
 
 function oddKernel(value: number): number {
@@ -228,7 +211,8 @@ function easeOutCubic(t: number): number {
 function cursorClickScaleAt(
   track: SmoothedCursorTrack,
   tMs: number,
-  pressScale?: number
+  pressScale?: number,
+  smoothingMode?: CursorSmoothingMode
 ): number {
   const clicks = track.clicks
   if (!clicks || clicks.length === 0) return 1
@@ -237,6 +221,11 @@ function cursorClickScaleAt(
     typeof pressScale === "number"
       ? clampCursorClickPressScale(pressScale)
       : CURSOR_CLICK_PRESS_SCALE_DEFAULT
+  // Press/release timing + overshoot follow the same smoothing preset as the
+  // path glide; `clampCursorSmoothingMode` defaults to "default" for omitted or
+  // bad input, so callers that don't pass a mode keep the previous feel.
+  const timing =
+    CURSOR_CLICK_PRESS_PARAMS[clampCursorSmoothingMode(smoothingMode)]
   let lo = 0
   let hi = clicks.length - 1
   if (tMs < clicks[0].t) return 1
@@ -251,30 +240,36 @@ function cursorClickScaleAt(
   if (depth <= 0) return 1
 
   if (event.type === "down") {
-    const p = dt / CURSOR_CLICK_PRESS_IN_MS
+    const p = dt / timing.pressInMs
     if (p < 1) return 1 - depth * easeOutCubic(p)
     return targetScale
   }
 
-  if (dt > CURSOR_CLICK_RELEASE_MS) return 1
-  const p = Math.min(1, Math.max(0, dt / CURSOR_CLICK_RELEASE_MS))
+  if (dt > timing.releaseMs) return 1
+  const p = Math.min(1, Math.max(0, dt / timing.releaseMs))
   const base = targetScale + depth * easeOutCubic(p)
   const rebound =
-    Math.min(CURSOR_CLICK_RELEASE_OVERSHOOT, depth * 0.75) *
-    Math.sin(Math.PI * p) *
-    (1 - p)
+    Math.min(timing.overshoot, depth * 0.75) * Math.sin(Math.PI * p) * (1 - p)
   return base + rebound
 }
 
 /** Build the time-indexed cursor track from raw IPC data, applying the shared
- * smoothing choice. Returns null when there's no usable cursor data. */
+ * smoothing choice. When `stabilizeCursorType` is set, brief cursor-SHAPE
+ * flickers are debounced out (held to the surrounding shape). Returns null when
+ * there's no usable cursor data. */
 export function buildCursorTrack(
   data: CursorTrackData | null,
-  options: { smoothingMode?: CursorSmoothingMode } = {}
+  options: {
+    smoothingMode?: CursorSmoothingMode
+    stabilizeCursorType?: boolean
+  } = {}
 ): SmoothedCursorTrack | null {
   if (!data || data.moves.length === 0) return null
-  const samples = rawSamplesFromMoves(data.moves, data.processTimeStartMs)
+  let samples = rawSamplesFromMoves(data.moves, data.processTimeStartMs)
   if (samples.length === 0) return null
+  if (options.stabilizeCursorType) {
+    samples = stabilizeCursorIds(samples, CURSOR_TYPE_STABILIZE_MS)
+  }
   const clicks = clickEventsFromClicks(
     data.clicks ?? [],
     data.processTimeStartMs
@@ -309,10 +304,62 @@ export interface CursorReferenceSize {
 
 type CursorSample = NonNullable<ReturnType<typeof sampleCursorAtTime>>
 
-interface MappedCursorPoint {
+export interface MappedCursorPoint {
   x: number
   y: number
   onScreen: boolean
+}
+
+/**
+ * Map a captured display point (display-relative logical points, top-left
+ * origin) into artboard pixels, through the screen video's object-fit:cover
+ * crop and its placement/rotation on the artboard.
+ *
+ * Pure and SHARED: the cursor overlay (`placeCursor`) and the auto-zoom detector
+ * both run points through this exact chain, so a generated zoom's focus lands on
+ * precisely the pixel the cursor sits on. Do not duplicate this math elsewhere.
+ *
+ * `onScreen` is false when the point falls outside the visible (cropped) video
+ * rect — callers hide the cursor, or drop the auto-zoom focus, in that case.
+ *
+ * To turn the result into a `CanvasZoomClip.focus`, divide by the artboard
+ * width/height (focus is artboard-normalized, see `zoom-scene.ts`).
+ */
+export function displayPointToArtboard(
+  displayX: number,
+  displayY: number,
+  video: CursorVideoGeometry,
+  displayWidth: number,
+  displayHeight: number
+): MappedCursorPoint {
+  const iw = video.intrinsicWidth || 1
+  const ih = video.intrinsicHeight || 1
+  const dw = displayWidth || iw
+  const dh = displayHeight || ih
+
+  // Display point → source pixel → cover-crop → node-local → artboard.
+  const crop = getVideoCoverCrop(
+    { width: iw, height: ih },
+    { width: video.width, height: video.height }
+  )
+  const sx = (displayX / dw) * iw
+  const sy = (displayY / dh) * ih
+  const localX = ((sx - crop.cropX) / crop.cropWidth) * video.width
+  const localY = ((sy - crop.cropY) / crop.cropHeight) * video.height
+  const onScreen =
+    localX >= 0 &&
+    localX <= video.width &&
+    localY >= 0 &&
+    localY <= video.height
+
+  const rad = (video.rotation * Math.PI) / 180
+  const cos = Math.cos(rad)
+  const sin = Math.sin(rad)
+  return {
+    x: video.x + localX * cos - localY * sin,
+    y: video.y + localX * sin + localY * cos,
+    onScreen,
+  }
 }
 
 export interface CursorPlacement {
@@ -342,81 +389,20 @@ function mapCursorSampleToArtboard(
   track: SmoothedCursorTrack,
   video: CursorVideoGeometry
 ): MappedCursorPoint {
-  const iw = video.intrinsicWidth || 1
-  const ih = video.intrinsicHeight || 1
-  const dw = track.displayWidth || iw
-  const dh = track.displayHeight || ih
-
-  // Display point → source pixel → cover-crop → node-local → artboard.
-  const crop = getVideoCoverCrop(
-    { width: iw, height: ih },
-    { width: video.width, height: video.height }
+  return displayPointToArtboard(
+    sample.x,
+    sample.y,
+    video,
+    track.displayWidth,
+    track.displayHeight
   )
-  const sx = (sample.x / dw) * iw
-  const sy = (sample.y / dh) * ih
-  const localX = ((sx - crop.cropX) / crop.cropWidth) * video.width
-  const localY = ((sy - crop.cropY) / crop.cropHeight) * video.height
-  const onScreen =
-    localX >= 0 &&
-    localX <= video.width &&
-    localY >= 0 &&
-    localY <= video.height
-
-  const rad = (video.rotation * Math.PI) / 180
-  const cos = Math.cos(rad)
-  const sin = Math.sin(rad)
-  return {
-    x: video.x + localX * cos - localY * sin,
-    y: video.y + localX * sin + localY * cos,
-    onScreen,
-  }
-}
-
-function normalizeDegrees(degrees: number): number {
-  return ((((degrees + 180) % 360) + 360) % 360) - 180
-}
-
-function cursorForwardVector(asset: CursorAssetEntry): {
-  angleDeg: number
-  strength: number
-} {
-  const [sizeW, sizeH] = asset.size
-  if (sizeW <= 0 || sizeH <= 0) {
-    return { angleDeg: -135, strength: 1 }
-  }
-
-  const [boundsX, boundsY, boundsW, boundsH] = asset.visualBounds
-  const visualCenterX = boundsX + boundsW / 2
-  const visualCenterY = boundsY + boundsH / 2
-  const hotspotX = asset.hotspot[0] * sizeW
-  const hotspotY = asset.hotspot[1] * sizeH
-  const dx = hotspotX - visualCenterX
-  const dy = hotspotY - visualCenterY
-  const distance = Math.hypot(dx / sizeW, dy / sizeH)
-  if (distance <= 1e-6) return { angleDeg: -135, strength: 0 }
-
-  const strength = Math.min(
-    1,
-    Math.max(
-      0,
-      (distance - CURSOR_DIRECTION_ROTATION_MIN_TIP_DISTANCE) /
-        (CURSOR_DIRECTION_ROTATION_FULL_TIP_DISTANCE -
-          CURSOR_DIRECTION_ROTATION_MIN_TIP_DISTANCE)
-    )
-  )
-  return {
-    angleDeg: (Math.atan2(dy, dx) * 180) / Math.PI,
-    strength,
-  }
 }
 
 function cursorMotionRotationAt(
   track: SmoothedCursorTrack,
   video: CursorVideoGeometry,
-  asset: CursorAssetEntry,
   sourceSeconds: number,
   amount: number,
-  mode: CursorMotionRotationMode,
   smoothingMode: CursorSmoothingMode
 ): number {
   const params =
@@ -425,14 +411,7 @@ function cursorMotionRotationAt(
     ]
   const sampleCount = Math.max(1, params.samples | 0)
   if (sampleCount <= 1 || params.windowSec <= 0) {
-    return rawCursorMotionRotationAt(
-      track,
-      video,
-      asset,
-      sourceSeconds,
-      amount,
-      mode
-    )
+    return rawCursorMotionRotationAt(track, video, sourceSeconds, amount)
   }
 
   let weightedRotation = 0
@@ -451,14 +430,7 @@ function cursorMotionRotationAt(
     }
     const weight = 1 - Math.abs(centered)
     weightedRotation +=
-      rawCursorMotionRotationAt(
-        track,
-        video,
-        asset,
-        sampleSeconds,
-        amount,
-        mode
-      ) * weight
+      rawCursorMotionRotationAt(track, video, sampleSeconds, amount) * weight
     totalWeight += weight
   }
 
@@ -468,10 +440,8 @@ function cursorMotionRotationAt(
 function rawCursorMotionRotationAt(
   track: SmoothedCursorTrack,
   video: CursorVideoGeometry,
-  asset: CursorAssetEntry,
   sourceSeconds: number,
-  amount: number,
-  mode: CursorMotionRotationMode
+  amount: number
 ): number {
   const intensity = clampCursorMotionRotation(amount)
   if (intensity <= 0) return 0
@@ -490,33 +460,13 @@ function rawCursorMotionRotationAt(
   const dyArt = current.y - previous.y
 
   // Convert artboard displacement back into the screen video's local frame so
-  // rotation reacts to the cursor's motion relative to the recorded screen,
+  // the lean reacts to the cursor's motion relative to the recorded screen,
   // even when the video node itself is rotated on the artboard.
   const rad = (-video.rotation * Math.PI) / 180
   const cos = Math.cos(rad)
   const sin = Math.sin(rad)
   const dxLocal = dxArt * cos - dyArt * sin
-  const dyLocal = dxArt * sin + dyArt * cos
   const velocityX = dxLocal / CURSOR_MOTION_ROTATION_WINDOW_SEC
-  const velocityY = dyLocal / CURSOR_MOTION_ROTATION_WINDOW_SEC
-  const speed = Math.hypot(velocityX, velocityY)
-
-  if (clampCursorMotionRotationMode(mode) === "rotation") {
-    if (speed <= 1e-6) return 0
-    const { angleDeg: cursorForwardDeg, strength } = cursorForwardVector(asset)
-    if (strength <= 0) return 0
-
-    const movementDeg = (Math.atan2(dyLocal, dxLocal) * 180) / Math.PI
-    const targetDeg = normalizeDegrees(movementDeg - cursorForwardDeg)
-    const speedScale = Math.min(
-      1,
-      speed / CURSOR_MOTION_ROTATION_SATURATION_PX_PER_SEC
-    )
-    const maxDeg = CURSOR_MOTION_ROTATION_DIRECTION_MAX_DEG * intensity
-    return (
-      Math.min(maxDeg, Math.max(-maxDeg, targetDeg * speedScale)) * strength
-    )
-  }
 
   const normalizedVelocity = Math.min(
     1,
@@ -549,7 +499,6 @@ export function placeCursor(
     referenceSize?: CursorReferenceSize
     alwaysUsePointer?: boolean
     motionRotation?: number
-    motionRotationMode?: CursorMotionRotationMode
     smoothingMode?: CursorSmoothingMode
   } = {}
 ): CursorPlacement | null {
@@ -560,7 +509,6 @@ export function placeCursor(
     referenceSize,
     alwaysUsePointer = false,
     motionRotation = CURSOR_MOTION_ROTATION_DEFAULT,
-    motionRotationMode = CURSOR_MOTION_ROTATION_MODE_DEFAULT,
     smoothingMode = CURSOR_SMOOTHING_MODE_DEFAULT,
   } = options
   const sample = sampleCursorAtTime(track, sourceSeconds * 1000)
@@ -577,10 +525,8 @@ export function placeCursor(
   const motionRotationDeg = cursorMotionRotationAt(
     track,
     video,
-    asset,
     sourceSeconds,
     motionRotation,
-    motionRotationMode,
     smoothingMode
   )
 
@@ -611,7 +557,8 @@ export function placeCursor(
   const clickScale = cursorClickScaleAt(
     track,
     sourceSeconds * 1000,
-    clickPressScale
+    clickPressScale,
+    smoothingMode
   )
   const renderHeight =
     CURSOR_BOX_HEIGHT_POINTS *
@@ -639,6 +586,32 @@ export function placeCursor(
 }
 
 /**
+ * Light position-only sampler: the cursor hotspot's artboard-normalized focus
+ * `{ x, y }` (0..1) at `sourceSeconds`, or null when there is no sample or the
+ * hotspot is off the visible (cropped) video. Used by the zoom camera's
+ * cursor-follow — it skips the asset / motion / sizing work of `placeCursor`
+ * since only the position is needed, and reuses the SAME
+ * `mapCursorSampleToArtboard` mapping so the follow locks to exactly the
+ * rendered cursor pixel.
+ */
+export function sampleCursorArtboardFocus(
+  track: SmoothedCursorTrack,
+  video: CursorVideoGeometry,
+  sourceSeconds: number,
+  artboard: { width: number; height: number }
+): { x: number; y: number } | null {
+  if (artboard.width <= 0 || artboard.height <= 0) return null
+  const sample = sampleCursorAtTime(track, sourceSeconds * 1000)
+  if (!sample) return null
+  const mapped = mapCursorSampleToArtboard(sample, track, video)
+  if (!mapped.onScreen) return null
+  return {
+    x: Math.min(1, Math.max(0, mapped.x / artboard.width)),
+    y: Math.min(1, Math.max(0, mapped.y / artboard.height)),
+  }
+}
+
+/**
  * Derive the motion-blur options for the cursor at `sourceSeconds` from how fast
  * it is moving, or null when no blur should be drawn (intensity 0, cursor still,
  * or no placement). Pure + shared, so the editor preview and the exporter blur
@@ -646,10 +619,10 @@ export function placeCursor(
  *
  * The velocity is the cursor's displacement over a fixed finite-difference
  * window, converted to a smear length via a fixed shutter scaled by `intensity`,
- * and rotated into the cursor's LOCAL frame (the Konva filter runs on the cached
- * bitmap before the node's rotation transform). `offset: 0` keeps the smear
- * centred on the pointer. The returned shape feeds `konvaMotionBlurFilter`
- * directly; the caller sizes the cache margin with `motionBlurPadding`.
+ * and rotated into the cursor's LOCAL frame (the filter runs on the sprite's
+ * texture before the node's rotation transform). `offset: 0` keeps the smear
+ * centred on the pointer. The returned `{velocityX, velocityY, kernelSize,
+ * offset}` maps 1:1 onto a Pixi `MotionBlurFilter` (see `pixi/cursor-sprite.ts`).
  */
 export function computeCursorBlur(
   track: SmoothedCursorTrack,
@@ -663,7 +636,6 @@ export function computeCursorBlur(
     referenceSize?: CursorReferenceSize
     alwaysUsePointer?: boolean
     motionRotation?: number
-    motionRotationMode?: CursorMotionRotationMode
     smoothingMode?: CursorSmoothingMode
   }
 ): MotionBlurOptions | null {
@@ -677,7 +649,6 @@ export function computeCursorBlur(
     referenceSize: options.referenceSize,
     alwaysUsePointer: options.alwaysUsePointer,
     motionRotation: options.motionRotation,
-    motionRotationMode: options.motionRotationMode,
     smoothingMode: options.smoothingMode,
   }
   const cur = placeCursor(track, video, sourceSeconds, placeOpts)
@@ -719,8 +690,12 @@ export function computeCursorBlur(
   }
 }
 
-/** Derive the project folder from a recording asset's file:// URL. Shared by
- * the editor overlay and the export pipeline to locate the cursor sidecar. */
+/** Derive the project folder from a recording asset's file:// URL.
+ *
+ * FALLBACK ONLY: the editor overlay and the export pipeline both prefer the
+ * explicit project path (`project.path` / `ExportStartPayload.projectPath`)
+ * to locate cursor sidecars; this URL derivation covers payloads and
+ * sessions that predate the explicit path. */
 export function projectFolderFromObjectUrl(objectUrl: string): string | null {
   if (!objectUrl.startsWith("file:")) return null
   try {

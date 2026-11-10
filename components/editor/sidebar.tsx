@@ -60,12 +60,6 @@ const TAB_ITEMS: TabItem[] = [
     content: <CursorPanel />,
   },
   {
-    id: "zoom",
-    label: "Zoom",
-    icon: <HugeiconsIcon icon={SearchAreaIcon} className="size-4" />,
-    content: <ZoomPanel />,
-  },
-  {
     id: "video",
     label: "Video",
     icon: <HugeiconsIcon icon={Video01Icon} className="size-4" />,
@@ -92,6 +86,14 @@ const TAB_ITEMS: TabItem[] = [
         description="Balance input devices, noise suppression, and music beds."
       />
     ),
+  },
+  // Zoom stays last: it's selection-driven (opened by picking a Zoom clip in
+  // the timeline), not a browsing destination like the tabs above.
+  {
+    id: "zoom",
+    label: "Zoom",
+    icon: <HugeiconsIcon icon={SearchAreaIcon} className="size-4" />,
+    content: <ZoomPanel />,
   },
 ]
 

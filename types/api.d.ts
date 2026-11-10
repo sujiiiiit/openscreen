@@ -207,7 +207,10 @@ export interface ProjectArtboard {
   height: number
   background: ProjectArtboardBackground | null
   padding: number
-  grain: number
+  // Master switch for the background treatment (fill/wallpaper).
+  // Optional on disk; validator defaults to true so old projects keep
+  // rendering their background.
+  backgroundEnabled?: boolean
   // Master switch for the custom cursor overlay. Optional on disk; validator
   // defaults to true so old projects keep their current cursor rendering.
   cursorCustomRenderingEnabled?: boolean
@@ -225,21 +228,20 @@ export interface ProjectArtboard {
   // Cursor motion-rotation amount, 0..1 (0 = off). Optional on disk; validator
   // defaults to 0.35 and clamps. See electron/ipc/project-schema.ts.
   cursorMotionRotation?: number
-  // Cursor motion-rotation behavior. Optional on disk; validator defaults to
-  // 'side-lean'. See electron/ipc/project-schema.ts.
+  // LEGACY (ignored by the editor; new saves omit it): the "rotation" mode was
+  // removed — side lean is the only behavior. See electron/ipc/project-schema.ts.
   cursorMotionRotationMode?: "side-lean" | "rotation"
-  // Cursor motion-blur renderer backend. Optional on disk; validator defaults
-  // to 'gpu'. See electron/ipc/project-schema.ts.
-  cursorMotionBlurBackend?: "gpu" | "cpu"
   // Cursor path smoothing preset. Optional on disk; validator defaults to
   // 'default'. See electron/ipc/project-schema.ts.
   cursorSmoothingMode?: "rapid" | "quick" | "default" | "slow"
   // Target cursor scale while a recorded click is pressed. Optional on disk;
-  // validator defaults to 0.88 and clamps to the supported range.
+  // validator defaults to 0.78 and clamps to the supported range.
   cursorClickPressScale?: number
   // When true, every captured cursor id resolves to the themed pointer asset.
   // Optional on disk; validator defaults to false for old projects.
   cursorAlwaysUsePointer?: boolean
+  // Optional on disk; validator defaults to false for old projects.
+  cursorTypeStabilization?: boolean
 }
 
 export type ProjectVideoRole = "screen" | "camera" | "media"
@@ -275,11 +277,6 @@ export interface ProjectVideo {
   borderColor: string
   borderOffset: number
   borderAlignment: ProjectBorderAlignment
-  shadowColor: string
-  shadowBlur: number
-  shadowOffsetX: number
-  shadowOffsetY: number
-  shadowSpread: number
 }
 
 export interface ProjectTimelineClip {
@@ -296,8 +293,10 @@ export interface ProjectZoomClip {
   start: number
   end: number
   enabled?: boolean
-  /** Normalized full-artboard anchor point; zoom scales around this fixed point. */
+  /** Normalized full-artboard anchor point; in manual mode the zoom scales around it. */
   focus?: { x: number; y: number }
+  /** Auto (cursor-follow) vs manual (fixed focus). Optional; defaults to auto. */
+  mode?: "auto" | "manual"
   scale?: number
   radialBlur?: number
   /** Legacy optional zoom-blur settings; new saves no longer write this object. */
@@ -318,6 +317,15 @@ export interface ProjectZoomClip {
   }
   /** Legacy preset field. New saves prefer explicit `transition`. */
   easePreset?: "smooth" | "snappy" | "slow"
+  /**
+   * Detected content rects (artboard-normalized) keyed by interaction time, from
+   * auto-zoom frame-analysis (or, later, Accessibility). Additive + optional;
+   * drives the predictive follow's zoom-out-to-fit reveal in preview and export.
+   */
+  engagedRects?: Array<{
+    t: number
+    rect: { x: number; y: number; width: number; height: number }
+  }>
 }
 
 export interface ProjectStateV1 {
@@ -327,18 +335,6 @@ export interface ProjectStateV1 {
   timelineClips: ProjectTimelineClip[]
   zoomClips?: ProjectZoomClip[]
   updatedAtUnixMs: number
-}
-
-export interface ImportAssetPayload {
-  id: string
-  fileName: string
-  bytes: ArrayBuffer
-}
-
-export interface ImportAssetResult {
-  relativePath: string
-  fileUrl: string
-  fileSize: number
 }
 
 export type SaveProjectStateResult =
@@ -397,6 +393,9 @@ export interface ExportStartPayload {
   // Filename basename (no extension) used to derive the timestamp portion
   // of the output file. Defaults to the active project name.
   outputBaseName?: string
+  // Absolute project folder — lets the export stage load cursor sidecars
+  // directly instead of re-deriving the folder from a video file URL.
+  projectPath?: string
 }
 
 export interface ExportCodecSupport {
@@ -495,10 +494,6 @@ export interface Api {
       folderPath: string,
       state: ProjectStateV1
     ) => Promise<SaveProjectStateResult>
-    importAsset: (
-      folderPath: string,
-      payload: ImportAssetPayload
-    ) => Promise<ImportAssetResult>
     getCursorData: (folderPath: string) => Promise<CursorTrackData | null>
   }
   windowPicker: {
@@ -522,7 +517,12 @@ export interface Api {
     setSettings: (patch: Partial<ExportSettings>) => Promise<ExportSettings>
     markPreparing: () => Promise<void>
     reportProgress: (progress: ExportProgress) => Promise<void>
-    reportDone: (bytes: ArrayBuffer) => Promise<{ outputPath: string }>
+    // Streamed output: the encoder writes container chunks straight to a
+    // temp file via positional writes; reportDone renames it into place.
+    streamBegin: (format: ExportFormatId) => Promise<void>
+    streamWrite: (position: number, data: Uint8Array) => Promise<void>
+    streamAbort: () => Promise<void>
+    reportDone: () => Promise<{ outputPath: string }>
     reportError: (message: string) => Promise<void>
     cancel: () => Promise<void>
     revealOutput: (path: string) => Promise<void>
