@@ -35,7 +35,8 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# env files
+# env files (.env holds Apple signing credentials — never commit)
+.env
 .env*.local
 
 # typescript
@@ -48,3 +49,6 @@ next-env.d.ts
 
 # graphify skill output/cache
 graphify-out/
+
+# fallow local cache (committed baselines live in fallow-baselines/)
+.fallow/

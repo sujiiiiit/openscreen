@@ -1,4 +1,4 @@
-// Scans public/assets/cursors/sets/** and emits lib/cursors/cursor-manifest.ts —
+// Scans public/assets/cursors/sets/** and emits src/lib/cursors/cursor-manifest.ts —
 // a typed index of every cursor SVG with its hotspot (parsed from the
 // `<asset>-<variant>__<hotXpct>-<hotYpct>.svg` filename), intrinsic size, and
 // optical scale. Optical scale is derived from rendered alpha bounds so cursor
@@ -22,7 +22,7 @@ import { inflateSync } from "node:zlib"
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..")
 const setsDir = join(root, "public/assets/cursors/sets")
-const outFile = join(root, "lib/cursors/cursor-manifest.ts")
+const outFile = join(root, "src/lib/cursors/cursor-manifest.ts")
 const opticalBaselineSet = "macos"
 const opticalFallbackAsset = "pointer"
 const alphaBoundsThreshold = 8

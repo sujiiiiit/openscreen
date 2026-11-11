@@ -45,7 +45,7 @@ persistence, the editable Zoom panel, export — is the manual system, unchanged
 ## Data inputs (verified against a real 34 s recording, 2026-06-08)
 
 All already reachable in the renderer via `window.api.projects.getCursorData(folder)`
-→ `CursorTrackData` (`electron/ipc/projects.ts:346`, mirrored `types/api.d.ts:423`):
+→ `CursorTrackData` (`electron/ipc/projects.ts:346`, mirrored `src/types/api.d.ts:423`):
 
 ```ts
 CursorTrackData = {
@@ -70,7 +70,7 @@ CursorTrackData = {
 
 ## Modules & wiring (the entire build surface)
 
-### 1. `lib/auto-zoom/zoom-detect.ts` — pure detector (NEW)
+### 1. `src/lib/auto-zoom/zoom-detect.ts` — pure detector (NEW)
 
 No React / DOM / `Date.now()` / `Math.random()`. Deterministic: stable sort,
 fixed reducer order, ids derived from `round(tStartMs)`+focus (so re-running is
@@ -91,13 +91,13 @@ export interface AutoZoomInput {
 export function buildAutoZoomClips(input: AutoZoomInput): CanvasZoomClip[]
 ```
 
-The detector calls **`withZoomClipDefaults`** (`lib/zoom-clips.ts`) per clip and
+The detector calls **`withZoomClipDefaults`** (`src/lib/zoom-clips.ts`) per clip and
 runs the final list through **`normalizeZoomClips(list, durationSeconds)`** so
 the non-overlap lane invariant the whole manual system assumes is guaranteed.
 
 ### 2. Share the display→artboard focus math (export an existing helper)
 
-`mapCursorSampleToArtboard` (`components/editor/canvas/cursor-scene.ts:308`) is
+`mapCursorSampleToArtboard` (`src/components/editor/canvas/cursor-scene.ts:308`) is
 currently internal. **Extract/export a pure `displayPointToArtboard(x, y,
 video: CursorVideoGeometry, displayWidth, displayHeight)`** returning
 `{ x, y, onScreen }` in artboard px, and have both `placeCursor` and the
@@ -106,7 +106,7 @@ pixel the cursor overlay shows. CLAUDE.md forbids duplicating this cover-crop
 math; we share it. `toFocus` then divides by `artboard.{width,height}` and
 `clampZoomFocus`-clamps to `[0,1]`.
 
-### 3. Provider one-shot trigger (`components/editor/canvas/provider.tsx`)
+### 3. Provider one-shot trigger (`src/components/editor/canvas/provider.tsx`)
 
 The screen video + its timeline clip are added **asynchronously** in the slow
 path (`void addRemoteVideo(...)`, ~`provider.tsx:4020`), so detection cannot run
@@ -225,7 +225,7 @@ LEAD_IN_MS                          = 350
 MIN_HOLD_MS                         = 1200
 SEGMENT_GAP_MS / SEGMENT_FOCUS_JUMP = 1200 / 0.22
 MERGE_GAP_MS / MERGE_DIST           = 2500 / 0.18   (normalized)
-MIN_ZOOM_CLIP_SECONDS               = 0.5   (hard floor from lib/zoom-clips)
+MIN_ZOOM_CLIP_SECONDS               = 0.5   (hard floor from src/lib/zoom-clips)
 MAX_ZOOMS_PER_MIN                   = 4
 DRAG_MIN_TRAVEL                     = 0.04  (normalized)
 TAIL_GUARD_MS                       = 800
@@ -267,7 +267,7 @@ the cursor overlay — window/region would need target-rect normalization, not
 
 ## Verification
 
-- `lib/auto-zoom/__tests__/zoom-detect.test.ts` — fixed synthetic
+- `src/lib/auto-zoom/__tests__/zoom-detect.test.ts` — fixed synthetic
   clicks/moves → exact `CanvasZoomClip[]` (determinism + stable ids); reducer
   snapshots near the rate/merge caps; empty/`null` input → `[]`.
 - Focus parity: a click at a known display point → the **same** artboard point
@@ -283,7 +283,7 @@ the cursor overlay — window/region would need target-rect normalization, not
 
 ## Build order
 
-1. `lib/auto-zoom/zoom-detect.ts` + unit tests (pure; validate on the real
+1. `src/lib/auto-zoom/zoom-detect.ts` + unit tests (pure; validate on the real
    recording first).
 2. Extract/export `displayPointToArtboard` from `cursor-scene.ts`; reuse in
    `placeCursor`; add focus-parity test.

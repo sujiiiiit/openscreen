@@ -23,12 +23,12 @@ This document maps what the recorder can do today, where each feature is impleme
 | System audio | `packages/mac-addon/src/SystemAudioTrack.mm` |
 | Microphone audio | `packages/mac-addon/src/MicrophoneTrack.mm` |
 | Camera recording | `packages/mac-addon/src/CameraTrack.mm`, `MediaFileWriter.mm` |
-| Camera preview | `packages/mac-addon/src/CameraPreview.mm`, `electron/ipc/camera-preview.ts`, `app/camera/page.tsx` |
+| Camera preview | `packages/mac-addon/src/CameraPreview.mm`, `electron/ipc/camera-preview.ts`, `src/app/camera/page.tsx` |
 | Input/cursor sidecars | `packages/mac-addon/src/InputTrack.mm`, `CursorTrack.mm` |
-| Recorder state + menus | `electron/ipc/recorder.ts`, `app/recorder/page.tsx`, `app/recording-controls/page.tsx` |
+| Recorder state + menus | `electron/ipc/recorder.ts`, `src/app/recorder/page.tsx`, `src/app/recording-controls/page.tsx` |
 | Native event bridge | `electron/ipc/mac-addon.ts`, `electron/preload.ts` |
-| Project load/save | `electron/ipc/projects.ts`, `electron/ipc/project-schema.ts`, `components/editor/canvas/provider.tsx` |
-| Permission gate | `electron/ipc/permissions.ts`, `app/permissions/page.tsx`, `packages/mac-addon/src/Permissions.mm` |
+| Project load/save | `electron/ipc/projects.ts`, `electron/ipc/project-schema.ts`, `src/components/editor/canvas/provider.tsx` |
+| Permission gate | `electron/ipc/permissions.ts`, `src/app/permissions/page.tsx`, `packages/mac-addon/src/Permissions.mm` |
 | Packaging | `electron-builder.yml`, `packages/mac-addon/binding.gyp` |
 
 ## Feature Matrix
@@ -160,5 +160,5 @@ Recorder output and editor/export output are separate:
 - The recorder writes raw sources and sidecars.
 - The editor hydrates those files into `project.json`.
 - The export pipeline later renders a composed video from the project snapshot.
-- Recorder features that are part of the final viewer-visible output, such as cursor overlay styling after import, must also be implemented in `components/editor/export/`.
+- Recorder features that are part of the final viewer-visible output, such as cursor overlay styling after import, must also be implemented in `src/components/editor/export/`.
 - Recorder-only chrome such as controls, selection UI, picker overlays, and previews are not part of exported pixels.

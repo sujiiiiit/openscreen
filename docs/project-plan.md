@@ -5,7 +5,7 @@
 **Working:**
 - **Recorder (native, mac-addon)** → writes `~/Documents/openscreen/<id>/{screen.mov, camera.mov, recording.json}`. The manifest already has dimensions, duration, codec, audio tracks, timing.
 - **Project IPC (`electron/ipc/projects.ts`)** — `getLatest()`, `open()`, `pickAndOpen()`. But "project" today = "recording folder + manifest." There is no saved editor state yet.
-- **Editor canvas** — Konva stage, artboard presets, video nodes, transform/snap/rotate, sidebar, resizable panels. All state in `EditorCanvasProvider` (`components/editor/canvas/provider.tsx`) — purely in-memory React state. Nothing persists.
+- **Editor canvas** — Konva stage, artboard presets, video nodes, transform/snap/rotate, sidebar, resizable panels. All state in `EditorCanvasProvider` (`src/components/editor/canvas/provider.tsx`) — purely in-memory React state. Nothing persists.
 - **Timeline packages forked** (`packages/timeline`, `packages/timeline-engine`) but not integrated.
 
 **Missing / mixed up:**
@@ -164,7 +164,7 @@ Goal: end of recording lands you in the editor with the screen + camera already 
 
 ### Phase 3 — Undo/redo (1–2 days) — **IMPLEMENTED**
 
-- Pure history module at `components/editor/canvas/history.ts`; provider exposes `useEditorHistory()` from `components/editor/canvas/provider.tsx`.
+- Pure history module at `src/components/editor/canvas/history.ts`; provider exposes `useEditorHistory()` from `src/components/editor/canvas/provider.tsx`.
 - Capture is autosave-debounce-aligned (no per-surface wiring on sliders / Konva / timeline). Each provider action tags its commit; the push site inside `flushAutosave`'s drain decides between coalesce and new entry. Destructive actions (`add`/`delete`/`duplicate`/`preset`) call a synchronous `flushAutosaveNow()` so the prior edit window becomes its own undo entry.
 - `Cmd/Ctrl+Z` / `Cmd/Ctrl+Shift+Z` wired in `editor-workspace.tsx`'s key handler; blocked while typing in editable elements, during Transformer rotation/drag, and during pan.
 - `canUndo` / `canRedo` are reactive React state on the hook, ready for a future toolbar/menu surface.
