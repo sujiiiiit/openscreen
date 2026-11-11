@@ -11,7 +11,7 @@ Detailed audit of how the app behaves on macOS 13, verified file-by-file against
 - `electron ^42.0.1` ships Chromium 148; Electron 42's README states support for **"macOS (Monterey and up)"** — i.e. macOS 12+. Electron comfortably covers macOS 13.
 - Forward-looking: Chrome 151 (~July 2026) drops macOS 12 and requires **macOS 13+**, so future Electron majors will converge on exactly this app's native floor — macOS 13 itself is not at risk in the near term.
 - `node-mac-permissions ^2.5.0` (used in `electron/ipc/permissions.ts`) supports 10.15+ — fine.
-- Renderer features (PixiJS v8 WebGL canvas, WebCodecs export) ride on Chromium, not the OS. The export pipeline **probes** codec support at runtime (`components/editor/export/codec-probe.ts` via Mediabunny `canEncodeVideo` for avc/hevc/vp9) instead of assuming — older hardware without HEVC encode degrades gracefully.
+- Renderer features (PixiJS v8 WebGL canvas, WebCodecs export) ride on Chromium, not the OS. The export pipeline **probes** codec support at runtime (`src/components/editor/export/codec-probe.ts` via Mediabunny `canEncodeVideo` for avc/hevc/vp9) instead of assuming — older hardware without HEVC encode degrades gracefully.
 
 ## Layer 2 — Native addon: every gate verified
 
@@ -57,7 +57,7 @@ Specifically checked and confirmed **safe**:
 
 Ranked by real-world impact; none are fixed yet as of this audit.
 
-1. **`getCapabilities` has zero consumers.** It's exported (`packages/mac-addon/index.d.ts:368`) but never called from main, preload, or any renderer — nothing reads `screenCaptureKitMicrophone`. On macOS 13/14 the mic picker in `app/recorder/page.tsx` looks fully functional, the user selects a mic, records… and gets a file with **no mic track, silently**. `docs/screen-recording-addon.md` acknowledges this but the UI doesn't. This is the worst real-world 13-compat issue.
+1. **`getCapabilities` has zero consumers.** It's exported (`packages/mac-addon/index.d.ts:368`) but never called from main, preload, or any renderer — nothing reads `screenCaptureKitMicrophone`. On macOS 13/14 the mic picker in `src/app/recorder/page.tsx` looks fully functional, the user selects a mic, records… and gets a file with **no mic track, silently**. `docs/screen-recording-addon.md` acknowledges this but the UI doesn't. This is the worst real-world 13-compat issue.
 2. **Per-app audio scoping is a silent no-op for display/region targets pre-15** — `electron/ipc/recorder.ts:877-924` sends `audioApplications` regardless of OS version; the native side drops it below 15 with no feedback to the user.
 3. **Packaging allows installs on macOS 12, where the app will break.** `electron-builder.yml` sets no `mac.minimumSystemVersion`, so the DMG inherits Electron's `LSMinimumSystemVersion` (12.0). On a Monterey machine the app launches, then `require()` of the addon (`minos 13.0`) fails at dyld load — a crash / blank recorder instead of a clean "requires macOS 13" dialog. One-line fix: `mac.minimumSystemVersion: "13.0"`.
 4. **Doc drift:** `CLAUDE.md` references `Capabilities.hdrCapture` — that field doesn't exist anywhere in the code (the capabilities object has no HDR field; HDR capture isn't implemented, the pipeline is explicitly SDR-only).

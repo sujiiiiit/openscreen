@@ -2,8 +2,8 @@
 
 > How auto-zoom decides **when** a zoom happens and **where** the camera looks.
 > The editor *wiring* (one-shot trigger, Regenerate, persistence, history) lives
-> in `docs/editor-canvas.md` → Auto-Zoom. Code: `lib/auto-zoom/generate-from-
-> clicks.ts` (generation) + `components/editor/canvas/zoom-scene.ts` +
+> in `docs/editor-canvas.md` → Auto-Zoom. Code: `src/lib/auto-zoom/generate-from-
+> clicks.ts` (generation) + `src/components/editor/canvas/zoom-scene.ts` +
 > `pixi/zoom-spring.ts` (render-time follow + transition).
 
 Auto-zoom is a **generator of ordinary zoom clips** (`CanvasZoomClip`). It runs on
@@ -12,13 +12,13 @@ existing Zoom track. The renderer, export, persistence, and Zoom panel are the
 shared zoom system — auto-zoom only decides **WHEN** a zoom happens (start/end).
 
 This is a port of **Cap's** zoom model (`~/sujit/cap`). It replaced an earlier
-staged, importance-driven detector (`lib/auto-zoom/{pipeline,importance,
+staged, importance-driven detector (`src/lib/auto-zoom/{pipeline,importance,
 kinematics,framing,cinematography,detectors,content-bounds}`), which was removed.
 
 ## Two cooperating pieces
 
 1. **Generation (when):** cluster recorded clicks into zoom windows
-   (`lib/auto-zoom/generate-from-clicks.ts`).
+   (`src/lib/auto-zoom/generate-from-clicks.ts`).
 2. **Auto focus (where, at render time):** every generated clip is
    `mode: "auto"`, so its focus point is **not** stored — the camera
    spring-follows the recorded cursor while held (`zoom-scene.ts` +
@@ -110,14 +110,14 @@ into the clip's `transition.durationMs` window (default `1000 ms` = Cap's
 Generation and the follow both consume the recorded cursor track
 (`CursorTrackData`: display-relative `moves` + `clicks` in logical points),
 mapped into artboard-normalized focus + timeline seconds by
-`components/editor/canvas/auto-zoom-scene.ts` (the shared `displayPointToArtboard`
+`src/components/editor/canvas/auto-zoom-scene.ts` (the shared `displayPointToArtboard`
 chain, so a zoom lands on exactly the pixel the cursor sat on). Whole-display
 recordings only — window/region recordings would need target-rect normalization.
 
 ## Determinism & testing
 
 Both generation and the follow are pure functions of their inputs:
-`lib/auto-zoom/__tests__/generate-from-clicks.test.ts` covers clustering;
-`components/editor/canvas/__tests__/zoom-spring.test.ts` covers the spring
-primitives; `components/editor/canvas/__tests__/zoom-scene.test.ts` covers the
+`src/lib/auto-zoom/__tests__/generate-from-clicks.test.ts` covers clustering;
+`src/components/editor/canvas/__tests__/zoom-spring.test.ts` covers the spring
+primitives; `src/components/editor/canvas/__tests__/zoom-scene.test.ts` covers the
 follow path, spring transition, weld, and motion blur.

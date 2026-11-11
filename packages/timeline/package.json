@@ -28,11 +28,7 @@
     "@types/react-virtualized": "^9.21.14",
     "clsx": "^2.1.1",
     "interactjs": "^1.10.11",
-    "lodash": "^4.17.21",
     "react-virtualized": "^9.22.3",
     "tailwind-merge": "^3.6.0"
-  },
-  "devDependencies": {
-    "@types/lodash": "^4.14.177"
   }
 }

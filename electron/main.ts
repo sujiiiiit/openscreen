@@ -15,6 +15,8 @@ import {
   type NativeImage,
 } from 'electron'
 import addon from '@openscreen/mac-addon'
+import { createHash } from 'node:crypto'
+import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
@@ -96,9 +98,46 @@ const SHARED_WEB_PREFERENCES = {
   nodeIntegration: false,
   sandbox: true,
 } as const
+
+// The Next static export hydrates through inline `<script>` tags (the
+// `self.__next_f.push(...)` RSC payload + bootstrap). `script-src 'self'`
+// blocks them and every window renders un-hydrated, so allow exactly those
+// scripts by sha256 hash — computed once from the packaged out/ HTML — rather
+// than opening script-src to 'unsafe-inline'. Dev serves from next dev and
+// gets no CSP, so this only runs packaged.
+function collectInlineScriptHashes(dir: string): string[] {
+  const hashes = new Set<string>()
+  const walk = (current: string): void => {
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name)
+      if (entry.isDirectory()) {
+        walk(full)
+      } else if (entry.name.endsWith('.html')) {
+        const html = fs.readFileSync(full, 'utf8')
+        for (const match of html.matchAll(/<script\b(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)) {
+          const body = match[1]
+          if (!body) continue
+          hashes.add(`'sha256-${createHash('sha256').update(body).digest('base64')}'`)
+        }
+      }
+    }
+  }
+  walk(dir)
+  return [...hashes]
+}
+
+const INLINE_SCRIPT_HASHES = isDev ? [] : collectInlineScriptHashes(OUT_DIR)
 const CSP_BASE = [
   "default-src 'self' app:",
-  "script-src 'self' app:",
+  ["script-src 'self' app:", ...INLINE_SCRIPT_HASHES].join(' '),
+  // PixiJS decodes textures in a blob: worker (Assets loadImageBitmap).
+  "worker-src 'self' app: blob:",
   "style-src 'self' app: 'unsafe-inline'",
   "img-src 'self' app: file: data: blob:",
   "media-src 'self' app: file: blob:",

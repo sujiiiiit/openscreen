@@ -1,0 +1,66 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
+
+  // Electron-builder hooks are referenced from electron-builder.yml, and the
+  // scripts are manual developer tools; neither is reachable from a TS import.
+  // supportEntry keeps them reachable in normal runs but excludes them from
+  // production-only analysis.
+  "supportEntry": ["build-resources/**/*.cjs", "scripts/**/*.mjs"],
+
+  // Loaded by string path from the BrowserWindow config, never imported.
+  "dynamicallyLoaded": ["electron/preload.ts"],
+
+  // shadcn/ui and animate-ui are vendored component libraries: their exports
+  // are a deliberate public surface, not app-internal dead code.
+  "ignoreExports": [
+    { "file": "src/components/ui/**", "exports": ["*"] },
+    { "file": "src/components/animate-ui/**", "exports": ["*"] }
+  ],
+
+  // Constants exported for readability but only consumed by their own module.
+  "ignoreExportsUsedInFile": true,
+
+  "ignoreDependencies": [
+    // Used from binding.gyp and the C++ headers, not from JS imports.
+    "node-addon-api",
+    // Subpath packages shipped by interactjs; the timeline imports internals.
+    "@interactjs/actions",
+    "@interactjs/core",
+    // Type-only JSDoc import in postcss.config.mjs.
+    "postcss-load-config"
+  ],
+
+  "rules": {
+    // High-confidence rules gate new code. The existing backlog is recorded in
+    // fallow-baselines/, so `fallow audit` fails only on newly introduced debt.
+    "unresolved-imports": "error",
+    "unlisted-dependencies": "error",
+    "unused-files": "error",
+    "unused-exports": "error",
+    "unused-types": "error",
+    "unused-class-members": "error",
+    "unused-dependencies": "error",
+    "circular-dependencies": "error",
+    "complexity-cyclomatic": "error",
+    "complexity-cognitive": "error",
+    "complexity-crap": "error",
+
+    // Architecture boundaries and rule packs are intentionally not configured
+    // yet. Turning the rules off states that explicitly instead of reporting
+    // a "not measured" diagnostic on every run.
+    "boundary-violation": "off",
+    "policy-violation": "off"
+  },
+
+  "duplicates": {
+    "mode": "mild",
+    "minTokens": 50,
+    "minLines": 5
+  },
+
+  "audit": {
+    "deadCodeBaseline": "fallow-baselines/dead-code.json",
+    "healthBaseline": "fallow-baselines/health.json",
+    "dupesBaseline": "fallow-baselines/dupes.json"
+  }
+}

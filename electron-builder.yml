@@ -1,13 +1,42 @@
+# macOS packaging. Run through `pnpm build:mac` (scripts/build-mac.mjs), which
+# resolves the signing identity from .env and passes mac.identity — do not rely
+# on electron-builder's keychain auto-discovery. See docs/mac-build.md.
 appId: com.openscreen.app
 productName: OpenScreen
+copyright: Copyright (c) 2026 OpenScreen
+
+afterPack: build-resources/afterPack.cjs
+afterSign: build-resources/notarize.cjs
+
 directories:
   output: release
+  buildResources: build-resources
+
+# Native addons are N-API (node-addon-api) and already built by
+# `pnpm --filter @openscreen/mac-addon build` / pnpm install, so they are ABI
+# stable across Node ↔ Electron. Skip electron-builder's rebuild pass.
+npmRebuild: false
+
 files:
   - dist-electron/**/*
   - out/**/*
   - package.json
   - "!**/node_modules/*/{CHANGELOG.md,README.md,*.d.ts,*.map}"
   - "!**/node_modules/.cache"
+  # The renderer is a static Next export in out/ — every UI dependency (next,
+  # react, pixi.js, mediabunny, …) is already bundled there. The main process
+  # only `require`s the two native addons (+ `bindings`, used by
+  # node-mac-permissions), so ship nothing else from node_modules (~370 MB).
+  # If electron/ ever imports a new runtime package, add it here.
+  - "!node_modules/**"
+  - "node_modules/@openscreen/mac-addon/**"
+  - "node_modules/node-mac-permissions/**"
+  - "node_modules/bindings/**"
+  - "node_modules/file-uri-to-path/**"
+  # node-gyp intermediates — only build/Release/*.node is loaded at runtime.
+  - "!**/node_modules/@openscreen/mac-addon/{src,binding.gyp,build/Release/obj.target,build/Release/.deps}/**"
+  - "!**/node_modules/node-mac-permissions/{test,permissions.mm,binding.gyp}"
+asar: true
 asarUnpack:
   - "**/node_modules/@openscreen/mac-addon/build/Release/*.node"
   - "**/node_modules/@openscreen/mac-addon/index.js"
@@ -17,13 +46,26 @@ asarUnpack:
   - "**/node_modules/node-mac-permissions/index.js"
   - "**/node_modules/node-mac-permissions/index.d.ts"
   - "**/node_modules/node-mac-permissions/package.json"
+
 mac:
-  target: dmg
+  target:
+    - dmg
   category: public.app-category.video
+  # Matches the mac-addon deployment target (binding.gyp MACOSX_DEPLOYMENT_TARGET).
+  minimumSystemVersion: "13.0"
   hardenedRuntime: true
+  gatekeeperAssess: false
+  type: distribution
+  # Notarization is owned solely by the afterSign hook (notarize.cjs). Leaving
+  # electron-builder's built-in pass on would double-submit when APPLE_* are set.
+  notarize: false
   entitlements: build-resources/entitlements.mac.plist
   entitlementsInherit: build-resources/entitlements.mac.inherit.plist
   extendInfo:
     NSCameraUsageDescription: OpenScreen records camera video when you include camera capture in a recording.
     NSMicrophoneUsageDescription: OpenScreen records microphone audio when you include voice capture in a recording.
     NSAudioCaptureUsageDescription: OpenScreen records system audio when you include system sound in a recording.
+
+dmg:
+  sign: false
+  artifactName: ${productName}-${version}-${arch}.${ext}

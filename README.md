@@ -199,13 +199,15 @@ tccutil reset Camera
 ### 6. Build a release (DMG)
 
 ```bash
-pnpm build        # addon + Next.js static export (out/) + Electron (dist-electron/)
-pnpm package      # pnpm build + electron-builder --mac  ->  release/OpenScreen-*.dmg
+pnpm clean        # delete .next/ out/ dist-electron/
+pnpm build        # clean + addon + Next.js static export (out/) + Electron (dist-electron/)
+pnpm build:mac    # pnpm build + electron-builder --mac  ->  release/OpenScreen-<version>-<arch>.dmg
+pnpm build:mac -- --skip-build     # repackage existing out/ + dist-electron/ (no clean)
+pnpm build:mac -- --arch x64       # arm64 (default: host) | x64 | universal
+pnpm clean -- --release --addon    # also wipe release/ and packages/mac-addon/build/
 ```
 
-`electron-builder.yml` sets the app ID `com.openscreen.app`, a DMG target, the hardened runtime, the camera/mic/audio usage strings, and unpacks the `.node` binaries from the asar.
-
-> **Before packaging:** `electron-builder.yml` points to `build-resources/entitlements.mac.plist` and `build-resources/entitlements.mac.inherit.plist`, and that folder isn't in the repo yet. Add them (at least `com.apple.security.device.camera`, `com.apple.security.device.audio-input`, and `com.apple.security.cs.allow-jit` for Electron), or `pnpm package` fails. Signing and notarizing need your Apple Developer ID (`CSC_LINK` / `CSC_KEY_PASSWORD`, `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` / `APPLE_TEAM_ID`).
+Signing comes from `.env` (copy `.env.example`). With no `APPLE_SIGNING_IDENTITY` (the default), the app is **ad-hoc signed and not notarized**: it runs on this Mac; on other Macs, right-click → Open, or `xattr -dr com.apple.quarantine /Applications/OpenScreen.app`. Fill in a `Developer ID Application` identity plus `APPLE_ID` / `APPLE_ID_PASSWORD` / `APPLE_TEAM_ID` to get a signed, notarized DMG. Nothing else changes. See [`docs/mac-build.md`](docs/mac-build.md).
 
 ---
 
@@ -326,13 +328,17 @@ Mouse coordinates are logical points relative to the recorded display, top-left 
 | Command | What it does |
 |---|---|
 | `pnpm dev` | Addon + Next.js + Electron with reload (see [step 4](#4-run-in-development)) |
-| `pnpm build` | Addon, Next.js static export (`NEXT_EXPORT=1`, output `out/`), Electron |
+| `pnpm build` | Clean `.next/` `out/` `dist-electron/`, then addon, Next.js static export (`NEXT_EXPORT=1`, output `out/`), Electron |
+| `pnpm clean` | Delete build artifacts (`.next/` `out/` `dist-electron/`); `-- --release` / `-- --addon` extend it |
 | `pnpm build:next` / `pnpm build:electron` | One part only |
-| `pnpm package` | Build and make a DMG in `release/` |
+| `pnpm build:mac` | Build and make a DMG in `release/` (`pnpm package` / `pnpm package:mac` are aliases) |
 | `pnpm typecheck` | `tsc` for the renderer and for `electron/` |
 | `pnpm lint` | ESLint (`eslint-config-next`) |
 | `pnpm format` | Prettier with the Tailwind plugin |
 | `pnpm test` / `pnpm test:watch` | Vitest |
+| `pnpm fallow:audit` | Fallow gate for changed files (uses committed baselines) |
+| `pnpm fallow:dead-code` / `pnpm fallow:health` / `pnpm fallow:dupes` | Full-repo Fallow reports (exit 1 while legacy debt remains) |
+| `pnpm fallow:baselines` | Regenerate the three Fallow baselines after an intentional cleanup |
 
 ### Tests
 
@@ -340,7 +346,7 @@ About 240 Vitest tests in 17 files. They cover the pure logic: auto-zoom generat
 
 ```bash
 pnpm test
-pnpm exec vitest run lib/auto-zoom          # one folder
+pnpm exec vitest run src/lib/auto-zoom          # one folder
 ```
 
 There are no automated tests for the native addon. Check recordings with `ffprobe`. The recipes are in [`packages/mac-addon/README.md`](packages/mac-addon/README.md#verification).
@@ -356,7 +362,7 @@ There are no automated tests for the native addon. Check recordings with `ffprob
 ### Conventions
 
 - **Preview and export must match.** Anything that's part of the output video (cursor, background, video appearance, zoom) must be drawn by the export too, using the same pure module (`cursor-scene.ts`, `zoom-scene.ts`, `video-scene-draw.ts`, …). Editor-only things (selection, snap guides, grid, playhead) stay out of it.
-- **`project.json` is the source of truth.** Schema changes go through `electron/ipc/project-schema.ts` + `types/api.d.ts` + `components/editor/canvas/persistence.ts` together. Only add *optional* fields to v1. Anything else needs a version bump and a migration.
+- **`project.json` is the source of truth.** Schema changes go through `electron/ipc/project-schema.ts` + `src/types/api.d.ts` + `src/components/editor/canvas/persistence.ts` together. Only add *optional* fields to v1. Anything else needs a version bump and a migration.
 - **Performance:** treat 5000+ canvas nodes as the stress case. No per-frame React state, no DOM overlay per node, redraw only what changed.
 - **Docs move with code:** changes to the recorder update `docs/screen-recording-addon.md`, and changes to the editor update `docs/editor-canvas.md` and `docs/normal-term.md`. See `AGENTS.md` and `claude.md`.
 
@@ -376,7 +382,7 @@ There are no automated tests for the native addon. Check recordings with `ffprob
 | HEVC export greyed out | The machine can't encode HEVC. Use H.264 or VP9 |
 | Editor is blank / renderer errors | Switch the renderer to **WebGL** in the title bar menu |
 | `pnpm dev` hangs at "wait-on" | Port 3535 is in use. Free it or change it in `package.json` |
-| `pnpm package` fails on entitlements | Add the `build-resources/` plist files (see [step 6](#6-build-a-release-dmg)) |
+| Packaged app: "OpenScreen is damaged / can't be opened" on another Mac | Ad-hoc build. Right-click → Open, or `xattr -dr com.apple.quarantine /Applications/OpenScreen.app` (see [step 6](#6-build-a-release-dmg)) |
 
 ---
 
@@ -425,6 +431,7 @@ types/                   shared types (api.d.ts, editor-canvas.ts, ...)
 | [`docs/recorder-case-map.md`](docs/recorder-case-map.md) | Failure cases: handled, partly handled, not handled |
 | [`docs/macos-13-compatibility.md`](docs/macos-13-compatibility.md) | What works on macOS 13/14 and the known gaps |
 | [`docs/editor-canvas.md`](docs/editor-canvas.md) | Editor canvas, persistence, history, export pipeline |
+| [`docs/fallow.md`](docs/fallow.md) | Fallow setup, policy, baselines, commands, agent integration |
 | [`docs/auto-zoom-algorithm.md`](docs/auto-zoom-algorithm.md) | When zooms happen and how the camera follows the cursor |
 | [`docs/normal-term.md`](docs/normal-term.md) | Shared terms (plain words → industry terms) |
 | [`packages/mac-addon/README.md`](packages/mac-addon/README.md) | Addon API, every quality setting, ffprobe checks |
