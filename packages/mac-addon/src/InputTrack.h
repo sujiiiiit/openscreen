@@ -11,6 +11,9 @@
 //   mousemoves-0.json   {activeModifiers, cursorId, processTimeMs, type, unixTimeMs, x, y (+button on drags)}
 //   mouseclicks-0.json  {…, button, type:"mouseDown"|"mouseUp"}
 //   keystrokes-0.json    {activeModifiers, character, isARepeat, processTimeMs, type, unixTimeMs}
+//   typingcaret-0.json   {processTimeMs, unixTimeMs, type:"caret", x, y, width, height, source:"caret"|"element"}
+//                        (with keystrokes + Accessibility; one Accessibility read ~40 ms after
+//                        each burst of keyDowns, coalesced, on a private queue)
 //   cursors.json + cursors/<id>.png   (when captureCursorShapes)
 //
 // Events are stamped on the same dual clock the rest of the session uses:

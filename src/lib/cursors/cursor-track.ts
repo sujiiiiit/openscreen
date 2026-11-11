@@ -12,6 +12,8 @@
 //      session start), which equals the screen video element's currentTime×1000.
 //      Sampling by the video's currentTime makes trims/offsets free.
 
+import type { TypingTrack } from "./typing-track"
+
 export interface RawCursorSample {
   /** Recording-relative ms (processTimeMs − session.processTimeStartMs). */
   t: number
@@ -35,6 +37,8 @@ export interface SmoothedCursorTrack {
   displayHeight: number
   /** Total covered duration in ms. */
   durationMs: number
+  /** Typing sessions + caret reads (keystroke capture); absent/null without. */
+  typing?: TypingTrack | null
 }
 
 export interface CursorSmoothingParams {

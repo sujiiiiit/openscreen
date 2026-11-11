@@ -51,7 +51,8 @@
               "-framework AppKit",
               "-framework Foundation",
               "-framework Accelerate",
-              "-framework IOKit"
+              "-framework IOKit",
+              "-framework ApplicationServices"
             ]
           }
         }]

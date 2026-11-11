@@ -44,6 +44,7 @@ A second capture path, **independent of the video**, records mouse, keystroke, a
 
 ```
 CGEventTap (HID, listen-only, dedicated thread) ──► InputTrack ──► mousemoves-0.json / mouseclicks-0.json / keystrokes-0.json
+keyDown ─(+40 ms, coalesced)─► _axQueue: AX focused element caret ─► typingcaret-0.json
 main-queue timer (display-refresh) ─► CursorCatalog ─► cursors.json + cursors/<id>.png
 ```
 
@@ -53,7 +54,7 @@ main-queue timer (display-refresh) ─► CursorCatalog ─► cursors.json + cu
 |---|---|---|
 | `captureInput` | `false` | Master switch. Implied by the two below. The Electron layer passes `true` on every recording. |
 | `captureCursorShapes` | `false` | Build the NSCursor catalog + stamp a semantic `cursorId` on every event. Electron passes `true`. |
-| `captureKeyStrokes` | `false` | Record keystrokes. **Opt-in** via the recorder settings menu ("Capture keystrokes", `RecorderSettings.captureKeystrokes`). Gated on the **Input Monitoring** permission — the native side silently no-ops key capture if it's not granted. |
+| `captureKeyStrokes` | `false` | Record keystrokes (+ text-caret rects when Accessibility is granted). The Electron layer passes `RecorderSettings.captureKeystrokes`, which is **on by default** (2026-11-11) and togglable from the recorder settings menu ("Capture keystrokes"). Gated on the **Input Monitoring** permission — the native side silently no-ops key capture if it's not granted; `recorder.ts` `ensureKeystrokePermissionRequested` fires the TCC prompt (fire-and-forget) at each recording start while the state is `notDetermined`, so a session started before the grant simply has no keys. |
 
 **Output files** (written into the recording's `outputDir`, names match Screen Studio):
 
@@ -62,6 +63,7 @@ main-queue timer (display-refresh) ─► CursorCatalog ─► cursors.json + cu
 | `mousemoves-0.json` | `{activeModifiers[], cursorId, processTimeMs, type:"mouseMoved"\|"mouseDragged", unixTimeMs, x, y}` (+`button` on drags) |
 | `mouseclicks-0.json` | `{activeModifiers[], button, cursorId, processTimeMs, type:"mouseDown"\|"mouseUp", unixTimeMs, x, y}` |
 | `keystrokes-0.json` | `{activeModifiers[], character, isARepeat, processTimeMs, type:"keyDown"\|"keyUp", unixTimeMs}` |
+| `typingcaret-0.json` | `{activeModifiers[], height, processTimeMs, source:"caret"\|"element", type:"caret", unixTimeMs, width, x, y}` — display-relative points, top-left (same space as mouse samples). Only with keystrokes **and** `AXIsProcessTrusted()`. |
 | `cursors.json` + `cursors/<id>.png` | `{hotSpot{x,y}, id, standardSize{width,height}, systemCursor}` per shape; PNGs at native asset resolution |
 
 **Clock model** — events carry host-clock timestamps (`processTimeMs`, `CMClockGetHostTimeClock` domain in ms) plus `unixTimeMs`. The CGEventTap path stamps `processTimeMs` with the host clock at callback time; the NSEvent fallback uses `NSEvent.timestamp × 1000` (same domain). The input `session.processTimeStartMs` is **anchored to the screen video's first written frame** (`ScreenTrack -sessionStartHostMs`, passed via `RecorderSession -setVideoStartHostMs:`), **not** the stream-start `hostStartMs`. This matters: ScreenCaptureKit delivers the first frame ~100–200 ms after the stream starts, and the `.mov`'s source time 0 is that first frame — so anchoring the cursor timeline to `hostStartMs` instead would make the cursor lag the video by that startup delay. With the anchor, `event.processTimeMs − session.processTimeStartMs` equals the video's source time, so cursor and video share origin 0. Moves captured before the first frame get a negative relative time and are dropped by the renderer.
@@ -72,7 +74,9 @@ main-queue timer (display-refresh) ─► CursorCatalog ─► cursors.json + cu
 
 **Cursor shapes (full parity)** — `CursorCatalog` enumerates every `NSCursor` factory: 18 public + 20 private selectors (`_windowResizeEastWestCursor`, `busyButClickableCursor`, …), each guarded by `+respondsToSelector:`. On an initialized AppKit app this yields the full 38-cursor catalog with Screen Studio's exact ids. At runtime a 60 Hz main-queue timer resolves `[NSCursor currentSystemCursor]` by hashing its TIFF bitmap (FNV-1a) against the catalog; a shape change with no recent real move synthesises a `mouseMoved` so the shape timeline stays accurate while the pointer is stationary. Unknown bitmaps (an app's custom cursor) are added as `custom-N` with `systemCursor:false`.
 
-**Manifest** — `RecorderSession` adds an `input`-source entry to `outputs[]` (filenames, `captureKeyStrokes`/`captureCursorShapes`, `displayId`, `displayBoundsPoints`, and a `session` block with the dual-clock window + per-stream counts), and merges the sidecar paths into the `files` map (`mouseMoves`/`mouseClicks`/`keyStrokes`/`cursors`).
+**Text caret (Accessibility)** — every keyDown calls `-scheduleCaretQuery`, which (via an atomic flag) schedules at most ONE read `kCaretQueryDelayMs` (40 ms) later on the private serial `_axQueue`, so the focused app has processed the key and a burst of keys coalesces into one read (≈25 Hz ceiling). `CopyFocusedCaretRect` asks the system-wide element (`AXUIElementCreateSystemWide`, messaging timeout 50 ms so a hung app can't stall the queue) for `kAXFocusedUIElementAttribute` → `kAXSelectedTextRangeAttribute` → `kAXBoundsForRangeParameterizedAttribute`; an empty range most apps can't measure falls back to the trailing edge of the previous character, and failing that to the focused element's frame (`source:"element"`). Rects off the recorded display are dropped. `-finish` drains `_axQueue` (reads no-op once `_stopping` is set) before closing the sidecars. The AX calls never run on the tap thread. Requires linking **ApplicationServices** (`binding.gyp`). The editor consumes it for hide-cursor-while-typing and caret-follow zoom (`docs/editor-canvas.md` → Typing Behavior); main forwards only key **timestamps** (shortcuts / Escape / F-keys filtered out by `isTypingKeyStroke`) and the caret rects to the renderer — never the typed characters.
+
+**Manifest** — `RecorderSession` adds an `input`-source entry to `outputs[]` (filenames, `captureKeyStrokes`/`captureTypingCaret`/`captureCursorShapes`, `displayId`, `displayBoundsPoints`, and a `session` block with the dual-clock window + per-stream counts incl. `typingCaretCount`), and merges the sidecar paths into the `files` map (`mouseMoves`/`mouseClicks`/`keyStrokes`/`typingCaret`/`cursors`).
 
 **Capture mechanism** — a **listen-only `CGEventTap` at `kCGHIDEventTap`** on a dedicated `CFRunLoop` thread is the primary path. It's chosen over an `NSEvent` global monitor for three reasons the global monitor can't satisfy: (1) it captures moves **over our own recorder UI** (global `NSEvent` monitors only see *other* apps' events — the cause of the multi-second opening gap), (2) it sees **every HID sample before coalescing**, and (3) it's **independent of the main run loop** so main-thread load can't throttle capture. It relies on the **Accessibility** permission, which the app already requires (`REQUIRED_PERMISSIONS` in `electron/ipc/permissions.ts`); keystroke events additionally need Input Monitoring (gated by `_keyStrokesActive`). If `CGEventTapCreate` fails (e.g. Accessibility revoked), `InputTrack` falls back to an `NSEvent` global monitor with mouse coalescing disabled. The tap callback runs on the tap thread, so `_currentCursorId` (written by the main-thread cursor sampler) is guarded by an `os_unfair_lock`; a `dispatch_semaphore` handshake makes `-finish` stop the tap thread without racing its setup/teardown.
 
@@ -204,6 +208,7 @@ For the input path, inspect the sidecars in the recording folder:
 ```bash
 # Event counts + that the dual clock + cursorIds look sane.
 head -c 400 <session>/mousemoves-0.json; echo
+head -c 400 <session>/typingcaret-0.json; echo   # caret rects after typing (needs Accessibility)
 python3 -c "import json,glob; [print(f, len(json.load(open(f)))) for f in glob.glob('<session>/mouse*-0.json')]"
 ls <session>/cursors/ | wc -l   # 38 system cursors on a normal session
 ```
@@ -220,7 +225,8 @@ ls <session>/cursors/ | wc -l   # 38 system cursors on a normal session
 - SCK delivers frames only when content changes. The `frameRate` setting is a *minimum interval* — actual delivered rates are typically below 120 fps even on a ProMotion display when the screen is static.
 - **Input capture requires Accessibility.** The primary `CGEventTap` needs the Accessibility grant (already a `REQUIRED_PERMISSIONS` entry). Without it, capture falls back to an `NSEvent` global monitor, which does **not** see moves over our own recorder UI (causing a multi-second opening gap) and only delivers ~refresh-rate coalesced moves.
 - **Cursor-shape resolution depends on `[NSCursor currentSystemCursor]`.** Validated to resolve all 38 system cursors correctly under an initialized `NSApplication` (always true in Electron). A bare non-GUI process returns no images for `arrow`/`iBeam` — a test-harness artifact, not a runtime concern.
-- **Keystroke capture records typed text in plaintext** (including passwords) when enabled. It is off by default, opt-in via the settings menu, and additionally gated by the Input Monitoring TCC permission.
+- **Keystroke capture records typed text in plaintext** (including passwords) in `keystrokes-0.json` inside the project folder. It is **on by default** (so the editor's typing features work out of the box), can be turned off from the settings menu, and is gated by the Input Monitoring TCC permission. The renderer never receives the characters — only key timestamps — but the sidecar on disk does contain them.
+- **Caret precision depends on the focused app's Accessibility support.** Native AppKit text views report exact carets; some Electron / web apps report only the field frame (`source:"element"`) or nothing (no caret sample — the editor falls back to the pointer).
 - The input path does **not** capture scroll-wheel events (neither does Screen Studio in the inspected format).
 - Pause/resume **gates** input events (drops them while paused) rather than splitting files; sidecar filenames stay at session index `0`.
 
@@ -229,7 +235,7 @@ ls <session>/cursors/ | wc -l   # 38 system cursors on a normal session
 - `packages/mac-addon/binding.gyp` — deployment target (13.0), framework links.
 - `packages/mac-addon/src/Common.h` — `RecordingOptions` struct (incl. `captureInput` / `captureKeyStrokes` / `captureCursorShapes`).
 - `packages/mac-addon/src/Bindings.mm` — JS → `RecordingOptions` parser, `getCapabilities`.
-- `packages/mac-addon/src/InputTrack.{h,mm}` — `NSEvent` global monitor, streaming-JSON sidecars, dual-clock stamping, cursor sampler.
+- `packages/mac-addon/src/InputTrack.{h,mm}` — `CGEventTap` (+ `NSEvent` fallback), streaming-JSON sidecars, dual-clock stamping, cursor sampler, Accessibility text-caret sampling.
 - `packages/mac-addon/src/CursorTrack.{h,mm}` — `CursorCatalog`: NSCursor catalog (`cursors.json` + PNGs) and runtime bitmap matching.
 - `packages/mac-addon/src/Permissions.mm` — Input Monitoring (`IOHIDCheckAccess` / `IOHIDRequestAccess`), `inputMonitoring` permission.
 - `packages/mac-addon/src/ScreenTrack.mm` — `-resolveOptions`, `-streamConfigurationForContent:`, `-videoColorProperties`, `-videoCompressionProperties`, `-prepareWriter:`, `-appendVideoSampleBuffer:`, `-metadata`.

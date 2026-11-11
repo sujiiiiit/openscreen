@@ -25,7 +25,7 @@ const EMPTY_STATE: RecorderState = {
     hideCursor: true,
     systemAudioScope: "all",
     systemAudioApplications: [],
-    captureKeystrokes: false,
+    captureKeystrokes: true,
     recordingQuality: {
       videoCodec: "hevc",
       videoQuality: "high",

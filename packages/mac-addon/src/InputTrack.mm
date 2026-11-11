@@ -1,6 +1,7 @@
 #include "InputTrack.h"
 
 #import <AppKit/AppKit.h>
+#import <ApplicationServices/ApplicationServices.h>
 #import <CoreGraphics/CGEvent.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreMedia/CoreMedia.h>
@@ -16,6 +17,7 @@
 static NSString *const kMouseMovesFilename = @"mousemoves-0.json";
 static NSString *const kMouseClicksFilename = @"mouseclicks-0.json";
 static NSString *const kKeyStrokesFilename = @"keystrokes-0.json";
+static NSString *const kTypingCaretFilename = @"typingcaret-0.json";
 static NSString *const kCursorsInfoFile = @"cursors.json";
 static NSString *const kCursorImagesFolder = @"cursors";
 
@@ -25,6 +27,14 @@ static NSString *const kCursorImagesFolder = @"cursors";
 // move carried it within this window.
 static const NSTimeInterval kCursorSampleInterval = 1.0 / 60.0;
 static const double kSynthesizedMoveGapMs = 30.0;
+
+// Text-caret sampling (Accessibility). A keyDown schedules ONE caret read this
+// long after the key so the focused app has processed it and moved its
+// insertion point; further keys inside the window coalesce into that same read
+// (≈25 Hz ceiling under fast typing). The AX messaging timeout bounds how long
+// an unresponsive app can stall the (private, off-main) caret queue.
+static const double kCaretQueryDelayMs = 40.0;
+static const float kAXMessagingTimeoutSec = 0.05f;
 
 // Current host clock in ms — same domain as NSEvent.timestamp × 1000.
 static double HostNowMs() {
@@ -51,6 +61,99 @@ static NSArray<NSString *> *CGModifierStrings(CGEventFlags flags) {
   if (flags & kCGEventFlagMaskAlphaShift) [mods addObject:@"capsLock"];
   if (flags & kCGEventFlagMaskSecondaryFn) [mods addObject:@"function"];
   return mods;
+}
+
+#pragma mark - Accessibility caret lookup
+
+// Bounds of `range` in the element's text, in global top-left points (the same
+// space as CGEventGetLocation / CGDisplayBounds). Rejects the degenerate
+// zero rects some apps return instead of an error.
+static BOOL AXBoundsForRange(AXUIElementRef element, CFRange range, CGRect *out) {
+  AXValueRef rangeArg = AXValueCreate((AXValueType)kAXValueTypeCFRange, &range);
+  if (!rangeArg) return NO;
+  CFTypeRef boundsValue = NULL;
+  AXError err = AXUIElementCopyParameterizedAttributeValue(
+      element, kAXBoundsForRangeParameterizedAttribute, rangeArg, &boundsValue);
+  CFRelease(rangeArg);
+  if (err != kAXErrorSuccess || !boundsValue) return NO;
+  CGRect rect = CGRectZero;
+  BOOL ok = CFGetTypeID(boundsValue) == AXValueGetTypeID() &&
+            AXValueGetType((AXValueRef)boundsValue) == (AXValueType)kAXValueTypeCGRect &&
+            AXValueGetValue((AXValueRef)boundsValue, (AXValueType)kAXValueTypeCGRect, &rect);
+  CFRelease(boundsValue);
+  if (!ok || rect.size.height <= 0 || (rect.origin.x == 0 && rect.origin.y == 0)) {
+    return NO;
+  }
+  *out = rect;
+  return YES;
+}
+
+// The focused element's frame (kAXPosition + kAXSize), global top-left points.
+static BOOL AXElementFrame(AXUIElementRef element, CGRect *out) {
+  CFTypeRef positionValue = NULL;
+  CFTypeRef sizeValue = NULL;
+  BOOL ok = NO;
+  CGPoint position = CGPointZero;
+  CGSize size = CGSizeZero;
+  if (AXUIElementCopyAttributeValue(element, kAXPositionAttribute, &positionValue) ==
+          kAXErrorSuccess &&
+      AXUIElementCopyAttributeValue(element, kAXSizeAttribute, &sizeValue) ==
+          kAXErrorSuccess &&
+      positionValue && sizeValue) {
+    ok = AXValueGetValue((AXValueRef)positionValue, (AXValueType)kAXValueTypeCGPoint, &position) &&
+         AXValueGetValue((AXValueRef)sizeValue, (AXValueType)kAXValueTypeCGSize, &size);
+  }
+  if (positionValue) CFRelease(positionValue);
+  if (sizeValue) CFRelease(sizeValue);
+  if (!ok || size.width <= 0 || size.height <= 0) return NO;
+  *out = CGRectMake(position.x, position.y, size.width, size.height);
+  return YES;
+}
+
+// Resolve the system-wide focused text insertion point. Prefers the exact caret
+// (bounds of the selected range — or, for an empty range most apps can't
+// measure, the trailing edge of the previous character); falls back to the
+// focused element's frame so at least the field being typed in is known.
+// `source` is "caret" or "element" so the editor can weigh the precision.
+static BOOL CopyFocusedCaretRect(AXUIElementRef systemWide, CGRect *outRect,
+                                 NSString **outSource) {
+  CFTypeRef focusedValue = NULL;
+  if (AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute,
+                                    &focusedValue) != kAXErrorSuccess ||
+      !focusedValue) {
+    return NO;
+  }
+  AXUIElementRef focused = (AXUIElementRef)focusedValue;
+  AXUIElementSetMessagingTimeout(focused, kAXMessagingTimeoutSec);
+
+  BOOL ok = NO;
+  CFTypeRef rangeValue = NULL;
+  if (AXUIElementCopyAttributeValue(focused, kAXSelectedTextRangeAttribute, &rangeValue) ==
+          kAXErrorSuccess &&
+      rangeValue) {
+    CFRange range = CFRangeMake(0, 0);
+    if (CFGetTypeID(rangeValue) == AXValueGetTypeID() &&
+        AXValueGetValue((AXValueRef)rangeValue, (AXValueType)kAXValueTypeCFRange, &range)) {
+      ok = AXBoundsForRange(focused, range, outRect);
+      if (!ok && range.length == 0 && range.location > 0) {
+        CGRect previous;
+        if (AXBoundsForRange(focused, CFRangeMake(range.location - 1, 1), &previous)) {
+          *outRect = CGRectMake(CGRectGetMaxX(previous), previous.origin.y, 0,
+                                previous.size.height);
+          ok = YES;
+        }
+      }
+    }
+    CFRelease(rangeValue);
+  }
+  if (ok) {
+    *outSource = @"caret";
+  } else if (AXElementFrame(focused, outRect)) {
+    *outSource = @"element";
+    ok = YES;
+  }
+  CFRelease(focused);
+  return ok;
 }
 
 #pragma mark - StreamingJSONArray
@@ -154,7 +257,14 @@ static NSArray<NSString *> *CGModifierStrings(CGEventFlags flags) {
   StreamingJSONArray *_moves;
   StreamingJSONArray *_clicks;
   StreamingJSONArray *_keys;
+  StreamingJSONArray *_caret;
   CursorCatalog *_cursorCatalog;
+
+  // Text-caret capture (Accessibility). Active only with keystroke capture AND
+  // an Accessibility grant. AX reads run on _axQueue, never the tap thread.
+  dispatch_queue_t _axQueue;
+  AXUIElementRef _systemWide;
+  std::atomic<bool> _caretQueryScheduled;
 
   CGRect _displayBounds;
   CGDirectDisplayID _displayId;
@@ -189,8 +299,16 @@ static NSArray<NSString *> *CGModifierStrings(CGEventFlags flags) {
     _stopping = false;
     _finished = false;
     _lastRealMoveMs = -1e9;
+    _caretQueryScheduled = false;
   }
   return self;
+}
+
+- (void)dealloc {
+  if (_systemWide) {
+    CFRelease(_systemWide);
+    _systemWide = NULL;
+  }
 }
 
 - (BOOL)isEnabled {
@@ -242,6 +360,18 @@ static BOOL InputMonitoringGranted() {
   if (_keyStrokesActive) {
     _keys = [[StreamingJSONArray alloc] initWithURL:[self urlForFile:kKeyStrokesFilename]
                                               queue:_writeQueue];
+    // Caret positions let the editor hide the cursor while typing and point
+    // auto-zoom at the insertion point. Needs Accessibility (already part of
+    // the app's required permissions); keys are still recorded without it.
+    if (AXIsProcessTrusted()) {
+      _systemWide = AXUIElementCreateSystemWide();
+      if (_systemWide) {
+        AXUIElementSetMessagingTimeout(_systemWide, kAXMessagingTimeoutSec);
+        _axQueue = dispatch_queue_create("com.openscreen.input.caret", DISPATCH_QUEUE_SERIAL);
+        _caret = [[StreamingJSONArray alloc] initWithURL:[self urlForFile:kTypingCaretFilename]
+                                                   queue:_writeQueue];
+      }
+    }
   }
 
   // Primary: a listen-only HID-level CGEventTap on a dedicated thread. It
@@ -432,6 +562,46 @@ static BOOL InputMonitoringGranted() {
   dict[@"character"] = character ?: @"";
   dict[@"isARepeat"] = @(down ? repeat : NO);
   [_keys appendObject:dict];
+  if (down) [self scheduleCaretQuery];
+}
+
+#pragma mark - Text caret (Accessibility; _axQueue)
+
+// Called from the tap thread / main thread. Coalesces a burst of keys into one
+// delayed AX read; the flag is cleared just before the read so a key landing
+// during the read schedules the next one.
+- (void)scheduleCaretQuery {
+  if (!_caret || !_axQueue) return;
+  bool expected = false;
+  if (!_caretQueryScheduled.compare_exchange_strong(expected, true)) return;
+  __weak InputTrack *weakSelf = self;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kCaretQueryDelayMs * NSEC_PER_MSEC)),
+                 _axQueue, ^{
+                   InputTrack *strongSelf = weakSelf;
+                   if (!strongSelf) return;
+                   strongSelf->_caretQueryScheduled.store(false);
+                   [strongSelf sampleCaret];
+                 });
+}
+
+- (void)sampleCaret {
+  if (![self isAcceptingEvents] || !_systemWide) return;
+  CGRect rect = CGRectZero;
+  NSString *source = nil;
+  if (!CopyFocusedCaretRect(_systemWide, &rect, &source)) return;
+  // Only keep carets on the recorded display (another screen's field would map
+  // off-video anyway).
+  if (!CGRectIntersectsRect(CGRectInset(rect, -1, -1), _displayBounds)) return;
+  CGPoint origin = [self displayPointFromGlobal:rect.origin];
+  NSMutableDictionary *dict = [self baseEventWithType:@"caret"
+                                            modifiers:@[]
+                                            timestamp:HostNowMs()];
+  dict[@"x"] = @(origin.x);
+  dict[@"y"] = @(origin.y);
+  dict[@"width"] = @(rect.size.width);
+  dict[@"height"] = @(rect.size.height);
+  dict[@"source"] = source ?: @"caret";
+  [_caret appendObject:dict];
 }
 
 #pragma mark - CGEventTap capture (primary; dedicated thread)
@@ -731,9 +901,14 @@ static CGEventRef InputEventTapCallback(CGEventTapProxy proxy, CGEventType type,
                              ts:_endProcessMs];
   }
 
+  // Drain any in-flight caret read (it no-ops now that _stopping is set) so
+  // its append can't race the close below.
+  if (_axQueue) dispatch_sync(_axQueue, ^{});
+
   [_moves close];
   [_clicks close];
   [_keys close];
+  [_caret close];
 
   if (_cursorCatalog) {
     NSData *json = [NSJSONSerialization dataWithJSONObject:[_cursorCatalog catalogEntries]
@@ -751,6 +926,7 @@ static CGEventRef InputEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   files[@"mouseMoves"] = [self urlForFile:kMouseMovesFilename].path;
   files[@"mouseClicks"] = [self urlForFile:kMouseClicksFilename].path;
   if (_keys) files[@"keyStrokes"] = [self urlForFile:kKeyStrokesFilename].path;
+  if (_caret) files[@"typingCaret"] = [self urlForFile:kTypingCaretFilename].path;
   if (_cursorCatalog) files[@"cursors"] = [self urlForFile:kCursorsInfoFile].path;
   return files;
 }
@@ -760,10 +936,12 @@ static CGEventRef InputEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   NSMutableDictionary *meta = [NSMutableDictionary dictionary];
   meta[@"source"] = @"input";
   meta[@"captureKeyStrokes"] = @(_keyStrokesActive);
+  meta[@"captureTypingCaret"] = @(_caret != nil);
   meta[@"captureCursorShapes"] = @(_options.captureCursorShapes);
   meta[@"mouseMovesFilename"] = kMouseMovesFilename;
   meta[@"mouseClicksFilename"] = kMouseClicksFilename;
   if (_keys) meta[@"keyStrokesFilename"] = kKeyStrokesFilename;
+  if (_caret) meta[@"typingCaretFilename"] = kTypingCaretFilename;
   if (_cursorCatalog) {
     meta[@"cursorsInfoFile"] = kCursorsInfoFile;
     meta[@"cursorImagesFolder"] = kCursorImagesFolder;
@@ -789,6 +967,7 @@ static CGEventRef InputEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     @"mouseMovesCount" : @([_moves count]),
     @"mouseClicksCount" : @([_clicks count]),
     @"keyStrokesCount" : @(_keys ? [_keys count] : 0),
+    @"typingCaretCount" : @(_caret ? [_caret count] : 0),
   };
   return meta;
 }
