@@ -125,7 +125,9 @@ export interface StartRecordingOptions {
   captureInput?: boolean
   /**
    * Record keystrokes (`keystrokes-0.json`). Requires Input Monitoring
-   * permission; silently no-ops for keys if not granted. Default: `false`.
+   * permission; silently no-ops for keys if not granted. With Accessibility
+   * also granted, the text caret is sampled after keyDowns into
+   * `typingcaret-0.json`. Default: `false`.
    */
   captureKeyStrokes?: boolean
   /**
@@ -209,6 +211,9 @@ export interface RecordingFiles {
   mouseMoves?: string
   mouseClicks?: string
   keyStrokes?: string
+  // Text-caret rects sampled via Accessibility after keyDowns (present when
+  // keystrokes are captured AND Accessibility is granted).
+  typingCaret?: string
   cursors?: string
 }
 
@@ -226,6 +231,7 @@ export interface InputSessionMetadata {
   mouseMovesCount: number
   mouseClicksCount: number
   keyStrokesCount: number
+  typingCaretCount?: number
 }
 
 export interface RecordingOutputMetadata {
@@ -240,6 +246,8 @@ export interface RecordingOutputMetadata {
   mouseMovesFilename?: string
   mouseClicksFilename?: string
   keyStrokesFilename?: string
+  captureTypingCaret?: boolean
+  typingCaretFilename?: string
   cursorsInfoFile?: string
   cursorImagesFolder?: string
   displayId?: number

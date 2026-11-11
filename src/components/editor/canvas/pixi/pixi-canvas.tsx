@@ -99,6 +99,7 @@ export function PixiCanvas() {
     setViewportSize,
     selectItem,
     reportCursorTrackUnavailable,
+    reportTypingDataAvailable,
   } = useEditorCanvasActions()
   const { project } = useProject()
   const { videos, selectedItemId } = useEditorCanvasMedia()
@@ -168,6 +169,8 @@ export function PixiCanvas() {
         end: clip.end,
         sourceIn: clip.sourceIn,
         sourceOut: clip.sourceOut,
+        speed: clip.speed,
+        hideCursor: clip.hideCursor,
       })),
       referenceSize: { width: artboard.width, height: artboard.height },
       customRenderingEnabled: artboard.cursorCustomRenderingEnabled,
@@ -178,6 +181,8 @@ export function PixiCanvas() {
       alwaysUsePointer: artboard.cursorAlwaysUsePointer,
       motionRotation: artboard.cursorMotionRotation,
       motionBlur: artboard.cursorMotionBlur,
+      hideWhileTyping: artboard.cursorHideWhileTyping,
+      followTypingCaret: artboard.zoomFollowTypingCaret,
     }),
     [screenVideo, screenClips, artboard]
   )
@@ -776,6 +781,7 @@ export function PixiCanvas() {
       refreshFollowPathsAndCamera()
       // No screen recording — the notice is inapplicable, not "unavailable".
       reportCursorTrackUnavailable(false)
+      reportTypingDataAvailable(false)
       return
     }
     // Prefer the project folder (survives any URL-shape changes); fall back
@@ -788,6 +794,7 @@ export function PixiCanvas() {
       controller?.setTrack(null)
       refreshFollowPathsAndCamera()
       reportCursorTrackUnavailable(true)
+      reportTypingDataAvailable(false)
       return
     }
     let cancelled = false
@@ -809,6 +816,7 @@ export function PixiCanvas() {
         // Track === null means the sidecar data was missing/corrupt/unusable
         // (main has already logged the precise reason).
         reportCursorTrackUnavailable(track === null)
+        reportTypingDataAvailable(Boolean(track?.typing))
       } catch (error) {
         if (cancelled) return
         console.warn("[PixiCanvas] cursor data load failed:", error)
@@ -816,6 +824,7 @@ export function PixiCanvas() {
         cursorControllerRef.current?.setTrack(null)
         refreshFollowPathsAndCamera()
         reportCursorTrackUnavailable(true)
+        reportTypingDataAvailable(false)
       }
     })()
     return () => {
@@ -827,6 +836,7 @@ export function PixiCanvas() {
     artboard.cursorTypeStabilization,
     project?.path,
     reportCursorTrackUnavailable,
+    reportTypingDataAvailable,
     refreshFollowPathsAndCamera,
   ])
 

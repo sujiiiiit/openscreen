@@ -37,9 +37,10 @@ const PixiCanvas = dynamic(
  *
  *  - ViewportController: wheel/pinch/drag zoom + pan, zoom/fit/space shortcuts.
  *  - SelectionController: hover + click-to-select.
- *  - Here: undo/redo, timeline frame-step, zoom-clip delete, selected-video
- *    delete, and (in fullscreen preview) Space → play/pause; plus preview
- *    enter/exit (fullscreen + play).
+ *  - Here: undo/redo, timeline frame-step, split at playhead (S), zoom-clip
+ *    delete, segment ripple-delete / selected-video delete, and (in
+ *    fullscreen preview) Space → play/pause; plus preview enter/exit
+ *    (fullscreen + play).
  */
 export default function EditorWorkspace() {
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -47,11 +48,12 @@ export default function EditorWorkspace() {
   const prevPreviewModeRef = useRef(false)
   const selectedZoomClipIdRef = useRef<string | null>(null)
   const selectedItemIdRef = useRef<string | null>(null)
+  const selectedTimelineClipIdRef = useRef<string | null>(null)
 
   const { isPreviewMode } = useEditorCanvasView()
   const { exitPreview, deleteVideo } = useEditorCanvasActions()
   const { selectedItemId } = useEditorCanvasMedia()
-  const { selectedZoomClipId } = useEditorCanvasTimeline()
+  const { selectedZoomClipId, selectedTimelineClip } = useEditorCanvasTimeline()
   const {
     setTimelineTime,
     playTimeline,
@@ -59,6 +61,8 @@ export default function EditorWorkspace() {
     toggleTimelinePlayback,
     stepTimelineFrame,
     removeZoomClip,
+    splitTimelineAtPlayhead,
+    deleteTimelineClip,
   } = useEditorCanvasTimelineActions()
   const { undo, redo } = useEditorHistory()
 
@@ -71,6 +75,9 @@ export default function EditorWorkspace() {
   useEffect(() => {
     selectedItemIdRef.current = selectedItemId
   }, [selectedItemId])
+  useEffect(() => {
+    selectedTimelineClipIdRef.current = selectedTimelineClip?.id ?? null
+  }, [selectedTimelineClip])
 
   // Renderer backend preference (zoom-menu Renderer submenu). Bumping the key
   // remounts <PixiCanvas>, which tears down the whole Application and re-inits
@@ -165,6 +172,15 @@ export default function EditorWorkspace() {
           removeZoomClip(selectedZoomClipIdRef.current)
           return
         }
+        // A split segment ripple-deletes (closing the gap on every track);
+        // a video's only clip falls through to detaching the video.
+        if (
+          selectedTimelineClipIdRef.current &&
+          deleteTimelineClip(selectedTimelineClipIdRef.current)
+        ) {
+          event.preventDefault()
+          return
+        }
         // The artboard sentinel selection has nothing to delete.
         if (
           selectedItemIdRef.current &&
@@ -174,6 +190,18 @@ export default function EditorWorkspace() {
           deleteVideo(selectedItemIdRef.current)
           return
         }
+      }
+
+      // Split every clip under the playhead (S).
+      if (
+        event.code === "KeyS" &&
+        !hasZoomModifier(event) &&
+        !event.altKey &&
+        !event.shiftKey
+      ) {
+        event.preventDefault()
+        splitTimelineAtPlayhead()
+        return
       }
 
       // Frame-step the timeline playhead (`,` / `.`).
@@ -190,9 +218,11 @@ export default function EditorWorkspace() {
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
   }, [
+    deleteTimelineClip,
     deleteVideo,
     redo,
     removeZoomClip,
+    splitTimelineAtPlayhead,
     stepTimelineFrame,
     toggleTimelinePlayback,
     undo,

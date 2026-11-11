@@ -16,6 +16,12 @@ import {
   type CursorSmoothingParams,
   type SmoothedCursorTrack,
 } from "@/lib/cursors/cursor-track"
+import {
+  TYPING_CARET_LEAD_MS,
+  buildTypingTrack,
+  sampleTypingCaretAt,
+  typingCursorAlphaAt,
+} from "@/lib/cursors/typing-track"
 
 import { getVideoCoverCrop } from "./video-cover-crop"
 
@@ -276,13 +282,17 @@ export function buildCursorTrack(
   )
   const mode = clampCursorSmoothingMode(options.smoothingMode)
   const params = CURSOR_SMOOTHING_PARAMS[mode]
-  return buildSmoothedTrack(
+  const track = buildSmoothedTrack(
     samples,
     data.displayWidth,
     data.displayHeight,
     params,
     clicks
   )
+  // Typing sessions ride along on the track so every consumer (preview,
+  // export, follow sampler) reads the same derivation without extra plumbing.
+  track.typing = buildTypingTrack(data)
+  return track
 }
 
 /** Minimal screen-video geometry the cursor placement needs. Both the editor's
@@ -382,6 +392,8 @@ export interface CursorPlacement {
   onScreen: boolean
   /** Cursor sprite scale from click press/release animation. */
   clickScale: number
+  /** Opacity 0..1 — below 1 only while hide-while-typing fades the cursor. */
+  alpha: number
 }
 
 function mapCursorSampleToArtboard(
@@ -500,6 +512,7 @@ export function placeCursor(
     alwaysUsePointer?: boolean
     motionRotation?: number
     smoothingMode?: CursorSmoothingMode
+    hideWhileTyping?: boolean
   } = {}
 ): CursorPlacement | null {
   const {
@@ -510,6 +523,7 @@ export function placeCursor(
     alwaysUsePointer = false,
     motionRotation = CURSOR_MOTION_ROTATION_DEFAULT,
     smoothingMode = CURSOR_SMOOTHING_MODE_DEFAULT,
+    hideWhileTyping = false,
   } = options
   const sample = sampleCursorAtTime(track, sourceSeconds * 1000)
   if (!sample) return null
@@ -582,6 +596,10 @@ export function placeCursor(
     motionRotationDeg,
     onScreen: mapped.onScreen,
     clickScale,
+    alpha:
+      hideWhileTyping && track.typing
+        ? typingCursorAlphaAt(track.typing, sourceSeconds * 1000)
+        : 1,
   }
 }
 
@@ -612,6 +630,47 @@ export function sampleCursorArtboardFocus(
 }
 
 /**
+ * The zoom camera's follow target at `sourceSeconds`: the text caret while the
+ * user types (when `followTypingCaret` is on and the recording has caret reads),
+ * otherwise the recorded pointer ({@link sampleCursorArtboardFocus}). Both go
+ * through the SAME `displayPointToArtboard` chain. Shared by the editor's
+ * follow-path precompute and the exporter's, so the two follow identically.
+ * Reads up to `TYPING_CARET_LEAD_MS` ahead so the camera starts toward the
+ * caret before the first key lands (no reaction lag).
+ */
+export function sampleFollowArtboardFocus(
+  track: SmoothedCursorTrack,
+  video: CursorVideoGeometry,
+  sourceSeconds: number,
+  artboard: { width: number; height: number },
+  followTypingCaret: boolean
+): { x: number; y: number } | null {
+  if (followTypingCaret && track.typing && artboard.width > 0) {
+    const caret = sampleTypingCaretAt(
+      track.typing,
+      sourceSeconds * 1000,
+      TYPING_CARET_LEAD_MS
+    )
+    if (caret) {
+      const mapped = displayPointToArtboard(
+        caret.x,
+        caret.y,
+        video,
+        track.displayWidth,
+        track.displayHeight
+      )
+      if (mapped.onScreen) {
+        return {
+          x: Math.min(1, Math.max(0, mapped.x / artboard.width)),
+          y: Math.min(1, Math.max(0, mapped.y / artboard.height)),
+        }
+      }
+    }
+  }
+  return sampleCursorArtboardFocus(track, video, sourceSeconds, artboard)
+}
+
+/**
  * Derive the motion-blur options for the cursor at `sourceSeconds` from how fast
  * it is moving, or null when no blur should be drawn (intensity 0, cursor still,
  * or no placement). Pure + shared, so the editor preview and the exporter blur
@@ -637,6 +696,7 @@ export function computeCursorBlur(
     alwaysUsePointer?: boolean
     motionRotation?: number
     smoothingMode?: CursorSmoothingMode
+    hideWhileTyping?: boolean
   }
 ): MotionBlurOptions | null {
   const intensity = clampCursorMotionBlur(options.intensity)
@@ -650,6 +710,7 @@ export function computeCursorBlur(
     alwaysUsePointer: options.alwaysUsePointer,
     motionRotation: options.motionRotation,
     smoothingMode: options.smoothingMode,
+    hideWhileTyping: options.hideWhileTyping,
   }
   const cur = placeCursor(track, video, sourceSeconds, placeOpts)
   const prev = placeCursor(

@@ -3,10 +3,13 @@
 import { useEffect, useRef, useState } from "react"
 
 import {
+  useEditorCanvasActions,
   useEditorCanvasArtboard,
+  useEditorCanvasCursorData,
   useEditorCanvasTimeline,
   useEditorCanvasTimelineActions,
 } from "@/components/editor/canvas/provider"
+import { PanelGroup, SwitchRow } from "@/components/editor/panel-group"
 import { captureSceneSnapshot } from "@/components/editor/canvas/scene-snapshot"
 import { getZoomVisibleWindow } from "@/components/editor/canvas/zoom-scene"
 import { Button } from "@/components/ui/button"
@@ -224,32 +227,54 @@ function ZoomFocusPreview({
 }
 
 /**
- * Track-level auto-zoom control: a manual "Regenerate" that re-runs the detector
- * (replacing the whole Zoom track). Shown whether or not a clip is selected,
- * because it operates on the track, not a single clip.
+ * Track-level auto-zoom controls: the typing options (caret follow is a render
+ * setting for every Auto clip; "Zoom on typing" applies on the next
+ * generation) and a manual "Regenerate" that re-runs the detector (replacing
+ * the whole Zoom track). Shown whether or not a clip is selected, because they
+ * operate on the track, not a single clip.
  */
 function AutoZoomControls() {
   const { regenerateAutoZoom } = useEditorCanvasTimelineActions()
+  const { artboard } = useEditorCanvasArtboard()
+  const { typingDataAvailable } = useEditorCanvasCursorData()
+  const { setAutoZoomOnTyping, setZoomFollowTypingCaret } =
+    useEditorCanvasActions()
 
   return (
-    <section className="space-y-3 border-t border-border/60 pt-4">
-      <div className="space-y-1 select-none">
-        <h4 className="text-xs font-semibold">Auto-zoom</h4>
-        <p className="text-xs text-muted-foreground">
-          Re-detect zoom moments from the recording&apos;s cursor &amp; clicks.
+    <PanelGroup title="Auto-zoom">
+      <SwitchRow
+        label="Follow text caret"
+        description="While you type, Auto zooms follow the text caret instead of the cursor."
+        checked={artboard.zoomFollowTypingCaret}
+        onCheckedChange={setZoomFollowTypingCaret}
+      />
+      <SwitchRow
+        label="Zoom on typing"
+        description="Regenerate also zooms in on typing, not just clicks."
+        checked={artboard.autoZoomOnTyping}
+        onCheckedChange={setAutoZoomOnTyping}
+      />
+      {!typingDataAvailable ? (
+        <p className="text-xs text-muted-foreground select-none">
+          This recording has no typing data, so only clicks drive auto-zoom.
+        </p>
+      ) : null}
+      <div className="space-y-3">
+        <p className="text-xs text-muted-foreground select-none">
+          Re-detect zoom moments from the recording&apos;s clicks and typing.
           This replaces the Zoom track.
         </p>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          className="w-full"
+          onClick={() => regenerateAutoZoom()}
+        >
+          Regenerate auto-zoom
+        </Button>
       </div>
-      <Button
-        type="button"
-        variant="secondary"
-        size="sm"
-        className="w-full"
-        onClick={() => regenerateAutoZoom()}
-      >
-        Regenerate auto-zoom
-      </Button>
-    </section>
+    </PanelGroup>
   )
 }
 

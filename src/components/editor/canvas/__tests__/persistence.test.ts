@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest"
 
 import {
   fingerprintProjectState,
+  projectClipToCanvasClip,
   projectZoomClipToCanvasClip,
   serializeProjectState,
+  serializeTimelineClip,
   serializeVideo,
   serializeZoomClip,
 } from "@/components/editor/canvas/persistence"
@@ -15,7 +17,8 @@ const ARTBOARD: EditorArtboard = {
   presetId: "wide",
   width: 1920,
   height: 1080,
-  background: null,  padding: 0,
+  background: null,
+  padding: 0,
   backgroundEnabled: true,
   cursorCustomRenderingEnabled: true,
   cursorSetId: "macos",
@@ -26,6 +29,9 @@ const ARTBOARD: EditorArtboard = {
   cursorClickPressScale: 0.88,
   cursorAlwaysUsePointer: false,
   cursorTypeStabilization: false,
+  cursorHideWhileTyping: true,
+  zoomFollowTypingCaret: true,
+  autoZoomOnTyping: true,
 }
 
 function canvasVideo(
@@ -162,7 +168,8 @@ describe("cursor motion rotation persistence", () => {
       width: 1920,
       height: 1080,
       background: null,
-      padding: 0,    }
+      padding: 0,
+    }
     const legacy = parseProjectState({
       version: 1,
       artboard: base,
@@ -190,7 +197,8 @@ describe("cursor motion rotation persistence", () => {
       width: 1920,
       height: 1080,
       background: null,
-      padding: 0,    }
+      padding: 0,
+    }
     const legacy = parseProjectState({
       version: 1,
       artboard: base,
@@ -218,7 +226,8 @@ describe("cursor motion rotation persistence", () => {
       width: 1920,
       height: 1080,
       background: null,
-      padding: 0,    }
+      padding: 0,
+    }
     const tooSmall = parseProjectState({
       version: 1,
       artboard: { ...base, cursorMotionRotation: -1 },
@@ -263,7 +272,8 @@ describe("custom cursor rendering persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,      },
+        padding: 0,
+      },
       videos: [],
       timelineClips: [],
       updatedAtUnixMs: 0,
@@ -275,7 +285,8 @@ describe("custom cursor rendering persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,        cursorCustomRenderingEnabled: "no",
+        padding: 0,
+        cursorCustomRenderingEnabled: "no",
       },
       videos: [],
       timelineClips: [],
@@ -311,7 +322,8 @@ describe("cursor style persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,      },
+        padding: 0,
+      },
       videos: [],
       timelineClips: [],
       updatedAtUnixMs: 0,
@@ -323,7 +335,8 @@ describe("cursor style persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,        cursorSetId: "made-up",
+        padding: 0,
+        cursorSetId: "made-up",
       },
       videos: [],
       timelineClips: [],
@@ -359,7 +372,8 @@ describe("cursor smoothing persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,        cursorSmoothingMode: "raw",
+        padding: 0,
+        cursorSmoothingMode: "raw",
       },
       videos: [],
       timelineClips: [],
@@ -393,7 +407,8 @@ describe("cursor click press scale persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,      },
+        padding: 0,
+      },
       videos: [],
       timelineClips: [],
       updatedAtUnixMs: 0,
@@ -405,7 +420,8 @@ describe("cursor click press scale persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,        cursorClickPressScale: 0.2,
+        padding: 0,
+        cursorClickPressScale: 0.2,
       },
       videos: [],
       timelineClips: [],
@@ -441,7 +457,8 @@ describe("cursor pointer override persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,      },
+        padding: 0,
+      },
       videos: [],
       timelineClips: [],
       updatedAtUnixMs: 0,
@@ -453,7 +470,8 @@ describe("cursor pointer override persistence", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,        cursorAlwaysUsePointer: "yes",
+        padding: 0,
+        cursorAlwaysUsePointer: "yes",
       },
       videos: [],
       timelineClips: [],
@@ -487,7 +505,8 @@ describe("cursor type stabilization persistence", () => {
       width: 1920,
       height: 1080,
       background: null,
-      padding: 0,    }
+      padding: 0,
+    }
     const legacy = parseProjectState({
       version: 1,
       artboard: base,
@@ -526,7 +545,8 @@ describe("parseProjectState onCanvas tolerance", () => {
         width: 1920,
         height: 1080,
         background: null,
-        padding: 0,      },
+        padding: 0,
+      },
       videos: [
         {
           ...serializeVideo(canvasVideo({ id: "a" })),
@@ -824,5 +844,100 @@ describe("engaged content rects persistence", () => {
     expect(parsed!.zoomClips![0].engagedRects).toEqual([
       { t: 2, rect: { x: 0.5, y: 0.4, width: 0.4, height: 0.3 } },
     ])
+  })
+})
+
+describe("typing behavior persistence", () => {
+  it("preserves explicitly disabled typing settings through a round-trip", () => {
+    const parsed = roundTrip(
+      serializeProjectState(
+        {
+          ...ARTBOARD,
+          cursorHideWhileTyping: false,
+          zoomFollowTypingCaret: false,
+          autoZoomOnTyping: false,
+        },
+        [canvasVideo({ id: "a" })],
+        []
+      )
+    )
+
+    expect(parsed).not.toBeNull()
+    expect(parsed!.artboard.cursorHideWhileTyping).toBe(false)
+    expect(parsed!.artboard.zoomFollowTypingCaret).toBe(false)
+    expect(parsed!.artboard.autoZoomOnTyping).toBe(false)
+  })
+
+  it("defaults missing/non-false values to true for legacy projects", () => {
+    const base = {
+      presetId: "wide",
+      width: 1920,
+      height: 1080,
+      background: null,
+      padding: 0,
+    }
+    const legacy = parseProjectState({
+      version: 1,
+      artboard: base,
+      videos: [],
+      timelineClips: [],
+      updatedAtUnixMs: 0,
+    })
+
+    expect(legacy).not.toBeNull()
+    expect(legacy!.artboard.cursorHideWhileTyping).toBe(true)
+    expect(legacy!.artboard.zoomFollowTypingCaret).toBe(true)
+    expect(legacy!.artboard.autoZoomOnTyping).toBe(true)
+  })
+})
+
+describe("timeline clip speed + hide cursor persistence", () => {
+  const base = {
+    id: "c",
+    videoId: "v",
+    start: 0,
+    end: 2,
+    sourceIn: 0,
+    sourceOut: 4,
+  }
+
+  it("round-trips speed and hideCursor, omitting defaults", () => {
+    expect(serializeTimelineClip({ ...base, speed: 2, hideCursor: true })).toEqual({
+      ...base,
+      speed: 2,
+      hideCursor: true,
+    })
+    expect(serializeTimelineClip({ ...base, sourceOut: 2, speed: 1 })).toEqual({
+      ...base,
+      sourceOut: 2,
+    })
+    expect(
+      projectClipToCanvasClip({ ...base, speed: 2, hideCursor: true })
+    ).toEqual({ ...base, speed: 2, hideCursor: true })
+  })
+
+  it("parses optional speed / hideCursor and tolerates bad values", () => {
+    // A full, valid state from the real serializer, with the clip swapped out.
+    const state = (clip: Record<string, unknown>) => {
+      const valid = serializeProjectState(
+        ARTBOARD,
+        [canvasVideo({ id: "v" })],
+        [{ ...base, sourceOut: 2 }],
+        []
+      )
+      return JSON.parse(
+        JSON.stringify({ ...valid, timelineClips: [clip] })
+      ) as unknown
+    }
+    const good = parseProjectState(state({ ...base, speed: 2, hideCursor: true }))
+    expect(good?.timelineClips[0]).toMatchObject({ speed: 2, hideCursor: true })
+    const legacy = parseProjectState(state({ ...base }))
+    expect(legacy?.timelineClips[0].speed).toBeUndefined()
+    const bad = parseProjectState(state({ ...base, speed: "fast", hideCursor: 1 }))
+    expect(bad?.timelineClips[0]).toBeDefined()
+    expect(bad?.timelineClips[0].speed).toBeUndefined()
+    expect(bad?.timelineClips[0].hideCursor).toBeUndefined()
+    const huge = parseProjectState(state({ ...base, speed: 99 }))
+    expect(huge?.timelineClips[0].speed).toBe(16)
   })
 })

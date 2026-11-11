@@ -1,3 +1,4 @@
+import { clipSpeed } from "@/lib/timeline-edits"
 import {
   ALL_FORMATS,
   AudioBufferSink,
@@ -141,6 +142,10 @@ export async function streamTimelineAudio(
     // sink iterator's internal optimisations (monotonic timestamps) hold.
     const clipIters: (ClipIterState | null)[] = state.timelineClips.map(
       (clip) => {
+        // Re-timed clips (speed ≠ 1×) are silent — the preview mutes them too
+        // (provider `applyClipPlaybackRate`), so the export matches. No
+        // time-stretching: see docs/editor-canvas.md → Clip Speed.
+        if (clipSpeed(clip) !== 1) return null
         const src = sourcesByVideoId.get(clip.videoId)
         if (!src) return null
         const iter = src.sink.buffers(clip.sourceIn, clip.sourceOut)

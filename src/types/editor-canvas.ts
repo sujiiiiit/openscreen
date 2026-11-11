@@ -58,6 +58,16 @@ export type EditorArtboard = CanvasSize & {
   // faster than ~150 ms) are debounced out at track-build time, so the rendered
   // cursor type stays steady. Shared by preview/export.
   cursorTypeStabilization: boolean
+  // Hide the cursor while the user types — from the first typing keystroke
+  // until the mouse moves or clicks (macOS "hide until mouse moves"
+  // semantics). Shared by preview/export (`typing-track.ts`).
+  cursorHideWhileTyping: boolean
+  // While typing, auto-mode Zoom clips follow the recorded text caret instead
+  // of the hidden mouse cursor. Shared by preview/export (follow sampler).
+  zoomFollowTypingCaret: boolean
+  // Auto-zoom generation adds Zoom clips for typing bursts. Generation-only
+  // (applies on Regenerate); not part of the render path.
+  autoZoomOnTyping: boolean
 }
 
 export const ARTBOARD_SELECTION_ID = "__artboard__"
@@ -188,6 +198,12 @@ export type CanvasTimelineClip = {
   end: number
   sourceIn: number
   sourceOut: number
+  // Playback speed (timeline length = (sourceOut − sourceIn) / speed). Optional
+  // (absent = 1×) so pre-speed project.json files keep loading.
+  speed?: number
+  // Per-clip "Hide cursor": the custom cursor fades out across this clip (same
+  // fade as hide-while-typing). Optional (absent = shown).
+  hideCursor?: boolean
 }
 
 export type CanvasZoomFocus = {

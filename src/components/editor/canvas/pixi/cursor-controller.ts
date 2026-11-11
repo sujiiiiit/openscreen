@@ -1,7 +1,9 @@
 import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
 import type { CursorSetId, CursorSmoothingMode } from "@/types/editor-canvas"
 
-import { sampleCursorArtboardFocus } from "../cursor-scene"
+import { clipCursorAlphaAt, timelineToSourceSeconds } from "@/lib/timeline-edits"
+
+import { sampleFollowArtboardFocus } from "../cursor-scene"
 import { CursorSprite } from "./cursor-sprite"
 import type { CanvasScene } from "./scene"
 
@@ -18,12 +20,15 @@ export type CursorState = {
     intrinsicWidth: number
     intrinsicHeight: number
   } | null
-  /** Maps timeline time → screen source time (`t - start + sourceIn`). */
+  /** Maps timeline time → screen source time (speed-aware, `timeline-edits`). */
   screenClips: Array<{
     start: number
     end: number
     sourceIn: number
     sourceOut: number
+    speed?: number
+    /** Per-clip "Hide cursor" (faded via `clipCursorAlphaAt`). */
+    hideCursor?: boolean
   }>
   referenceSize: { width: number; height: number }
   customRenderingEnabled: boolean
@@ -34,6 +39,9 @@ export type CursorState = {
   alwaysUsePointer: boolean
   motionRotation: number
   motionBlur: number
+  hideWhileTyping: boolean
+  /** Auto-zoom follow targets the text caret while typing. */
+  followTypingCaret: boolean
 }
 
 /**
@@ -98,19 +106,22 @@ export class CursorController {
         motionRotation: state.motionRotation,
         smoothingMode: state.smoothingMode,
         referenceSize: state.referenceSize,
+        hideWhileTyping: state.hideWhileTyping,
       },
       state.motionBlur,
-      () => this.place(this.lastTimelineSeconds)
+      () => this.place(this.lastTimelineSeconds),
+      clipCursorAlphaAt(state.screenClips, timelineSeconds)
     )
     this.scene.requestRender()
   }
 
   /**
-   * The cursor's artboard-normalized focus `{ x, y }` (0..1) at a timeline time,
-   * or null when no cursor is shown (rendering off, no track, off-screen, or the
-   * time is outside every screen clip). Feeds the zoom camera's cursor-follow so
-   * the pointer never leaves the zoomed window. Cheap (no asset/sizing work) and
-   * uses the same mapping the rendered sprite does, so the two stay locked.
+   * The follow target's artboard-normalized focus `{ x, y }` (0..1) at a
+   * timeline time — the text caret while typing (when caret follow is on),
+   * else the cursor — or null (no track, off-screen, or the time is outside
+   * every screen clip). Feeds the zoom camera's follow so the pointer / caret
+   * never leaves the zoomed window. Cheap (no asset/sizing work) and uses the
+   * same mapping the rendered sprite does, so the two stay locked.
    */
   getArtboardFocusAt(
     timelineSeconds: number,
@@ -124,11 +135,12 @@ export class CursorController {
     }
     const sourceSeconds = this.getSourceSeconds(timelineSeconds, state)
     if (sourceSeconds === null) return null
-    return sampleCursorArtboardFocus(
+    return sampleFollowArtboardFocus(
       track,
       state.screenVideo,
       sourceSeconds,
-      artboard
+      artboard,
+      state.followTypingCaret
     )
   }
 
@@ -156,7 +168,7 @@ export class CursorController {
         activeClip.sourceOut - CURSOR_CLIP_END_EPSILON_SECONDS
       )
     }
-    return activeClip.sourceIn + (timelineSeconds - activeClip.start)
+    return timelineToSourceSeconds(activeClip, timelineSeconds)
   }
 
   destroy() {

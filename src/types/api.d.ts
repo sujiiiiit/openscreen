@@ -242,6 +242,11 @@ export interface ProjectArtboard {
   cursorAlwaysUsePointer?: boolean
   // Optional on disk; validator defaults to false for old projects.
   cursorTypeStabilization?: boolean
+  // Typing behavior. Optional on disk; validator defaults each to TRUE (only
+  // an explicit false disables). See electron/ipc/project-schema.ts.
+  cursorHideWhileTyping?: boolean
+  zoomFollowTypingCaret?: boolean
+  autoZoomOnTyping?: boolean
 }
 
 export type ProjectVideoRole = "screen" | "camera" | "media"
@@ -286,6 +291,12 @@ export interface ProjectTimelineClip {
   end: number
   sourceIn: number
   sourceOut: number
+  // Playback speed (timeline length = (sourceOut − sourceIn) / speed). Optional
+  // (absent = 1×) so pre-speed project.json files keep loading.
+  speed?: number
+  // Per-clip "Hide cursor": the custom cursor fades out across this clip (same
+  // fade as hide-while-typing). Optional (absent = shown).
+  hideCursor?: boolean
 }
 
 export interface ProjectZoomClip {
@@ -432,12 +443,31 @@ export interface CursorClickSample {
   button?: number | string
 }
 
+// Typing keyDown timestamp (characters are stripped in main). Mirrors
+// electron/ipc/projects.ts.
+export interface TypingKeySample {
+  processTimeMs: number
+}
+
+// Text-caret rect in display points (top-left origin). Mirrors
+// electron/ipc/projects.ts.
+export interface TypingCaretSample {
+  processTimeMs: number
+  x: number
+  y: number
+  width: number
+  height: number
+  source: "caret" | "element"
+}
+
 export interface CursorTrackData {
   moves: CursorMoveSample[]
   clicks: CursorClickSample[]
   processTimeStartMs: number
   displayWidth: number
   displayHeight: number
+  typing?: TypingKeySample[]
+  caret?: TypingCaretSample[]
 }
 
 export interface Api {

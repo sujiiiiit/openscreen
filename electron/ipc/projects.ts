@@ -340,6 +340,27 @@ export interface CursorClickSample {
   button?: number | string
 }
 
+// One TYPING keystroke from `keystrokes-0.json`, reduced to its timestamp.
+// Main classifies keyDowns (drops shortcuts / Escape / F-keys) and forwards
+// only the time — the typed characters never leave the main process, because
+// the editor only needs *when* typing happened (cursor hide + auto-zoom).
+export interface TypingKeySample {
+  processTimeMs: number
+}
+
+// One text-caret rect from `typingcaret-0.json` (Accessibility read after a
+// keyDown). Display-relative logical points, top-left origin — same space as
+// the mouse samples. `source` "element" = the focused field's frame (the app
+// couldn't report an exact caret).
+export interface TypingCaretSample {
+  processTimeMs: number
+  x: number
+  y: number
+  width: number
+  height: number
+  source: "caret" | "element"
+}
+
 // Cursor metadata for one recording, resolved from its `recording.json` +
 // input sidecars. Coordinates are display-relative logical points; sample by
 // the screen video's source time (currentTime × 1000 ≈ processTimeMs − start).
@@ -349,6 +370,90 @@ export interface CursorTrackData {
   processTimeStartMs: number
   displayWidth: number
   displayHeight: number
+  // Present only when the recording captured keystrokes (`typing`) and, with
+  // Accessibility, caret rects (`caret`). Both sorted by processTimeMs.
+  typing?: TypingKeySample[]
+  caret?: TypingCaretSample[]
+}
+
+interface RawKeyStrokeSample {
+  processTimeMs?: unknown
+  type?: unknown
+  character?: unknown
+  activeModifiers?: unknown
+}
+
+interface RawCaretSample {
+  processTimeMs?: unknown
+  x?: unknown
+  y?: unknown
+  width?: unknown
+  height?: unknown
+  source?: unknown
+}
+
+// Whether a recorded keyDown is TYPING (edits or moves the text caret) rather
+// than a shortcut / non-text key. Command/Control chords are shortcuts; Escape
+// and the F-key private-use range (NSF1FunctionKey…NSF35FunctionKey) never
+// touch text. Arrows / Home / End / Delete stay: they move the caret.
+export function isTypingKeyStroke(sample: RawKeyStrokeSample): boolean {
+  if (sample.type !== "keyDown") return false
+  const mods = Array.isArray(sample.activeModifiers)
+    ? sample.activeModifiers
+    : []
+  if (mods.includes("command") || mods.includes("control")) return false
+  const character =
+    typeof sample.character === "string" ? sample.character : ""
+  if (character.length === 0) return false
+  const code = character.charCodeAt(0)
+  if (code === 0x1b) return false
+  if (code >= 0xf704 && code <= 0xf726) return false
+  return true
+}
+
+async function loadTypingSamples(
+  folder: string,
+  candidate: string | undefined
+): Promise<TypingKeySample[] | undefined> {
+  const filePath = resolveAssetPath(folder, candidate)
+  if (!filePath) return undefined
+  const raw = await readJsonArray<RawKeyStrokeSample>(filePath)
+  if (!raw) return undefined
+  const typing: TypingKeySample[] = []
+  for (const sample of raw) {
+    if (!isTypingKeyStroke(sample)) continue
+    const t = sample.processTimeMs
+    if (typeof t !== "number" || !Number.isFinite(t)) continue
+    typing.push({ processTimeMs: t })
+  }
+  return typing.sort((a, b) => a.processTimeMs - b.processTimeMs)
+}
+
+async function loadCaretSamples(
+  folder: string,
+  candidate: string | undefined
+): Promise<TypingCaretSample[] | undefined> {
+  const filePath = resolveAssetPath(folder, candidate)
+  if (!filePath) return undefined
+  const raw = await readJsonArray<RawCaretSample>(filePath)
+  if (!raw) return undefined
+  const isNum = (v: unknown): v is number =>
+    typeof v === "number" && Number.isFinite(v)
+  const caret: TypingCaretSample[] = []
+  for (const sample of raw) {
+    const { processTimeMs, x, y, width, height } = sample
+    if (!isNum(processTimeMs) || !isNum(x) || !isNum(y)) continue
+    if (!isNum(width) || !isNum(height) || width < 0 || height <= 0) continue
+    caret.push({
+      processTimeMs,
+      x,
+      y,
+      width,
+      height,
+      source: sample.source === "element" ? "element" : "caret",
+    })
+  }
+  return caret.sort((a, b) => a.processTimeMs - b.processTimeMs)
 }
 
 // Every null return path warns with a reason: cursor data silently failing
@@ -423,12 +528,25 @@ async function loadCursorTrackData(
     )
   }
 
+  // Typing sidecars are optional extras: a missing/corrupt file just means
+  // no typing behavior for this recording, never a cursor-load failure.
+  const typing = await loadTypingSamples(
+    folder,
+    manifest.files?.keyStrokes ?? input.keyStrokesFilename
+  )
+  const caret = await loadCaretSamples(
+    folder,
+    manifest.files?.typingCaret ?? input.typingCaretFilename
+  )
+
   return {
     moves,
     clicks,
     processTimeStartMs: resolveCursorProcessTimeStart(manifest, input, moves),
     displayWidth,
     displayHeight,
+    ...(typing ? { typing } : {}),
+    ...(caret ? { caret } : {}),
   }
 }
 

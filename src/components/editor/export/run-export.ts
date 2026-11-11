@@ -25,7 +25,8 @@ import {
   sampleZoomCameraAtTime,
   type CursorFocusSampler,
 } from "@/components/editor/canvas/zoom-scene"
-import { sampleCursorArtboardFocus } from "@/components/editor/canvas/cursor-scene"
+import { sampleFollowArtboardFocus } from "@/components/editor/canvas/cursor-scene"
+import { clipCursorAlphaAt } from "@/lib/timeline-edits"
 import { formatToVideoCodec } from "./codec-probe"
 import { buildExportStage } from "./build-stage"
 import { streamTimelineAudio } from "./decode-audio"
@@ -422,14 +423,21 @@ export async function runExport(options: RunExportOptions): Promise<void> {
               (entry) => entry.videoId === cursor.screenVideoId
             )
             if (!screenEntry) return null
-            return sampleCursorArtboardFocus(
+            // Caret-while-typing → else cursor; same sampler as the editor.
+            return sampleFollowArtboardFocus(
               cursor.track,
               cursor.video,
               screenEntry.sourceTimeSec,
-              state.artboard
+              state.artboard,
+              state.artboard.zoomFollowTypingCaret !== false
             )
           }
         : null
+      const screenClipsForCursor = handles.cursor
+        ? state.timelineClips.filter(
+            (clip) => clip.videoId === handles.cursor?.screenVideoId
+          )
+        : []
       const zoomFollowPaths = followCursorSampler
         ? computeZoomFollowPaths(state.zoomClips ?? [], followCursorSampler)
         : null
@@ -501,7 +509,10 @@ export async function runExport(options: RunExportOptions): Promise<void> {
                 cursor.video,
                 screenEntry.sourceTimeSec,
                 cursor.options,
-                cursor.motionBlur
+                cursor.motionBlur,
+                undefined,
+                // Per-clip "Hide cursor" fade — same helper as the preview.
+                clipCursorAlphaAt(screenClipsForCursor, t)
               )
             } else {
               cursor.cursorSprite.hide()

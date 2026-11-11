@@ -8,6 +8,7 @@ import {
   type WrappedCanvas,
 } from "mediabunny"
 
+import { timelineToSourceSeconds } from "@/lib/timeline-edits"
 import type { ProjectTimelineClip } from "@/types/api"
 
 export type DecodedSourceCanvas = HTMLCanvasElement | OffscreenCanvas
@@ -245,7 +246,7 @@ export function planExportFrames(opts: {
     const active: ExportFramePlanEntry[] = []
     for (const clip of clips) {
       if (t < clip.start || t >= clip.end) continue
-      const sourceTimeSec = clip.sourceIn + (t - clip.start)
+      const sourceTimeSec = timelineToSourceSeconds(clip, t)
       active.push({ videoId: clip.videoId, sourceTimeSec })
       let bucket = sourceTimelinesByVideoId.get(clip.videoId)
       if (!bucket) {

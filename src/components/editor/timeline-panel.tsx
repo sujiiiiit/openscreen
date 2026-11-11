@@ -3,11 +3,17 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { HugeiconsIcon } from "@hugeicons/react"
 import {
+  ArrowDown01Icon,
   ArrowLeft01Icon,
   ArrowRight01Icon,
   CameraVideoIcon,
   ComputerVideoIcon,
+  CursorDisabledIcon,
+  DashboardSpeed02Icon,
+  Delete02Icon,
   FitToScreenIcon,
+  MagicWand01Icon,
+  ScissorIcon,
   MinusSignIcon,
   NextIcon,
   PauseIcon,
@@ -21,12 +27,32 @@ import { Timeline, type TimelineState } from "@openscreen/timeline"
 import type { TimelineAction, TimelineRow } from "@openscreen/timeline-engine"
 
 import {
-  useEditorCanvasActions,
   useEditorCanvasMedia,
   useEditorCanvasTimeline,
   useEditorCanvasTimelineActions,
 } from "@/components/editor/canvas/provider"
 import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import {
+  AUTO_SPEED_IDLE_DEFAULT,
+  AUTO_SPEED_TYPING_DEFAULT,
+  type AutoSpeedOptions,
+} from "@/lib/auto-speed/plan-auto-speed"
+import {
+  TIMELINE_SPEED_PRESETS,
+  clipSpeed,
+  linkedClipIds,
+} from "@/lib/timeline-edits"
 import { cn } from "@/lib/utils"
 import {
   clampZoomMove,
@@ -139,6 +165,8 @@ type EditorTimelineAction = TimelineAction & {
   fileName: string
   sourceIn: number
   sourceOut: number
+  speed: number
+  hideCursor: boolean
 }
 
 type EditorZoomAction = TimelineAction & {
@@ -344,29 +372,31 @@ function getVideoDurationSeconds(video: CanvasVideoItem) {
 function buildTimelineRows({
   clips,
   videos,
-  selectedItemId,
+  selectedClipIds,
   zoomClips,
   selectedZoomClipId,
 }: {
   clips: CanvasTimelineClip[]
   videos: CanvasVideoItem[]
-  selectedItemId: string | null
+  /** The selected segment's linked group (highlighted together). */
+  selectedClipIds: ReadonlySet<string>
   zoomClips: CanvasZoomClip[]
   selectedZoomClipId: string | null
 }) {
-  const clipByVideoId = new Map(clips.map((clip) => [clip.videoId, clip]))
+  // A video has one clip per segment once split.
+  const clipsByVideoId = new Map<string, CanvasTimelineClip[]>()
+  for (const clip of clips) {
+    const list = clipsByVideoId.get(clip.videoId)
+    if (list) list.push(clip)
+    else clipsByVideoId.set(clip.videoId, [clip])
+  }
   const roleOrder: CanvasVideoRole[] = ["screen", "camera", "media"]
 
   const videoRows = roleOrder.flatMap((role) => {
     const actions = videos
       .filter((video) => video.role === role)
-      .flatMap((video): EditorTimelineAction[] => {
-        const clip = clipByVideoId.get(video.id)
-        if (!clip) return []
-
-        const selected = selectedItemId === video.id
-        return [
-          {
+      .flatMap((video): EditorTimelineAction[] =>
+        (clipsByVideoId.get(video.id) ?? []).map((clip) => ({
             id: clip.id,
             kind: "video",
             videoId: video.id,
@@ -377,13 +407,14 @@ function buildTimelineRows({
             end: clip.end,
             sourceIn: clip.sourceIn,
             sourceOut: clip.sourceOut,
-            selected,
+            speed: clipSpeed(clip),
+            hideCursor: !!clip.hideCursor,
+            selected: selectedClipIds.has(clip.id),
             movable: true,
             flexible: true,
             minStart: 0,
-          },
-        ]
-      })
+          }))
+      )
 
     if (actions.length === 0) return []
 
@@ -426,6 +457,25 @@ function buildTimelineRows({
   ]
 }
 
+/**
+ * The free span a clip may occupy without overlapping another clip of the SAME
+ * video (one element plays a video's clips, so they must not overlap): from the
+ * previous sibling's end to the next sibling's start, around the committed clip.
+ */
+function siblingGap(
+  clips: readonly CanvasTimelineClip[],
+  clip: CanvasTimelineClip
+): { lo: number; hi: number } {
+  let lo = 0
+  let hi = Number.POSITIVE_INFINITY
+  for (const other of clips) {
+    if (other.id === clip.id || other.videoId !== clip.videoId) continue
+    if (other.end <= clip.start + 1e-6) lo = Math.max(lo, other.end)
+    else if (other.start >= clip.end - 1e-6) hi = Math.min(hi, other.start)
+  }
+  return { lo, hi }
+}
+
 function TimelineClipRender(action: TimelineAction) {
   const timelineAction = action as EditorTimelineAction
   const meta = ROLE_META[timelineAction.role]
@@ -440,8 +490,27 @@ function TimelineClipRender(action: TimelineAction) {
       <span className="min-w-0 truncate font-medium">
         {timelineAction.fileName}
       </span>
+      {timelineAction.hideCursor || timelineAction.speed !== 1 ? (
+        <span className="ml-auto flex shrink-0 items-center gap-1 pl-1.5 tabular-nums opacity-80">
+          {timelineAction.hideCursor ? (
+            <HugeiconsIcon
+              icon={CursorDisabledIcon}
+              size={12}
+              color="currentColor"
+              aria-label="Cursor hidden"
+            />
+          ) : null}
+          {timelineAction.speed !== 1 ? (
+            <span>{formatSpeed(timelineAction.speed)}</span>
+          ) : null}
+        </span>
+      ) : null}
     </div>
   )
+}
+
+function formatSpeed(speed: number) {
+  return `${Number.isInteger(speed) ? speed : speed.toFixed(2).replace(/0$/, "")}×`
 }
 
 // Pure render (no hooks) so it can be called directly from `getActionRender`.
@@ -568,6 +637,203 @@ export function EditorTimelineControls() {
   )
 }
 
+const AUTO_SPEED_CHOICES: Array<{
+  label: string
+  options: AutoSpeedOptions
+  emptyMessage: string
+}> = [
+  {
+    label: `Speed up typing (${AUTO_SPEED_TYPING_DEFAULT}×)`,
+    options: { typingSpeed: AUTO_SPEED_TYPING_DEFAULT, idleSpeed: null },
+    emptyMessage: "No typing to speed up",
+  },
+  {
+    label: `Speed up idle pauses (${AUTO_SPEED_IDLE_DEFAULT}×)`,
+    options: { typingSpeed: null, idleSpeed: AUTO_SPEED_IDLE_DEFAULT },
+    emptyMessage: "No idle pauses found",
+  },
+  {
+    label: "Speed up typing & idle",
+    options: {
+      typingSpeed: AUTO_SPEED_TYPING_DEFAULT,
+      idleSpeed: AUTO_SPEED_IDLE_DEFAULT,
+    },
+    emptyMessage: "Nothing to speed up",
+  },
+]
+
+/**
+ * Clip tools for the footer: Split at playhead (S), Speed (manual presets for
+ * the selected segment + automatic typing / idle speed-up), Hide cursor for the
+ * selected segment, and Delete segment (ripple). Every edit acts on the
+ * selected segment's linked group, so a recording's screen + camera stay in
+ * sync.
+ */
+export function EditorTimelineClipTools() {
+  const { timelineClips, selectedTimelineClip, timelineTime } =
+    useEditorCanvasTimeline()
+  const {
+    splitTimelineAtPlayhead,
+    setTimelineClipSpeed,
+    setTimelineClipHideCursor,
+    deleteTimelineClip,
+    applyAutoSpeed,
+  } = useEditorCanvasTimelineActions()
+  const [notice, setNotice] = useState<string | null>(null)
+  const noticeTimerRef = useRef<number | null>(null)
+  useEffect(
+    () => () => {
+      if (noticeTimerRef.current !== null) {
+        window.clearTimeout(noticeTimerRef.current)
+      }
+    },
+    []
+  )
+  const showNotice = useCallback((message: string) => {
+    setNotice(message)
+    if (noticeTimerRef.current !== null) {
+      window.clearTimeout(noticeTimerRef.current)
+    }
+    noticeTimerRef.current = window.setTimeout(() => setNotice(null), 3000)
+  }, [])
+
+  const hasTimeline = timelineClips.length > 0
+  const canSplit = timelineClips.some(
+    (clip) => timelineTime - clip.start >= 0.1 && clip.end - timelineTime >= 0.1
+  )
+  const selected = selectedTimelineClip
+  const selectedSpeed = selected ? clipSpeed(selected) : 1
+  const canDeleteSegment =
+    !!selected &&
+    timelineClips.some(
+      (clip) => clip.videoId === selected.videoId && clip.id !== selected.id
+    )
+
+  const runAutoSpeed = useCallback(
+    async (choice: (typeof AUTO_SPEED_CHOICES)[number]) => {
+      const applied = await applyAutoSpeed(choice.options)
+      if (applied === null) showNotice("No recorded input data")
+      else if (applied === 0) showNotice(choice.emptyMessage)
+      else {
+        showNotice(
+          `Sped up ${applied} ${applied === 1 ? "segment" : "segments"}`
+        )
+      }
+    },
+    [applyAutoSpeed, showNotice]
+  )
+
+  return (
+    <div className="flex min-w-0 items-center gap-1 select-none">
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        onClick={splitTimelineAtPlayhead}
+        disabled={!canSplit}
+        aria-label="Split at playhead"
+        title="Split at playhead (S)"
+      >
+        <HugeiconsIcon icon={ScissorIcon} size={16} color="currentColor" />
+      </Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          render={
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={!hasTimeline}
+              title="Clip speed"
+            />
+          }
+        >
+          <HugeiconsIcon icon={DashboardSpeed02Icon} />
+          <span className="tabular-nums">
+            {selected ? formatSpeed(selectedSpeed) : "Speed"}
+          </span>
+          <HugeiconsIcon icon={ArrowDown01Icon} />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          side="top"
+          align="start"
+          sideOffset={8}
+          className="w-60"
+        >
+          <DropdownMenuGroup>
+            <DropdownMenuLabel>
+              {selected ? "Selected clip" : "Select a clip to set its speed"}
+            </DropdownMenuLabel>
+            <DropdownMenuRadioGroup
+              value={String(selectedSpeed)}
+              onValueChange={(value) => {
+                if (selected) setTimelineClipSpeed(selected.id, Number(value))
+              }}
+            >
+              {TIMELINE_SPEED_PRESETS.map((speed) => (
+                <DropdownMenuRadioItem
+                  key={speed}
+                  value={String(speed)}
+                  closeOnClick
+                  disabled={!selected}
+                  text={formatSpeed(speed)}
+                  subtext={speed === 1 ? "Normal" : undefined}
+                />
+              ))}
+            </DropdownMenuRadioGroup>
+          </DropdownMenuGroup>
+          <DropdownMenuSeparator />
+          <DropdownMenuGroup>
+            <DropdownMenuLabel>Automatic</DropdownMenuLabel>
+            {AUTO_SPEED_CHOICES.map((choice) => (
+              <DropdownMenuItem
+                key={choice.label}
+                icon={<HugeiconsIcon icon={MagicWand01Icon} />}
+                text={choice.label}
+                onClick={() => void runAutoSpeed(choice)}
+              />
+            ))}
+          </DropdownMenuGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        onClick={() => {
+          if (selected) {
+            setTimelineClipHideCursor(selected.id, !selected.hideCursor)
+          }
+        }}
+        disabled={!selected}
+        aria-pressed={!!selected?.hideCursor}
+        aria-label="Hide cursor in clip"
+        title="Hide cursor in this clip"
+        className={cn(selected?.hideCursor && "bg-accent text-foreground")}
+      >
+        <HugeiconsIcon icon={CursorDisabledIcon} size={16} color="currentColor" />
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        onClick={() => {
+          if (selected) deleteTimelineClip(selected.id)
+        }}
+        disabled={!canDeleteSegment}
+        aria-label="Delete segment"
+        title="Delete segment (closes the gap)"
+      >
+        <HugeiconsIcon icon={Delete02Icon} size={16} color="currentColor" />
+      </Button>
+      {notice ? (
+        <span className="truncate pl-1 text-xs text-muted-foreground">
+          {notice}
+        </span>
+      ) : null}
+    </div>
+  )
+}
+
 export function EditorTimelineZoomControls() {
   const { isTimelineFit, timelineClips } = useEditorCanvasTimeline()
   const { zoomTimelineOut, zoomTimelineIn, fitTimelineToWidth } =
@@ -628,10 +894,10 @@ export function EditorTimelinePanel() {
   const isDraggingActionRef = useRef(false)
   const [isZoomGhostActive, setIsZoomGhostActive] = useState(false)
   const [timelinePanelWidth, setTimelinePanelWidth] = useState(0)
-  const { videos, selectedItemId } = useEditorCanvasMedia()
-  const { selectItem } = useEditorCanvasActions()
+  const { videos } = useEditorCanvasMedia()
   const {
     timelineClips,
+    selectedTimelineClip,
     zoomClips,
     selectedZoomClipId,
     timelineTime,
@@ -651,6 +917,7 @@ export function EditorTimelinePanel() {
     moveZoomClip,
     resizeZoomClip,
     selectZoomClip,
+    selectTimelineClip,
     subscribeTimelineTicks,
     updateHoverPreviewTime,
     subscribeHoverTime,
@@ -664,16 +931,25 @@ export function EditorTimelinePanel() {
     () => new Map(timelineClips.map((clip) => [clip.id, clip])),
     [timelineClips]
   )
+  const selectedClipIds = useMemo(
+    () =>
+      new Set(
+        selectedTimelineClip
+          ? linkedClipIds(timelineClips, selectedTimelineClip.id)
+          : []
+      ),
+    [selectedTimelineClip, timelineClips]
+  )
   const rows = useMemo(
     () =>
       buildTimelineRows({
         clips: timelineClips,
         videos,
-        selectedItemId,
+        selectedClipIds,
         zoomClips,
         selectedZoomClipId,
       }),
-    [selectedItemId, selectedZoomClipId, timelineClips, videos, zoomClips]
+    [selectedClipIds, selectedZoomClipId, timelineClips, videos, zoomClips]
   )
   const hasTimeline = rows.length > 0
   const timelineFitTarget = useMemo(
@@ -850,10 +1126,9 @@ export function EditorTimelinePanel() {
         return
       }
       moveTimelineClip(action.id, start, end)
-      const clip = clipById.get(action.id)
-      if (clip) selectItem(clip.videoId)
+      selectTimelineClip(action.id)
     },
-    [clipById, moveTimelineClip, moveZoomClip, selectItem, selectZoomClip]
+    [moveTimelineClip, moveZoomClip, selectTimelineClip, selectZoomClip]
   )
 
   const handleResizeEnd = useCallback(
@@ -875,10 +1150,9 @@ export function EditorTimelinePanel() {
         return
       }
       resizeTimelineClip(action.id, start, end, dir)
-      const clip = clipById.get(action.id)
-      if (clip) selectItem(clip.videoId)
+      selectTimelineClip(action.id)
     },
-    [clipById, resizeTimelineClip, resizeZoomClip, selectItem, selectZoomClip]
+    [resizeTimelineClip, resizeZoomClip, selectTimelineClip, selectZoomClip]
   )
 
   // Real-time clamp (return the corrected span) so a drag that crosses a
@@ -909,9 +1183,18 @@ export function EditorTimelinePanel() {
           Math.abs(clamped.end - end) < 1e-9
         return unchanged ? true : clamped
       }
-      return start >= 0
+      // Clips of one video may not overlap (one element plays them): slide
+      // flush against the nearest same-video neighbour of the committed span.
+      const clip = clipById.get(action.id)
+      if (!clip) return start >= 0
+      const { lo, hi } = siblingGap(timelineClips, clip)
+      const duration = end - start
+      if (hi - lo < duration - 1e-9) return false
+      const clampedStart = Math.min(Math.max(start, lo), hi - duration)
+      if (Math.abs(clampedStart - start) < 1e-9) return true
+      return { start: clampedStart, end: clampedStart + duration }
     },
-    [timelineDuration, zoomClips]
+    [clipById, timelineClips, timelineDuration, zoomClips]
   )
 
   const validateResize = useCallback(
@@ -951,16 +1234,24 @@ export function EditorTimelinePanel() {
       const duration = end - start
       if (duration < MIN_CLIP_DURATION_SECONDS) return false
 
+      // Source bounds (timeline length = source span / speed) and same-video
+      // neighbours bound the moving edge; clamp flush instead of rejecting.
+      const speed = clipSpeed(clip)
+      const { lo, hi } = siblingGap(timelineClips, clip)
       if (dir === "left") {
-        return clip.end - start <= clip.sourceOut + 0.0001
+        const minStart = Math.max(lo, clip.end - clip.sourceOut / speed)
+        if (start >= minStart - 1e-9) return true
+        return { start: minStart, end }
       }
 
-      return (
-        end - clip.start <=
-        getVideoDurationSeconds(video) - clip.sourceIn + 0.0001
+      const maxEnd = Math.min(
+        hi,
+        clip.start + (getVideoDurationSeconds(video) - clip.sourceIn) / speed
       )
+      if (end <= maxEnd + 1e-9) return true
+      return { start, end: maxEnd }
     },
-    [clipById, timelineDuration, videoById, zoomClips]
+    [clipById, timelineClips, timelineDuration, videoById, zoomClips]
   )
 
   const renderAction = useCallback(
@@ -1058,8 +1349,7 @@ export function EditorTimelinePanel() {
                 selectZoomClip(action.zoomClipId)
                 return
               }
-              const clip = clipById.get(action.id)
-              if (clip) selectItem(clip.videoId)
+              selectTimelineClip(action.id)
             }}
             onActionMoveStart={handleActionDragStart}
             onActionResizeStart={handleActionDragStart}

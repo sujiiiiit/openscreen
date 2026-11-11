@@ -73,10 +73,14 @@ export interface RecorderSettings {
   // Sticky across recordings; the user manages the list manually via the
   // system audio menu.
   systemAudioApplications: string[]
-  // Opt-in keystroke capture. Mouse + cursor metadata is always recorded
-  // (Screen Studio-style sidecars); keystrokes are sensitive (plaintext typed
-  // text, incl. passwords) and additionally require macOS Input Monitoring
-  // permission, so they are off by default and gated behind this toggle.
+  // Keystroke capture (ON by default, togglable from the settings menu). Mouse
+  // + cursor metadata is always recorded (Screen Studio-style sidecars);
+  // keystrokes power the editor's typing behaviors — hide the cursor while
+  // typing and zoom to the text caret. They are sensitive (plaintext typed
+  // text, incl. passwords) and need macOS Input Monitoring; the native side
+  // no-ops key capture while the grant is missing. The sidecar's characters
+  // stay on disk in the project folder — main forwards only key timestamps
+  // to the renderer (see projects.ts `loadTypingSamples`).
   captureKeystrokes: boolean
   // Screen-recording quality (codec / container / resolution / etc.).
   // Persisted to a JSON file in userData so settings survive app restarts.
@@ -286,7 +290,7 @@ const state: RecorderState = {
     hideCursor: true,
     systemAudioScope: 'all',
     systemAudioApplications: [],
-    captureKeystrokes: false,
+    captureKeystrokes: true,
     recordingQuality: loadRecordingQualitySettings(),
   },
   sessionId: null,
@@ -577,6 +581,20 @@ function setCaptureKeystrokes(enabled: boolean): void {
   emitState()
 }
 
+// Keystroke capture is on by default, so the Input Monitoring prompt has to be
+// surfaced without the user ever touching the toggle. Fire-and-forget: TCC
+// only prompts while the state is notDetermined, and the recording never waits
+// on it (keys are simply skipped for a session that starts before the grant).
+function ensureKeystrokePermissionRequested(): void {
+  if (!state.settings.captureKeystrokes || process.platform !== 'darwin') return
+  try {
+    if (addon.getPermissions().inputMonitoring !== 'notDetermined') return
+  } catch {
+    return
+  }
+  addon.requestPermissions(['inputMonitoring']).catch(() => {})
+}
+
 function microphoneMenuTemplate(devices: AudioDevice[]): MenuItemConstructorOptions[] {
   const enabled = canChangeSettings()
   const template: MenuItemConstructorOptions[] = [
@@ -863,6 +881,7 @@ export async function startRecording(targetOverride?: CaptureTarget): Promise<Re
   state.lastError = null
   state.lastResult = null
   emitState()
+  ensureKeystrokePermissionRequested()
 
   try {
     const previousPreviewDeviceId = cameraPreviewDeviceId()
@@ -900,7 +919,8 @@ export async function startRecording(targetOverride?: CaptureTarget): Promise<Re
       // `hideCursor`/`includeCursor`: "Don't record cursor" only removes the
       // cursor from the recorded video pixels — the cursor *metadata* is still
       // captured so an editor can redraw a restyled cursor from it. Keystrokes
-      // are opt-in (and gated by Input Monitoring on the native side).
+      // (+ text-caret rects when Accessibility is granted) follow the settings
+      // toggle, on by default, gated by Input Monitoring on the native side.
       captureInput: true,
       captureCursorShapes: true,
       captureKeyStrokes: state.settings.captureKeystrokes,

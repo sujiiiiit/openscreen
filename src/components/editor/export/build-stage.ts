@@ -374,6 +374,8 @@ async function buildExportCursor(
           width: state.artboard.width,
           height: state.artboard.height,
         },
+        // Default-on like the editor (`!== false` matches the validator).
+        hideWhileTyping: state.artboard.cursorHideWhileTyping !== false,
       }
       motionBlur = clampCursorMotionBlur(
         state.artboard.cursorMotionBlur ?? CURSOR_MOTION_BLUR_DEFAULT

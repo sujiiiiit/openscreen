@@ -28,6 +28,9 @@ export type HistoryCommitTag =
   | "cursor-click-press-scale"
   | "cursor-always-use-pointer"
   | "cursor-type-stabilization"
+  | "cursor-hide-while-typing"
+  | "zoom-follow-typing-caret"
+  | "auto-zoom-on-typing"
   | "cursor-motion-rotation"
   | "cursor-motion-blur"
   | "cursor-motion-blur-backend"
@@ -40,6 +43,11 @@ export type HistoryCommitTag =
   | "zoom-remove"
   | "zoom-auto-generate"
   | "zoom-regenerate"
+  | "clip-split"
+  | "clip-delete"
+  | "clip-speed"
+  | "clip-hide-cursor"
+  | "clip-auto-speed"
   | "unknown"
 
 export interface HistoryEntry {
@@ -76,6 +84,13 @@ export const ALWAYS_NEW_ENTRY_TAGS: ReadonlySet<HistoryCommitTag> = new Set([
   // Manual "Regenerate auto-zoom" replaces the whole Zoom track in one shot,
   // so it is likewise a single atomic undo step.
   "zoom-regenerate",
+  // Timeline clip edits (split / ripple delete / speed / hide cursor / auto
+  // speed-up) are discrete structural actions: one undo step each.
+  "clip-split",
+  "clip-delete",
+  "clip-speed",
+  "clip-hide-cursor",
+  "clip-auto-speed",
 ])
 
 export function createEmptyHistory(): EditorHistory {

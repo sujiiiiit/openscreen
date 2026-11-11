@@ -3,6 +3,7 @@
 import { ArtboardPresetDropdown } from "@/components/editor/canvas/artboard-preset-dropdown"
 import { CanvasZoomMenu } from "@/components/editor/canvas/canvas-zoom-menu"
 import {
+  EditorTimelineClipTools,
   EditorTimelineControls,
   EditorTimelinePanel,
   EditorTimelineZoomControls,
@@ -12,8 +13,9 @@ export default function EditorFooter() {
   return (
     <div className="flex h-full min-h-0 w-full flex-col bg-background text-foreground">
       <div className="grid h-12 shrink-0 grid-cols-[minmax(220px,1fr)_auto_minmax(220px,1fr)] items-center gap-3 bg-transparent px-4">
-        <div className="flex min-w-0 items-center">
+        <div className="flex min-w-0 items-center gap-2">
           <ArtboardPresetDropdown />
+          <EditorTimelineClipTools />
         </div>
         <EditorTimelineControls />
         <div className="flex min-w-0 items-center justify-end gap-4">
