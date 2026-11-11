@@ -147,3 +147,29 @@ describe("planExportFrames", () => {
     expect(lastEntry[0].sourceTimeSec).toBeCloseTo(60 - 1 / 60, 5)
   })
 })
+
+describe("planExportFrames — clip speed", () => {
+  it("advances source time speed× per timeline second", () => {
+    const fast: ProjectTimelineClip = {
+      id: "s",
+      videoId: "a",
+      start: 1,
+      end: 2,
+      sourceIn: 10,
+      sourceOut: 14,
+      speed: 4,
+    }
+    const plan = planExportFrames({ clips: [fast], totalFrames: 9, fps: 4 })
+    // frames 4..7 → t = 1, 1.25, 1.5, 1.75 → source 10, 11, 12, 13
+    expect(plan.sourceTimelinesByVideoId.get("a")).toEqual([10, 11, 12, 13])
+  })
+
+  it("keeps a split recording continuous across the cut", () => {
+    const clips: ProjectTimelineClip[] = [
+      { id: "l", videoId: "a", start: 0, end: 1, sourceIn: 0, sourceOut: 1 },
+      { id: "r", videoId: "a", start: 1, end: 2, sourceIn: 1, sourceOut: 3, speed: 2 },
+    ]
+    const plan = planExportFrames({ clips, totalFrames: 4, fps: 2 })
+    expect(plan.sourceTimelinesByVideoId.get("a")).toEqual([0, 0.5, 1, 2])
+  })
+})

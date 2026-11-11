@@ -76,6 +76,9 @@ export function serializeArtboard(artboard: EditorArtboard): ProjectArtboard {
     cursorClickPressScale: artboard.cursorClickPressScale,
     cursorAlwaysUsePointer: artboard.cursorAlwaysUsePointer,
     cursorTypeStabilization: artboard.cursorTypeStabilization,
+    cursorHideWhileTyping: artboard.cursorHideWhileTyping,
+    zoomFollowTypingCaret: artboard.zoomFollowTypingCaret,
+    autoZoomOnTyping: artboard.autoZoomOnTyping,
   }
 }
 
@@ -136,6 +139,10 @@ export function serializeTimelineClip(
     end: clip.end,
     sourceIn: clip.sourceIn,
     sourceOut: clip.sourceOut,
+    ...(clip.speed !== undefined && clip.speed !== 1
+      ? { speed: clip.speed }
+      : {}),
+    ...(clip.hideCursor ? { hideCursor: true } : {}),
   }
 }
 
@@ -282,6 +289,10 @@ export function projectClipToCanvasClip(
     end: clip.end,
     sourceIn: clip.sourceIn,
     sourceOut: clip.sourceOut,
+    ...(clip.speed !== undefined && clip.speed !== 1
+      ? { speed: clip.speed }
+      : {}),
+    ...(clip.hideCursor ? { hideCursor: true } : {}),
   }
 }
 

@@ -96,6 +96,16 @@ export interface ProjectArtboard {
   // Debounce brief cursor-shape flickers at track-build time. Optional +
   // defaulted to false for old project.json files.
   cursorTypeStabilization?: boolean
+  // Hide the rendered cursor while the user types (until the mouse moves or
+  // clicks). Optional + defaulted to TRUE for old project.json files — older
+  // recordings carry no keystroke sidecar, so the default is a visual no-op.
+  cursorHideWhileTyping?: boolean
+  // While typing, auto-mode Zoom clips follow the recorded text caret instead
+  // of the (hidden) mouse cursor. Optional + defaulted to true.
+  zoomFollowTypingCaret?: boolean
+  // Auto-zoom generation also creates Zoom clips for typing bursts (not just
+  // clicks). Generation-only. Optional + defaulted to true.
+  autoZoomOnTyping?: boolean
 }
 
 export type ProjectVideoRole = "screen" | "camera" | "media"
@@ -143,6 +153,12 @@ export interface ProjectTimelineClip {
   end: number
   sourceIn: number
   sourceOut: number
+  // Playback speed (timeline length = (sourceOut − sourceIn) / speed). Optional
+  // (absent = 1×) so pre-speed project.json files keep loading.
+  speed?: number
+  // Per-clip "Hide cursor": the custom cursor fades out across this clip (same
+  // fade as hide-while-typing). Optional (absent = shown).
+  hideCursor?: boolean
 }
 
 // Manual zoom-track segment (timeline seconds). The optional settings were
@@ -356,6 +372,10 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
   })()
   const cursorAlwaysUsePointer = value["cursorAlwaysUsePointer"] === true
   const cursorTypeStabilization = value["cursorTypeStabilization"] === true
+  // Default-on booleans: only an explicit `false` turns them off.
+  const cursorHideWhileTyping = value["cursorHideWhileTyping"] !== false
+  const zoomFollowTypingCaret = value["zoomFollowTypingCaret"] !== false
+  const autoZoomOnTyping = value["autoZoomOnTyping"] !== false
 
   return {
     presetId: presetId as ProjectArtboardPresetId,
@@ -374,6 +394,9 @@ function parseArtboard(value: unknown): ProjectArtboard | null {
     cursorClickPressScale,
     cursorAlwaysUsePointer,
     cursorTypeStabilization,
+    cursorHideWhileTyping,
+    zoomFollowTypingCaret,
+    autoZoomOnTyping,
   }
 }
 
@@ -511,7 +534,7 @@ function parseTimelineClip(value: unknown): ProjectTimelineClip | null {
   ) {
     return null
   }
-  return {
+  const clip: ProjectTimelineClip = {
     id: value["id"] as string,
     videoId: value["videoId"] as string,
     start: value["start"] as number,
@@ -519,6 +542,14 @@ function parseTimelineClip(value: unknown): ProjectTimelineClip | null {
     sourceIn: value["sourceIn"] as number,
     sourceOut: value["sourceOut"] as number,
   }
+  // Optional fields: invalid values are dropped (→ defaults), never rejected,
+  // so a malformed speed can't discard the clip.
+  if (isFiniteNumber(value["speed"]) && (value["speed"] as number) > 0) {
+    const speed = clampRange(value["speed"] as number, 0.25, 16)
+    if (speed !== 1) clip.speed = speed
+  }
+  if (value["hideCursor"] === true) clip.hideCursor = true
+  return clip
 }
 
 const ZOOM_EASE_PRESETS = ["smooth", "snappy", "slow"] as const

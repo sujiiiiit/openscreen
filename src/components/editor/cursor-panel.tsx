@@ -9,6 +9,7 @@ import { ArrowDown01Icon } from "@hugeicons/core-free-icons"
 import { Button } from "@/components/ui/button"
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
+import { PanelGroup, SwitchRow } from "@/components/editor/panel-group"
 import { cn } from "@/lib/utils"
 import {
   CURSOR_CLICK_PRESS_SCALE_DEFAULT,
@@ -296,7 +297,8 @@ function CursorStylePicker({
 export function CursorPanel() {
   const { artboard } = useEditorCanvasArtboard()
   const { videos } = useEditorCanvasMedia()
-  const { cursorTrackUnavailable } = useEditorCanvasCursorData()
+  const { cursorTrackUnavailable, typingDataAvailable } =
+    useEditorCanvasCursorData()
   const {
     setCursorCustomRenderingEnabled,
     setCursorSetId,
@@ -305,12 +307,11 @@ export function CursorPanel() {
     setCursorClickPressScale,
     setCursorAlwaysUsePointer,
     setCursorTypeStabilization,
+    setCursorHideWhileTyping,
     setCursorMotionRotation,
     setCursorMotionBlur,
   } = useEditorCanvasActions()
   const customRenderingSwitchId = useId()
-  const alwaysUsePointerSwitchId = useId()
-  const typeStabilizationSwitchId = useId()
 
   // The recorded cursor is drawn over the screen recording, so the control is
   // meaningless without one — disable it rather than move a slider that does
@@ -359,6 +360,7 @@ export function CursorPanel() {
   const cursorControlsDisabled = !hasScreenVideo || !customRenderingEnabled
   const alwaysUsePointer = artboard.cursorAlwaysUsePointer
   const typeStabilization = artboard.cursorTypeStabilization
+  const hideWhileTyping = artboard.cursorHideWhileTyping
   const cursorSetId = artboard.cursorSetId
 
   return (
@@ -386,248 +388,248 @@ export function CursorPanel() {
         ) : null}
       </header>
 
-      <div className="flex w-full flex-col gap-9">
-        <div className="w-full space-y-4">
-          <div className="flex items-center">
-            <h4 className="text-xs font-semibold transition-opacity select-none">
-              Cursor style
-            </h4>
+      <div className="flex w-full flex-col gap-7">
+        <PanelGroup title="Appearance">
+          <div className="w-full space-y-4">
+            <div className="flex items-center">
+              <h4 className="text-xs font-semibold transition-opacity select-none">
+                Cursor style
+              </h4>
+            </div>
+            <CursorStylePicker
+              disabled={false}
+              value={cursorSetId}
+              onValueChange={setCursorSetId}
+            />
           </div>
-          <CursorStylePicker
-            disabled={false}
-            value={cursorSetId}
-            onValueChange={setCursorSetId}
-          />
-        </div>
 
-        <div className="flex w-full items-center justify-between gap-3">
-          <label
-            htmlFor={alwaysUsePointerSwitchId}
-            className={cn(
-              "text-xs font-semibold transition-opacity select-none",
-              cursorControlsDisabled && "opacity-50"
-            )}
-          >
-            Always use pointer
-          </label>
-          <Switch
-            id={alwaysUsePointerSwitchId}
-            size="sm"
+          <div className="w-full space-y-2">
+            <div className="flex items-center">
+              <h4
+                className={cn(
+                  "text-xs font-semibold transition-opacity select-none",
+                  cursorControlsDisabled && "opacity-50"
+                )}
+              >
+                Size
+              </h4>
+            </div>
+            <div className="flex w-full items-center gap-3">
+              <Slider
+                size="sm"
+                value={[sizePct]}
+                onValueChange={(values) =>
+                  applyPct(Array.isArray(values) ? values[0] : values)
+                }
+                min={SIZE_MIN_PCT}
+                max={SIZE_MAX_PCT}
+                disabled={cursorControlsDisabled}
+                showValueTooltip
+                formatValue={(v) => `${Math.round(v)}%`}
+                className="flex-1"
+              />
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                onClick={() => applyPct(SIZE_DEFAULT_PCT)}
+                disabled={cursorControlsDisabled || isDefault}
+              >
+                Reset
+              </Button>
+            </div>
+          </div>
+        </PanelGroup>
+
+        <PanelGroup title="Behavior">
+          <SwitchRow
+            label="Always use pointer"
+            description="Draw the arrow pointer for every cursor shape."
             checked={alwaysUsePointer}
             onCheckedChange={setCursorAlwaysUsePointer}
             disabled={cursorControlsDisabled}
           />
-        </div>
-
-        <div className="flex w-full items-center justify-between gap-3">
-          <label
-            htmlFor={typeStabilizationSwitchId}
-            className={cn(
-              "text-xs font-semibold transition-opacity select-none",
-              (cursorControlsDisabled || alwaysUsePointer) && "opacity-50"
-            )}
-          >
-            Stabilize cursor type
-          </label>
-          <Switch
-            id={typeStabilizationSwitchId}
-            size="sm"
+          <SwitchRow
+            label="Stabilize cursor type"
+            description="Ignore cursor-shape flickers shorter than a blink."
             checked={typeStabilization}
             onCheckedChange={setCursorTypeStabilization}
             disabled={cursorControlsDisabled || alwaysUsePointer}
           />
-        </div>
+        </PanelGroup>
 
-        <div className="w-full space-y-2">
-          <div className="flex items-center">
-            <h4
+        <PanelGroup title="Typing">
+          <SwitchRow
+            label="Hide cursor while typing"
+            description="Fades the cursor out while you type, until the mouse moves or clicks."
+            checked={hideWhileTyping}
+            onCheckedChange={setCursorHideWhileTyping}
+            disabled={cursorControlsDisabled}
+          />
+          {hasScreenVideo && !typingDataAvailable ? (
+            <p className="text-xs text-muted-foreground select-none">
+              This recording has no typing data. Keep &ldquo;Capture
+              keystrokes&rdquo; on in the recorder menu (and grant Input
+              Monitoring) to use typing features.
+            </p>
+          ) : null}
+        </PanelGroup>
+
+        <PanelGroup title="Motion">
+          <div className="w-full space-y-2">
+            <div
               className={cn(
-                "text-xs font-semibold transition-opacity select-none",
+                "space-y-1 transition-opacity select-none",
                 cursorControlsDisabled && "opacity-50"
               )}
             >
-              Size
-            </h4>
+              <h4 className="text-xs font-semibold">Smoothing</h4>
+              <p className="text-xs text-muted-foreground">
+                How quickly the cursor glides along the recorded path.
+              </p>
+            </div>
+            <div className="flex w-full items-center gap-2">
+              <SelectionPills
+                ariaLabel="Cursor smoothing"
+                disabled={cursorControlsDisabled}
+                options={SMOOTHING_OPTIONS}
+                size="xs"
+                value={smoothingMode}
+                onValueChange={setCursorSmoothingMode}
+              />
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                onClick={() =>
+                  setCursorSmoothingMode(CURSOR_SMOOTHING_MODE_DEFAULT)
+                }
+                disabled={cursorControlsDisabled || isSmoothingDefault}
+              >
+                Reset
+              </Button>
+            </div>
           </div>
-          <div className="flex w-full items-center gap-3">
-            <Slider
-              size="sm"
-              value={[sizePct]}
-              onValueChange={(values) =>
-                applyPct(Array.isArray(values) ? values[0] : values)
-              }
-              min={SIZE_MIN_PCT}
-              max={SIZE_MAX_PCT}
-              disabled={cursorControlsDisabled}
-              showValueTooltip
-              formatValue={(v) => `${Math.round(v)}%`}
-              className="flex-1"
-            />
-            <Button
-              type="button"
-              variant="link"
-              size="sm"
-              onClick={() => applyPct(SIZE_DEFAULT_PCT)}
-              disabled={cursorControlsDisabled || isDefault}
-            >
-              Reset
-            </Button>
-          </div>
-        </div>
 
-        <div className="w-full space-y-2">
-          <div
-            className={cn(
-              "space-y-1 transition-opacity select-none",
-              cursorControlsDisabled && "opacity-50"
-            )}
-          >
-            <h4 className="text-xs font-semibold">Smoothing</h4>
-            <p className="text-xs text-muted-foreground">
-              How quickly the cursor glides along the recorded path.
-            </p>
-          </div>
-          <div className="flex w-full items-center gap-2">
-            <SelectionPills
-              ariaLabel="Cursor smoothing"
-              disabled={cursorControlsDisabled}
-              options={SMOOTHING_OPTIONS}
-              size="xs"
-              value={smoothingMode}
-              onValueChange={setCursorSmoothingMode}
-            />
-            <Button
-              type="button"
-              variant="link"
-              size="sm"
-              onClick={() =>
-                setCursorSmoothingMode(CURSOR_SMOOTHING_MODE_DEFAULT)
-              }
-              disabled={cursorControlsDisabled || isSmoothingDefault}
+          <div className="w-full space-y-2">
+            <div
+              className={cn(
+                "space-y-1 transition-opacity select-none",
+                cursorControlsDisabled && "opacity-50"
+              )}
             >
-              Reset
-            </Button>
+              <h4 className="text-xs font-semibold">Click downscale</h4>
+              <p className="text-xs text-muted-foreground">
+                Shrinks the cursor on click for a press-down effect.
+              </p>
+            </div>
+            <div className="flex w-full items-center gap-3">
+              <Slider
+                size="sm"
+                value={[clickDownscalePct]}
+                onValueChange={(values) =>
+                  applyClickDownscalePct(
+                    Array.isArray(values) ? values[0] : values
+                  )
+                }
+                min={CLICK_DOWNSCALE_MIN_PCT}
+                max={CLICK_DOWNSCALE_MAX_PCT}
+                disabled={cursorControlsDisabled}
+                showValueTooltip
+                formatValue={(v) => `${Math.round(v)}%`}
+                className="flex-1"
+              />
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                onClick={() =>
+                  applyClickDownscalePct(CLICK_DOWNSCALE_DEFAULT_PCT)
+                }
+                disabled={cursorControlsDisabled || isClickDownscaleDefault}
+              >
+                Reset
+              </Button>
+            </div>
           </div>
-        </div>
 
-        <div className="w-full space-y-2">
-          <div
-            className={cn(
-              "space-y-1 transition-opacity select-none",
-              cursorControlsDisabled && "opacity-50"
-            )}
-          >
-            <h4 className="text-xs font-semibold">Click downscale</h4>
-            <p className="text-xs text-muted-foreground">
-              Shrinks the cursor on click for a press-down effect.
-            </p>
-          </div>
-          <div className="flex w-full items-center gap-3">
-            <Slider
-              size="sm"
-              value={[clickDownscalePct]}
-              onValueChange={(values) =>
-                applyClickDownscalePct(
-                  Array.isArray(values) ? values[0] : values
-                )
-              }
-              min={CLICK_DOWNSCALE_MIN_PCT}
-              max={CLICK_DOWNSCALE_MAX_PCT}
-              disabled={cursorControlsDisabled}
-              showValueTooltip
-              formatValue={(v) => `${Math.round(v)}%`}
-              className="flex-1"
-            />
-            <Button
-              type="button"
-              variant="link"
-              size="sm"
-              onClick={() =>
-                applyClickDownscalePct(CLICK_DOWNSCALE_DEFAULT_PCT)
-              }
-              disabled={cursorControlsDisabled || isClickDownscaleDefault}
+          <div className="w-full space-y-2">
+            <div
+              className={cn(
+                "space-y-1 transition-opacity select-none",
+                cursorControlsDisabled && "opacity-50"
+              )}
             >
-              Reset
-            </Button>
+              <h4 className="text-xs font-semibold">Side lean</h4>
+              <p className="text-xs text-muted-foreground">
+                Tilts the cursor sideways as it moves.
+              </p>
+            </div>
+            <div className="flex w-full items-center gap-3">
+              <Slider
+                size="sm"
+                value={[sideLeanPct]}
+                onValueChange={(values) =>
+                  applySideLeanPct(Array.isArray(values) ? values[0] : values)
+                }
+                min={0}
+                max={100}
+                disabled={cursorControlsDisabled}
+                showValueTooltip
+                formatValue={(v) => `${Math.round(v)}%`}
+                aria-label="Cursor side lean"
+                className="flex-1"
+              />
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                onClick={() => applySideLeanPct(SIDE_LEAN_DEFAULT_PCT)}
+                disabled={cursorControlsDisabled || isSideLeanDefault}
+              >
+                Reset
+              </Button>
+            </div>
           </div>
-        </div>
 
-        <div className="w-full space-y-2">
-          <div
-            className={cn(
-              "space-y-1 transition-opacity select-none",
-              cursorControlsDisabled && "opacity-50"
-            )}
-          >
-            <h4 className="text-xs font-semibold">Side lean</h4>
-            <p className="text-xs text-muted-foreground">
-              Tilts the cursor sideways as it moves.
-            </p>
-          </div>
-          <div className="flex w-full items-center gap-3">
-            <Slider
-              size="sm"
-              value={[sideLeanPct]}
-              onValueChange={(values) =>
-                applySideLeanPct(Array.isArray(values) ? values[0] : values)
-              }
-              min={0}
-              max={100}
-              disabled={cursorControlsDisabled}
-              showValueTooltip
-              formatValue={(v) => `${Math.round(v)}%`}
-              aria-label="Cursor side lean"
-              className="flex-1"
-            />
-            <Button
-              type="button"
-              variant="link"
-              size="sm"
-              onClick={() => applySideLeanPct(SIDE_LEAN_DEFAULT_PCT)}
-              disabled={cursorControlsDisabled || isSideLeanDefault}
+          <div className="w-full space-y-2">
+            <div
+              className={cn(
+                "space-y-1 transition-opacity select-none",
+                cursorControlsDisabled && "opacity-50"
+              )}
             >
-              Reset
-            </Button>
+              <h4 className="text-xs font-semibold">Motion blur</h4>
+              <p className="text-xs text-muted-foreground">
+                Blurs the cursor during fast movement.
+              </p>
+            </div>
+            <div className="flex w-full items-center gap-3">
+              <Slider
+                size="sm"
+                value={[blurPct]}
+                onValueChange={(values) =>
+                  applyBlurPct(Array.isArray(values) ? values[0] : values)
+                }
+                min={0}
+                max={100}
+                disabled={cursorControlsDisabled}
+                showValueTooltip
+                formatValue={(v) => `${Math.round(v)}%`}
+                className="flex-1"
+              />
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                onClick={() => applyBlurPct(BLUR_DEFAULT_PCT)}
+                disabled={cursorControlsDisabled || isBlurDefault}
+              >
+                Reset
+              </Button>
+            </div>
           </div>
-        </div>
-
-        <div className="w-full space-y-2">
-          <div
-            className={cn(
-              "space-y-1 transition-opacity select-none",
-              cursorControlsDisabled && "opacity-50"
-            )}
-          >
-            <h4 className="text-xs font-semibold">Motion blur</h4>
-            <p className="text-xs text-muted-foreground">
-              Blurs the cursor during fast movement.
-            </p>
-          </div>
-          <div className="flex w-full items-center gap-3">
-            <Slider
-              size="sm"
-              value={[blurPct]}
-              onValueChange={(values) =>
-                applyBlurPct(Array.isArray(values) ? values[0] : values)
-              }
-              min={0}
-              max={100}
-              disabled={cursorControlsDisabled}
-              showValueTooltip
-              formatValue={(v) => `${Math.round(v)}%`}
-              className="flex-1"
-            />
-            <Button
-              type="button"
-              variant="link"
-              size="sm"
-              onClick={() => applyBlurPct(BLUR_DEFAULT_PCT)}
-              disabled={cursorControlsDisabled || isBlurDefault}
-            >
-              Reset
-            </Button>
-          </div>
-        </div>
+        </PanelGroup>
       </div>
     </section>
   )

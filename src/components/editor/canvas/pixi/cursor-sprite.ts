@@ -26,7 +26,9 @@ function loadCursorImage(url: string): HTMLImageElement {
 }
 
 /** Decode a set of cursor SVGs up front (used by the export so the loop never waits). */
-export async function preloadCursorImages(urls: Iterable<string>): Promise<void> {
+export async function preloadCursorImages(
+  urls: Iterable<string>
+): Promise<void> {
   await Promise.all(
     Array.from(urls).map(async (url) => {
       try {
@@ -52,6 +54,8 @@ export type CursorPlaceOptions = {
   motionRotation: number
   smoothingMode: CursorSmoothingMode
   referenceSize: { width: number; height: number }
+  /** Fade the cursor out during recorded typing sessions (`typing-track.ts`). */
+  hideWhileTyping: boolean
 }
 
 /**
@@ -79,6 +83,8 @@ export class CursorSprite {
   /**
    * Place + blur the cursor at an explicit screen-recording source time.
    * `onSvgLoad` (editor only) re-places once a freshly-fetched SVG decodes.
+   * `alphaMultiplier` is the per-clip "Hide cursor" fade (`clipCursorAlphaAt`),
+   * multiplied onto the hide-while-typing alpha.
    */
   render(
     track: SmoothedCursorTrack,
@@ -86,10 +92,17 @@ export class CursorSprite {
     sourceSeconds: number,
     options: CursorPlaceOptions,
     motionBlurIntensity: number,
-    onSvgLoad?: () => void
+    onSvgLoad?: () => void,
+    alphaMultiplier = 1
   ): void {
     const placement = placeCursor(track, video, sourceSeconds, options)
     if (!placement || placement.width <= 0 || placement.height <= 0) {
+      this.hide()
+      return
+    }
+    const alpha = placement.alpha * alphaMultiplier
+    // Fully faded (hide-while-typing / hidden clip): skip texture/blur work.
+    if (alpha <= 0.001) {
       this.hide()
       return
     }
@@ -128,6 +141,7 @@ export class CursorSprite {
       this.filtered = wantBlur
     }
 
+    this.sprite.alpha = alpha
     this.sprite.visible = placement.onScreen
   }
 

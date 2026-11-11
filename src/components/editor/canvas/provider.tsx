@@ -88,8 +88,29 @@ import {
   clampCursorSmoothingMode,
   projectFolderFromObjectUrl,
 } from "@/components/editor/canvas/cursor-scene"
-import { autoZoomClicksFromCursorData } from "@/components/editor/canvas/auto-zoom-scene"
+import {
+  autoZoomClicksFromCursorData,
+  autoZoomTypingFromCursorData,
+} from "@/components/editor/canvas/auto-zoom-scene"
 import { generateZoomClipsFromClicks } from "@/lib/auto-zoom/generate-from-clicks"
+import {
+  planAutoSpeedRanges,
+  type AutoSpeedOptions,
+} from "@/lib/auto-speed/plan-auto-speed"
+import {
+  IDENTITY_REMAP,
+  applySourceSpeedRanges,
+  clipSpeed,
+  linkedClipIds,
+  remapZoomClips,
+  rippleDeleteTimelineClips,
+  setTimelineClipsHideCursor,
+  setTimelineClipsSpeed,
+  sourceToTimelineSeconds,
+  splitTimelineClipsAt,
+  timelineToSourceSeconds,
+  type TimeRemap,
+} from "@/lib/timeline-edits"
 import {
   ARTBOARD_PADDING_MAX,
   applyAutoLayout,
@@ -114,6 +135,9 @@ const DEFAULT_ARTBOARD: EditorArtboard = {
   cursorClickPressScale: CURSOR_CLICK_PRESS_SCALE_DEFAULT,
   cursorAlwaysUsePointer: false,
   cursorTypeStabilization: false,
+  cursorHideWhileTyping: true,
+  zoomFollowTypingCaret: true,
+  autoZoomOnTyping: true,
 }
 const DEFAULT_VIEW_TRANSFORM = getFitViewTransform(
   DEFAULT_VIEWPORT_SIZE,
@@ -229,6 +253,7 @@ type EditorCanvasContextValue = {
    * drives the inline notice in the cursor settings panel.
    */
   reportCursorTrackUnavailable: (unavailable: boolean) => void
+  reportTypingDataAvailable: (available: boolean) => void
   selectItem: (id: string | null) => void
   updateVideoAppearance: (id: string, patch: CanvasVideoAppearancePatch) => void
   deleteVideo: (id: string) => void
@@ -244,6 +269,9 @@ type EditorCanvasContextValue = {
   setCursorClickPressScale: (scale: number) => void
   setCursorAlwaysUsePointer: (enabled: boolean) => void
   setCursorTypeStabilization: (enabled: boolean) => void
+  setCursorHideWhileTyping: (enabled: boolean) => void
+  setZoomFollowTypingCaret: (enabled: boolean) => void
+  setAutoZoomOnTyping: (enabled: boolean) => void
   setCursorMotionRotation: (amount: number) => void
   setCursorMotionBlur: (intensity: number) => void
   setViewportSize: (size: CanvasSize) => ViewTransform
@@ -288,6 +316,24 @@ type EditorCanvasContextValue = {
   updateZoomClip: (id: string, patch: CanvasZoomClipPatch) => void
   removeZoomClip: (id: string) => void
   selectZoomClip: (id: string | null) => void
+  /** Select one timeline clip (segment); also selects its video. */
+  selectTimelineClip: (id: string | null) => void
+  /** Split every clip under the playhead (all tracks stay linked). */
+  splitTimelineAtPlayhead: () => void
+  /**
+   * Ripple-delete a clip's linked group. Returns false (nothing done) when that
+   * would remove a video's last clip — the caller detaches the video instead.
+   */
+  deleteTimelineClip: (id: string) => boolean
+  /** Re-time a clip's linked group (ripples later clips + Zoom clips). */
+  setTimelineClipSpeed: (id: string, speed: number) => void
+  /** Per-clip "Hide cursor" on a clip's linked group. */
+  setTimelineClipHideCursor: (id: string, hide: boolean) => void
+  /**
+   * Detect typing / idle stretches in the recording and speed them up. Resolves
+   * to the number of segments re-timed, or null when cursor data is unavailable.
+   */
+  applyAutoSpeed: (options: AutoSpeedOptions) => Promise<number | null>
   /** Re-run the auto-zoom detector on demand, replacing the Zoom track. */
   regenerateAutoZoom: () => void
   subscribeTimelineTicks: (subscriber: TimelineTickSubscriber) => () => void
@@ -331,6 +377,7 @@ type EditorCanvasActionsContextValue = Pick<
   EditorCanvasContextValue,
   | "addRemoteVideo"
   | "reportCursorTrackUnavailable"
+  | "reportTypingDataAvailable"
   | "selectItem"
   | "updateVideoAppearance"
   | "deleteVideo"
@@ -346,6 +393,9 @@ type EditorCanvasActionsContextValue = Pick<
   | "setCursorClickPressScale"
   | "setCursorAlwaysUsePointer"
   | "setCursorTypeStabilization"
+  | "setCursorHideWhileTyping"
+  | "setZoomFollowTypingCaret"
+  | "setAutoZoomOnTyping"
   | "setCursorMotionRotation"
   | "setCursorMotionBlur"
   | "setViewportSize"
@@ -377,6 +427,12 @@ type EditorCanvasTimelineActionsContextValue = Pick<
   | "updateZoomClip"
   | "removeZoomClip"
   | "selectZoomClip"
+  | "selectTimelineClip"
+  | "splitTimelineAtPlayhead"
+  | "deleteTimelineClip"
+  | "setTimelineClipSpeed"
+  | "setTimelineClipHideCursor"
+  | "applyAutoSpeed"
   | "regenerateAutoZoom"
   | "subscribeTimelineTicks"
   | "stepTimelineFrame"
@@ -393,6 +449,9 @@ type EditorCanvasSaveStatusContextValue = {
 // hot canvas paths.
 type EditorCanvasCursorDataContextValue = {
   cursorTrackUnavailable: boolean
+  // Whether the loaded recording carries typing keystrokes (drives the typing
+  // settings' "no typing data" hint). Session-only, like the flag above.
+  typingDataAvailable: boolean
 }
 
 type EditorCanvasHistoryContextValue = {
@@ -523,6 +582,20 @@ function createTimelineClipId(videoId: string) {
   return `${videoId}:clip`
 }
 
+// Ids for the right half of a split (and auto-speed cuts): unique per clip.
+function createSplitClipId(clip: CanvasTimelineClip) {
+  return `${clip.videoId}:clip-${crypto.randomUUID().slice(0, 8)}`
+}
+
+// A re-timed clip plays its element at the clip speed. Off-1× clips are silent
+// (volume 0 — `muted` belongs to the video controller's primary-audio logic),
+// matching the export, which skips their audio (`decode-audio.ts`).
+function applyClipPlaybackRate(element: HTMLVideoElement, speed: number) {
+  if (element.playbackRate !== speed) element.playbackRate = speed
+  const volume = speed === 1 ? 1 : 0
+  if (element.volume !== volume) element.volume = volume
+}
+
 function getVideoDurationSeconds(video: Pick<CanvasVideoItem, "durationMs">) {
   const duration = video.durationMs / 1000
   return Number.isFinite(duration) && duration > 0
@@ -644,6 +717,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   // Session-only: the canvas reported that cursor sidecar data could not be
   // loaded for the current screen recording. Not persisted.
   const [cursorTrackUnavailable, setCursorTrackUnavailable] = useState(false)
+  const [typingDataAvailable, setTypingDataAvailable] = useState(false)
   const [timelineClips, setTimelineClips] = useState<CanvasTimelineClip[]>([])
   // Manual Zoom-track clips (persisted) + the session-only selected zoom clip.
   // Selection is intentionally NOT persisted (mirrors `selectedItemId`).
@@ -679,6 +753,14 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   )
   const zoomClipsRef = useRef(zoomClips)
   const selectedZoomClipIdRef = useRef(selectedZoomClipId)
+  // Session-only: the timeline segment the user clicked (a video can have
+  // several clips once split). Validated against `selectedItemId` on read.
+  const [selectedTimelineClipId, setSelectedTimelineClipId] = useState<
+    string | null
+  >(null)
+  // Last clip each element was seeked into — playback re-seeks when the
+  // playhead crosses into a different clip of the same video.
+  const activeClipIdByVideoRef = useRef(new Map<string, string>())
   const timelineTimeRef = useRef(timelineTime)
   const timelineDurationRef = useRef(0)
   const isTimelinePlayingRef = useRef(isTimelinePlaying)
@@ -1170,7 +1252,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       clip.end >= timelineEnd - TIMELINE_END_HOLD_EPSILON_SECONDS
     const active = isPlayingThroughClip || isHoldingLastFrame
     const sourceTime = isPlayingThroughClip
-      ? sourceIn + (time - clip.start)
+      ? timelineToSourceSeconds(clip, time)
       : isHoldingLastFrame
         ? Math.max(sourceIn, sourceOut - TIMELINE_END_HOLD_EPSILON_SECONDS)
         : sourceIn
@@ -1179,6 +1261,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       active,
       sourceTime: Math.max(sourceIn, Math.min(sourceTime, sourceOut)),
       sourceDuration,
+      clipId: clip.id,
+      speed: clipSpeed(clip),
     }
   }, [])
 
@@ -1403,11 +1487,13 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       const frame = resolveTimelineFrame(videoId, time)
       if (!frame || !frame.active) {
         clearCommittedEntry(videoId)
+        activeClipIdByVideoRef.current.delete(videoId)
         if (!element.paused) element.pause()
         return
       }
 
-      if (element.playbackRate !== 1) element.playbackRate = 1
+      activeClipIdByVideoRef.current.set(videoId, frame.clipId)
+      applyClipPlaybackRate(element, frame.speed)
       const seekableTime = getSeekableTimelineSourceTime(
         element,
         frame.sourceTime,
@@ -1462,7 +1548,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         return
       }
 
-      if (element.playbackRate !== 1) element.playbackRate = 1
+      applyClipPlaybackRate(element, frame.speed)
       safePlayElement(element)
 
       const seekableTime = getSeekableTimelineSourceTime(
@@ -1470,9 +1556,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         frame.sourceTime,
         frame.sourceDuration
       )
+      // Drift is measured in source seconds, which pass `speed`× faster.
       if (
         Math.abs(element.currentTime - seekableTime) >
-        TIMELINE_PLAYBACK_DRIFT_SECONDS
+        TIMELINE_PLAYBACK_DRIFT_SECONDS * frame.speed
       ) {
         safeSeekElement(element, seekableTime)
       }
@@ -1575,13 +1662,23 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         const element = timelineVideoElementsRef.current.get(videoId)
         if (!element) return
 
-        if (!currentVisibleIds.has(videoId)) {
+        // Newly visible, or the playhead crossed into another clip of this
+        // video (a split / re-timed segment): precise seek + the clip's rate.
+        const clip = findTimelineClipAt(
+          timelineClipsByVideoIdRef.current.get(videoId),
+          time,
+          timelineDurationRef.current
+        )
+        if (
+          !currentVisibleIds.has(videoId) ||
+          (clip && activeClipIdByVideoRef.current.get(videoId) !== clip.id)
+        ) {
           seekElementToTimeline(videoId, element, time, true)
           return
         }
 
         if (videoId === masterVideoId) {
-          if (element.playbackRate !== 1) element.playbackRate = 1
+          applyClipPlaybackRate(element, clip ? clipSpeed(clip) : 1)
           safePlayElement(element)
           return
         }
@@ -1651,7 +1748,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       )
       if (!element || !clip || !Number.isFinite(element.currentTime)) continue
 
-      const projectedTime = clip.start + (element.currentTime - clip.sourceIn)
+      const projectedTime = sourceToTimelineSeconds(clip, element.currentTime)
       const boundedTime = Math.min(
         clip.end,
         Math.max(clip.start, projectedTime)
@@ -2051,8 +2148,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           !masterElement.paused &&
           Number.isFinite(masterElement.currentTime)
         ) {
-          const projected =
-            masterClip.start + (masterElement.currentTime - masterClip.sourceIn)
+          const projected = sourceToTimelineSeconds(
+            masterClip,
+            masterElement.currentTime
+          )
           // Only trust the master clock when it's near the rAF projection; a
           // wild jump (e.g., after a tab-visibility gap) keeps the rAF
           // estimate so the cursor doesn't snap unexpectedly.
@@ -2345,39 +2444,58 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   // clustering auto-zoom generator (Cap's model). Returns the generated clips,
   // or `null` when generation could not run at all (no active project / screen /
   // folder / cursor data, or the project switched mid-read). Never throws.
+  // The screen recording + its captured cursor/keystroke data, or null when
+  // there is no recording or its sidecars can't be read. Shared by auto-zoom
+  // and auto-speed. Null too if the project switched during the async read.
+  const loadScreenCursorData = useCallback(async () => {
+    const activeProject = project
+    if (!activeProject) return null
+    const screen = videosRef.current.find((video) => video.role === "screen")
+    if (!screen || screen.source.kind !== "recording") return null
+    const folder =
+      activeProject.path ?? projectFolderFromObjectUrl(screen.objectUrl)
+    if (!folder) return null
+    const data = await window.api?.projects.getCursorData(folder)
+    if (hydratedProjectIdRef.current !== activeProject.id) return null
+    if (!data) return null
+    return { screen, data, projectId: activeProject.id }
+  }, [project])
+
   const computeAutoZoomClips = useCallback(async (): Promise<
     CanvasZoomClip[] | null
   > => {
-    const activeProject = project
-    if (!activeProject) return null
     try {
-      const screen = videosRef.current.find((video) => video.role === "screen")
-      if (!screen || screen.source.kind !== "recording") return null
-      const folder =
-        activeProject.path ?? projectFolderFromObjectUrl(screen.objectUrl)
-      if (!folder) return null
-      const data = await window.api?.projects.getCursorData(folder)
-      // The project may have switched during the async read.
-      if (hydratedProjectIdRef.current !== activeProject.id) return null
-      if (!data) return null
+      const loaded = await loadScreenCursorData()
+      if (!loaded) return null
+      const { screen, data } = loaded
       const screenClips = timelineClipsRef.current
         .filter((clip) => clip.videoId === screen.id)
         .sort((a, b) => a.start - b.start || a.end - b.end)
       if (screenClips.length === 0) return null
 
-      const clicks = autoZoomClicksFromCursorData(data, screen, screenClips, {
+      const artboardSize = {
         width: artboardRef.current.width,
         height: artboardRef.current.height,
-      })
+      }
+      const clicks = autoZoomClicksFromCursorData(
+        data,
+        screen,
+        screenClips,
+        artboardSize
+      )
+      const typing = artboardRef.current.autoZoomOnTyping
+        ? autoZoomTypingFromCursorData(data, screen, screenClips, artboardSize)
+        : []
       return generateZoomClipsFromClicks(
         clicks,
-        getTimelineDurationForClips(timelineClipsRef.current)
+        getTimelineDurationForClips(timelineClipsRef.current),
+        typing
       )
     } catch (error) {
       console.warn("[provider] auto-zoom generation failed:", error)
       return null
     }
-  }, [project])
+  }, [loadScreenCursorData])
 
   // One-shot auto-zoom generation. On the first open of a fresh recording the
   // slow path arms `autoZoomPendingRef`; once the screen recording and its
@@ -2541,6 +2659,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         artboardRef.current.cursorAlwaysUsePointer
       const prevCursorTypeStabilization =
         artboardRef.current.cursorTypeStabilization
+      const prevCursorHideWhileTyping =
+        artboardRef.current.cursorHideWhileTyping
+      const prevZoomFollowTypingCaret =
+        artboardRef.current.zoomFollowTypingCaret
+      const prevAutoZoomOnTyping = artboardRef.current.autoZoomOnTyping
       let nextArtboard: EditorArtboard
       if (id === AUTO_ARTBOARD_PRESET_ID) {
         // Screen-source dims when hydration captured them, else the on-canvas
@@ -2565,6 +2688,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           cursorClickPressScale: prevCursorClickPressScale,
           cursorAlwaysUsePointer: prevCursorAlwaysUsePointer,
           cursorTypeStabilization: prevCursorTypeStabilization,
+          cursorHideWhileTyping: prevCursorHideWhileTyping,
+          zoomFollowTypingCaret: prevZoomFollowTypingCaret,
+          autoZoomOnTyping: prevAutoZoomOnTyping,
         }
       } else {
         const preset = getArtboardPreset(id)
@@ -2584,6 +2710,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           cursorClickPressScale: prevCursorClickPressScale,
           cursorAlwaysUsePointer: prevCursorAlwaysUsePointer,
           cursorTypeStabilization: prevCursorTypeStabilization,
+          cursorHideWhileTyping: prevCursorHideWhileTyping,
+          zoomFollowTypingCaret: prevZoomFollowTypingCaret,
+          autoZoomOnTyping: prevAutoZoomOnTyping,
         }
       }
 
@@ -2635,6 +2764,16 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
             start: nextStart,
             end: nextStart + visibleDuration,
           }
+          // One element plays a video, so two of its clips may never overlap
+          // (the timeline clamps the drag; this rejects anything that slips by).
+          const overlapsSibling = current.some(
+            (other) =>
+              other.id !== clip.id &&
+              other.videoId === clip.videoId &&
+              other.start < nextClip.end - 1e-6 &&
+              other.end > nextClip.start + 1e-6
+          )
+          if (overlapsSibling) return clip
 
           const changed =
             nextClip.start !== clip.start || nextClip.end !== clip.end
@@ -2672,6 +2811,17 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
             ? getVideoDurationSeconds(video)
             : Math.max(clip.sourceOut, TIMELINE_MIN_CLIP_DURATION_SECONDS)
           let nextClip = clip
+          const speed = clipSpeed(clip)
+          // Same-video neighbours bound the edges (one element per video).
+          const siblings = current.filter(
+            (other) => other.id !== clip.id && other.videoId === clip.videoId
+          )
+          const prevEnd = siblings
+            .filter((other) => other.end <= clip.start + 1e-6)
+            .reduce((acc, other) => Math.max(acc, other.end), 0)
+          const nextStart = siblings
+            .filter((other) => other.start >= clip.end - 1e-6)
+            .reduce((acc, other) => Math.min(acc, other.start), Infinity)
 
           if (direction === "left") {
             const desiredDuration = Math.max(
@@ -2680,13 +2830,13 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
             )
             const maxDuration = Math.max(
               TIMELINE_MIN_CLIP_DURATION_SECONDS,
-              clip.sourceOut
+              Math.min(clip.sourceOut / speed, clip.end - prevEnd)
             )
             const duration = Math.min(desiredDuration, maxDuration)
             nextClip = {
               ...clip,
               start: clip.end - duration,
-              sourceIn: clip.sourceOut - duration,
+              sourceIn: Math.max(0, clip.sourceOut - duration * speed),
             }
           } else {
             const desiredDuration = Math.max(
@@ -2695,13 +2845,19 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
             )
             const maxDuration = Math.max(
               TIMELINE_MIN_CLIP_DURATION_SECONDS,
-              sourceDuration - clip.sourceIn
+              Math.min(
+                (sourceDuration - clip.sourceIn) / speed,
+                nextStart - clip.start
+              )
             )
             const duration = Math.min(desiredDuration, maxDuration)
             nextClip = {
               ...clip,
               end: clip.start + duration,
-              sourceOut: clip.sourceIn + duration,
+              sourceOut: Math.min(
+                sourceDuration,
+                clip.sourceIn + duration * speed
+              ),
             }
           }
 
@@ -2726,6 +2882,144 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     [commitTimelineClipsRef, syncTimelineMedia]
   )
 
+  // --- Clip edits: split / ripple delete / speed / hide cursor -------------
+  // Every structural edit funnels through `commitTimelineEdit`: one undo step,
+  // Zoom clips carried through the edit's time remap (so they stay on the same
+  // content), and the playhead remapped likewise.
+  const commitTimelineEdit = useCallback(
+    (
+      nextClips: CanvasTimelineClip[],
+      remap: TimeRemap,
+      tag: HistoryCommitTag
+    ) => {
+      flushAutosaveNow()
+      historyCommitTagRef.current = tag
+      commitTimelineClipsRef(nextClips)
+      setTimelineClips(nextClips)
+      const nextDuration = getTimelineDurationForClips(nextClips)
+      timelineDurationRef.current = nextDuration
+      if (remap !== IDENTITY_REMAP) {
+        const nextZoom = remapZoomClips(zoomClipsRef.current, remap, nextDuration)
+        commitZoomClipsRef(nextZoom)
+        setZoomClips(nextZoom)
+        if (
+          selectedZoomClipIdRef.current &&
+          !nextZoom.some((clip) => clip.id === selectedZoomClipIdRef.current)
+        ) {
+          selectedZoomClipIdRef.current = null
+          setSelectedZoomClipId(null)
+        }
+        const nextTime = clampTimelineTime(
+          remap(timelineTimeRef.current),
+          nextDuration
+        )
+        timelineTimeRef.current = nextTime
+        scheduleTimelineTimeState(nextTime)
+        notifyTimelineSubscribers(nextTime)
+      }
+      activeClipIdByVideoRef.current.clear()
+      syncTimelineMedia(timelineTimeRef.current, isTimelinePlayingRef.current)
+    },
+    [
+      commitTimelineClipsRef,
+      commitZoomClipsRef,
+      flushAutosaveNow,
+      notifyTimelineSubscribers,
+      scheduleTimelineTimeState,
+      syncTimelineMedia,
+    ]
+  )
+
+  const splitTimelineAtPlayhead = useCallback(() => {
+    const current = timelineClipsRef.current
+    const next = splitTimelineClipsAt(
+      current,
+      timelineTimeRef.current,
+      createSplitClipId
+    )
+    if (next === current) return
+    commitTimelineEdit(next, IDENTITY_REMAP, "clip-split")
+  }, [commitTimelineEdit])
+
+  const deleteTimelineClip = useCallback(
+    (id: string) => {
+      const current = timelineClipsRef.current
+      const ids = linkedClipIds(current, id)
+      if (ids.length === 0) return false
+      const idSet = new Set(ids)
+      // Removing a video's LAST clip is "remove the video" (detach) — the
+      // caller owns that path.
+      const losesLastClip = current.some(
+        (clip) =>
+          idSet.has(clip.id) &&
+          !current.some(
+            (other) => other.videoId === clip.videoId && !idSet.has(other.id)
+          )
+      )
+      if (losesLastClip) return false
+      const { clips, remap } = rippleDeleteTimelineClips(current, ids)
+      setSelectedTimelineClipId(null)
+      commitTimelineEdit(clips, remap, "clip-delete")
+      return true
+    },
+    [commitTimelineEdit]
+  )
+
+  const setTimelineClipSpeed = useCallback(
+    (id: string, speed: number) => {
+      const current = timelineClipsRef.current
+      const ids = linkedClipIds(current, id)
+      if (ids.length === 0) return
+      const { clips, remap } = setTimelineClipsSpeed(current, ids, speed)
+      if (clips === current) return
+      commitTimelineEdit(clips, remap, "clip-speed")
+    },
+    [commitTimelineEdit]
+  )
+
+  const setTimelineClipHideCursor = useCallback(
+    (id: string, hide: boolean) => {
+      const current = timelineClipsRef.current
+      const next = setTimelineClipsHideCursor(
+        current,
+        linkedClipIds(current, id),
+        hide
+      )
+      if (next === current) return
+      commitTimelineEdit(next, IDENTITY_REMAP, "clip-hide-cursor")
+    },
+    [commitTimelineEdit]
+  )
+
+  // Auto speed-up: plan typing / idle stretches from the recorded input and
+  // re-time them (split + speed, ripple), as ONE undo step. Segments the user
+  // already re-timed are left alone. Resolves to the number of re-timed
+  // segments (0 = nothing worth speeding up), or null without cursor data.
+  const applyAutoSpeed = useCallback(
+    async (options: AutoSpeedOptions) => {
+      try {
+        const loaded = await loadScreenCursorData()
+        if (!loaded) return null
+        const ranges = planAutoSpeedRanges(loaded.data, options)
+        const current = timelineClipsRef.current
+        const result = applySourceSpeedRanges(
+          current,
+          loaded.screen.id,
+          ranges,
+          createSplitClipId
+        )
+        if (result.applied > 0) {
+          commitTimelineEdit(result.clips, result.remap, "clip-auto-speed")
+        }
+        return result.applied
+      } catch (error) {
+        console.warn("[provider] auto speed-up failed:", error)
+        return null
+      }
+    },
+    [commitTimelineEdit, loadScreenCursorData]
+  )
+
   // --- Manual Zoom-track clips ---------------------------------------------
   // Zoom clips are output camera effects. Mutations update persisted state and
   // the workspace/export paths sample the current list by composition time.
@@ -2738,6 +3032,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     if (id !== null) {
       selectedItemIdRef.current = null
       setSelectedItemId((current) => (current === null ? current : null))
+      setSelectedTimelineClipId(null)
     }
   }, [])
 
@@ -2874,6 +3169,10 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     setCursorTrackUnavailable(unavailable)
   }, [])
 
+  const reportTypingDataAvailable = useCallback((available: boolean) => {
+    setTypingDataAvailable(available)
+  }, [])
+
   const addRemoteVideo = useCallback(
     async (input: AddRemoteVideoInput): Promise<string | null> => {
       if (
@@ -2983,6 +3282,17 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setSelectedZoomClipId(null)
     }
   }, [])
+
+  const selectTimelineClip = useCallback(
+    (id: string | null) => {
+      setSelectedTimelineClipId(id)
+      const clip = id
+        ? timelineClipsRef.current.find((candidate) => candidate.id === id)
+        : null
+      selectItem(clip ? clip.videoId : null)
+    },
+    [selectItem]
+  )
 
   // Recorded-cursor render size. Pure appearance — it scales the cursor's
   // render box only; position, hotspot, and timing are unaffected (see
@@ -3111,6 +3421,47 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     const nextArtboard: EditorArtboard = {
       ...current,
       cursorTypeStabilization: nextEnabled,
+    }
+    artboardRef.current = nextArtboard
+    setArtboard(nextArtboard)
+  }, [])
+
+  const setCursorHideWhileTyping = useCallback((enabled: boolean) => {
+    const current = artboardRef.current
+    const nextEnabled = Boolean(enabled)
+    if (current.cursorHideWhileTyping === nextEnabled) return
+    historyCommitTagRef.current = "cursor-hide-while-typing"
+    const nextArtboard: EditorArtboard = {
+      ...current,
+      cursorHideWhileTyping: nextEnabled,
+    }
+    artboardRef.current = nextArtboard
+    setArtboard(nextArtboard)
+  }, [])
+
+  const setZoomFollowTypingCaret = useCallback((enabled: boolean) => {
+    const current = artboardRef.current
+    const nextEnabled = Boolean(enabled)
+    if (current.zoomFollowTypingCaret === nextEnabled) return
+    historyCommitTagRef.current = "zoom-follow-typing-caret"
+    const nextArtboard: EditorArtboard = {
+      ...current,
+      zoomFollowTypingCaret: nextEnabled,
+    }
+    artboardRef.current = nextArtboard
+    setArtboard(nextArtboard)
+  }, [])
+
+  // Generation-only: takes effect on the next auto-zoom generation
+  // (Regenerate), never rewrites existing Zoom clips on its own.
+  const setAutoZoomOnTyping = useCallback((enabled: boolean) => {
+    const current = artboardRef.current
+    const nextEnabled = Boolean(enabled)
+    if (current.autoZoomOnTyping === nextEnabled) return
+    historyCommitTagRef.current = "auto-zoom-on-typing"
+    const nextArtboard: EditorArtboard = {
+      ...current,
+      autoZoomOnTyping: nextEnabled,
     }
     artboardRef.current = nextArtboard
     setArtboard(nextArtboard)
@@ -3418,6 +3769,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           savedState.artboard.cursorAlwaysUsePointer === true,
         cursorTypeStabilization:
           savedState.artboard.cursorTypeStabilization === true,
+        cursorHideWhileTyping:
+          savedState.artboard.cursorHideWhileTyping !== false,
+        zoomFollowTypingCaret:
+          savedState.artboard.zoomFollowTypingCaret !== false,
+        autoZoomOnTyping: savedState.artboard.autoZoomOnTyping !== false,
       }
       const toCanvasVideo = (video: ProjectStateV1["videos"][number]) =>
         projectVideoToCanvasVideo(
@@ -3553,14 +3909,25 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     [selectedItemId, videos]
   )
 
-  const selectedTimelineClip = useMemo(
-    () =>
-      selectedItemId
-        ? (timelineClips.find((clip) => clip.videoId === selectedItemId) ??
-          null)
-        : null,
-    [selectedItemId, timelineClips]
-  )
+  // The clicked segment when it belongs to the selected video. Without an
+  // explicit click, only an UNSPLIT video's sole clip counts — never "the
+  // first segment", or Delete / Speed would silently hit a segment the user
+  // didn't pick.
+  const selectedTimelineClip = useMemo(() => {
+    if (!selectedItemId) return null
+    const explicit = selectedTimelineClipId
+      ? timelineClips.find(
+          (clip) =>
+            clip.id === selectedTimelineClipId &&
+            clip.videoId === selectedItemId
+        )
+      : undefined
+    if (explicit) return explicit
+    const videoClips = timelineClips.filter(
+      (clip) => clip.videoId === selectedItemId
+    )
+    return videoClips.length === 1 ? videoClips[0] : null
+  }, [selectedItemId, selectedTimelineClipId, timelineClips])
 
   const mediaValue = useMemo<EditorCanvasMediaContextValue>(
     () => ({
@@ -3589,8 +3956,8 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
   )
 
   const cursorDataValue = useMemo<EditorCanvasCursorDataContextValue>(
-    () => ({ cursorTrackUnavailable }),
-    [cursorTrackUnavailable]
+    () => ({ cursorTrackUnavailable, typingDataAvailable }),
+    [cursorTrackUnavailable, typingDataAvailable]
   )
 
   const historyValue = useMemo<EditorCanvasHistoryContextValue>(
@@ -3644,6 +4011,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     () => ({
       addRemoteVideo,
       reportCursorTrackUnavailable,
+      reportTypingDataAvailable,
       selectItem,
       updateVideoAppearance,
       deleteVideo,
@@ -3659,6 +4027,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setCursorClickPressScale,
       setCursorAlwaysUsePointer,
       setCursorTypeStabilization,
+      setCursorHideWhileTyping,
+      setZoomFollowTypingCaret,
+      setAutoZoomOnTyping,
       setCursorMotionRotation,
       setCursorMotionBlur,
       setViewportSize,
@@ -3670,6 +4041,7 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
     [
       addRemoteVideo,
       reportCursorTrackUnavailable,
+      reportTypingDataAvailable,
       selectItem,
       updateVideoAppearance,
       deleteVideo,
@@ -3685,6 +4057,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setCursorClickPressScale,
       setCursorAlwaysUsePointer,
       setCursorTypeStabilization,
+      setCursorHideWhileTyping,
+      setZoomFollowTypingCaret,
+      setAutoZoomOnTyping,
       setCursorMotionRotation,
       setCursorMotionBlur,
       setViewportSize,
@@ -3717,6 +4092,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       updateZoomClip,
       removeZoomClip,
       selectZoomClip,
+      selectTimelineClip,
+      splitTimelineAtPlayhead,
+      deleteTimelineClip,
+      setTimelineClipSpeed,
+      setTimelineClipHideCursor,
+      applyAutoSpeed,
       regenerateAutoZoom,
       subscribeTimelineTicks,
       stepTimelineFrame,
@@ -3743,6 +4124,12 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       updateZoomClip,
       removeZoomClip,
       selectZoomClip,
+      selectTimelineClip,
+      splitTimelineAtPlayhead,
+      deleteTimelineClip,
+      setTimelineClipSpeed,
+      setTimelineClipHideCursor,
+      applyAutoSpeed,
       regenerateAutoZoom,
       subscribeTimelineTicks,
       stepTimelineFrame,
@@ -3839,10 +4226,13 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
       setIsPreviewMode(false)
       setSelectedItemId(null)
       setSelectedZoomClipId(null)
+      setSelectedTimelineClipId(null)
+      activeClipIdByVideoRef.current.clear()
       setSourceVideoDims(null)
       // Cursor-data health belongs to the previous project's recording; the
       // canvas re-reports for the new one once its track loads (or fails).
       setCursorTrackUnavailable(false)
+      setTypingDataAvailable(false)
     }
 
     hydrationGenerationRef.current += 1
@@ -3885,6 +4275,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
           savedState.artboard.cursorAlwaysUsePointer === true,
         cursorTypeStabilization:
           savedState.artboard.cursorTypeStabilization === true,
+        cursorHideWhileTyping:
+          savedState.artboard.cursorHideWhileTyping !== false,
+        zoomFollowTypingCaret:
+          savedState.artboard.zoomFollowTypingCaret !== false,
+        autoZoomOnTyping: savedState.artboard.autoZoomOnTyping !== false,
       }
       artboardRef.current = savedArtboard
       // Hydration is a one-shot synchronization from disk into React state —
@@ -4051,6 +4446,11 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
         artboardRef.current.cursorAlwaysUsePointer
       const previousCursorTypeStabilization =
         artboardRef.current.cursorTypeStabilization
+      const previousCursorHideWhileTyping =
+        artboardRef.current.cursorHideWhileTyping
+      const previousZoomFollowTypingCaret =
+        artboardRef.current.zoomFollowTypingCaret
+      const previousAutoZoomOnTyping = artboardRef.current.autoZoomOnTyping
       const nextArtboard: EditorArtboard = useAuto
         ? (() => {
             const auto = resolveAutoArtboard(sourceVideoDimsRef.current)
@@ -4071,6 +4471,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               cursorClickPressScale: previousCursorClickPressScale,
               cursorAlwaysUsePointer: previousCursorAlwaysUsePointer,
               cursorTypeStabilization: previousCursorTypeStabilization,
+              cursorHideWhileTyping: previousCursorHideWhileTyping,
+              zoomFollowTypingCaret: previousZoomFollowTypingCaret,
+              autoZoomOnTyping: previousAutoZoomOnTyping,
             }
           })()
         : (() => {
@@ -4092,6 +4495,9 @@ export function EditorCanvasProvider({ children }: { children: ReactNode }) {
               cursorClickPressScale: previousCursorClickPressScale,
               cursorAlwaysUsePointer: previousCursorAlwaysUsePointer,
               cursorTypeStabilization: previousCursorTypeStabilization,
+              cursorHideWhileTyping: previousCursorHideWhileTyping,
+              zoomFollowTypingCaret: previousZoomFollowTypingCaret,
+              autoZoomOnTyping: previousAutoZoomOnTyping,
             }
           })()
       artboardRef.current = nextArtboard

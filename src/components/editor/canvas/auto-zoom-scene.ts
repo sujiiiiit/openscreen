@@ -14,7 +14,19 @@
 
 import type { CursorTrackData } from "@/types/api"
 import { clampZoomFocus } from "@/lib/zoom-clips"
-import type { AutoZoomClickSample } from "@/lib/auto-zoom/generate-from-clicks"
+import { sourceToTimelineSeconds as clipSourceToTimeline } from "@/lib/timeline-edits"
+import {
+  TYPING_BURST_MAX_GAP_MS,
+  TYPING_BURST_MIN_KEYS,
+  type AutoZoomBox,
+  type AutoZoomClickSample,
+  type AutoZoomTypingBurst,
+} from "@/lib/auto-zoom/generate-from-clicks"
+import {
+  buildTypingTrack,
+  sampleTypingCaretAt,
+  typingBursts,
+} from "@/lib/cursors/typing-track"
 import type { CanvasZoomFocus } from "@/types/editor-canvas"
 
 import {
@@ -28,6 +40,7 @@ export interface AutoZoomScreenClip {
   end: number
   sourceIn: number
   sourceOut: number
+  speed?: number
 }
 
 /**
@@ -42,7 +55,7 @@ function sourceToTimelineSeconds(
 ): number | null {
   for (const clip of clips) {
     if (sourceSeconds >= clip.sourceIn && sourceSeconds < clip.sourceOut) {
-      return clip.start + (sourceSeconds - clip.sourceIn)
+      return clipSourceToTimeline(clip, sourceSeconds)
     }
   }
   return null
@@ -127,4 +140,83 @@ export function autoZoomClicksFromCursorData(
   }
 
   return samples
+}
+
+/**
+ * Build the typing bursts the auto-zoom generator consumes (keystroke capture).
+ * Each burst's anchor is the caret at its first key when the recording has a
+ * caret read for it, else the pointer's last position before it. Bursts whose
+ * start or end falls in a trimmed-out gap, or whose anchor is off-video, are
+ * dropped. Pure + deterministic, like {@link autoZoomClicksFromCursorData}.
+ */
+export function autoZoomTypingFromCursorData(
+  data: CursorTrackData,
+  screenVideo: CursorVideoGeometry,
+  screenClips: readonly AutoZoomScreenClip[],
+  artboard: { width: number; height: number }
+): AutoZoomTypingBurst[] {
+  const typing = buildTypingTrack(data)
+  if (!typing) return []
+  const { mapTime, mapPos } = buildMappers(
+    data,
+    screenVideo,
+    screenClips,
+    artboard
+  )
+  const moves = [...data.moves].sort(
+    (a, b) => a.processTimeMs - b.processTimeMs
+  )
+  // Last move at/before the time (binary search — moves run ~120 Hz).
+  const pointerAt = (processTimeMs: number) => {
+    let lo = 0
+    let hi = moves.length - 1
+    let found = 0
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      if (moves[mid].processTimeMs <= processTimeMs) {
+        found = mid
+        lo = mid + 1
+      } else {
+        hi = mid - 1
+      }
+    }
+    return moves[found] ?? null
+  }
+
+  const bursts: AutoZoomTypingBurst[] = []
+  for (const burst of typingBursts(typing, {
+    maxGapMs: TYPING_BURST_MAX_GAP_MS,
+    minKeys: TYPING_BURST_MIN_KEYS,
+  })) {
+    const startProcessMs = burst.startMs + data.processTimeStartMs
+    const startSeconds = mapTime(startProcessMs)
+    const endSeconds = mapTime(burst.endMs + data.processTimeStartMs)
+    if (startSeconds === null || endSeconds === null) continue
+    const caret = sampleTypingCaretAt(typing, burst.startMs, 0)
+    const pointer = caret ? null : pointerAt(startProcessMs)
+    const anchor = caret ?? pointer
+    if (!anchor) continue
+    const focus = mapPos(anchor.x, anchor.y)
+    if (!focus) continue
+    // Extent of the caret reads the burst produced (the line(s) being typed),
+    // so the shot planner can frame the whole edit, not just its first key.
+    let bounds: AutoZoomBox | undefined
+    for (let i = 0; i < typing.caretT.length; i++) {
+      const t = typing.caretT[i]
+      if (t < burst.startMs) continue
+      if (t > burst.endMs) break
+      const p = mapPos(typing.caretX[i], typing.caretY[i])
+      if (!p) continue
+      bounds = bounds
+        ? {
+            minX: Math.min(bounds.minX, p.x),
+            minY: Math.min(bounds.minY, p.y),
+            maxX: Math.max(bounds.maxX, p.x),
+            maxY: Math.max(bounds.maxY, p.y),
+          }
+        : { minX: p.x, minY: p.y, maxX: p.x, maxY: p.y }
+    }
+    bursts.push({ startSeconds, endSeconds, focus, bounds })
+  }
+  return bursts
 }
