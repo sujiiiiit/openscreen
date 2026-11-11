@@ -1143,7 +1143,7 @@ Per-window CSP / `webSecurity`:
 
 - The export window opts in to `webSecurity: false` (in `createExportWindow`) so cross-origin `<video>` loads from `file://` don't taint the canvas, which would break `new VideoFrame(canvas, …)`.
 - The CSP `connect-src 'self' app: file:` is scoped to the export window only via a per-`webContentsId` check in `onHeadersReceived`. Every other window keeps the tighter base CSP (`connect-src 'self' app:`).
-- No window's CSP allows `'unsafe-eval'`, in dev or packaged. PixiJS v8 generates uniform/UBO sync code with `new Function` and its renderer `init()` throws without it, so `pixi/create-app.ts` side-effect imports `pixi.js/unsafe-eval` (static, CSP-safe replacements). **Never `new Application()` outside `createPixiApplication()`** — it is the only module that guarantees the import. The same CSP is enforced under `pnpm dev`, so a violation reproduces without packaging.
+- No window's CSP allows `'unsafe-eval'`, in dev or packaged. PixiJS v8 generates uniform/UBO sync code with `new Function` and its renderer `init()` throws without it, so `pixi/create-app.ts` side-effect imports `pixi.js/unsafe-eval` (static, CSP-safe replacements) plus `pixi/ubo-sync-polyfill-fix.ts`, which repairs that polyfill's UBO sync arity bug (see "WebGPU Filters Render Black"). **Never `new Application()` outside `createPixiApplication()`** — it is the only module that guarantees the import. The same CSP is enforced under `pnpm dev`, so a violation reproduces without packaging.
 
 Cancellation:
 
@@ -1430,6 +1430,22 @@ Fix (2026-06-06) — retuned for screen content, in the shared modules so previe
 - `ZOOM_BLUR_MOTION_GAIN` (src/lib/zoom-clips.ts) 0.14 → **0.05**: a default clip now peaks at filter strength ≈ 0.052 instead of 0.146.
 - `ZOOM_BLUR_STRENGTH_CAP` (pixi/zoom-blur.ts) 0.22 → **0.10**: bounds the worst-case edge streak to ~5 % of the artboard width even when a per-clip Strength of 1 saturates the velocity bump.
 - Verified with the same harness: at the retuned peak the mid-ramp frame keeps the recording's terminal text legible under a clearly visible radial streak (no black frame), and the ramp still reads as a Screen-Studio-style speed cue. Existing `project.json` files need no change — the per-clip Strength slider semantics are unchanged, only the velocity→strength mapping moved.
+
+### WebGPU Filters Render Black (unsafe-eval UBO Arity Bug)
+
+Problem (reported 2026-11-12, "the export is jigged"):
+
+- WebGPU exports flashed **pure black** (`rgb(0,0,0)`, not dark gray) for the whole ramp of every zoom clip (~1 s in, ~1 s out) and during reframe pans. Every frame where the radial zoom blur or the directional pan blur was attached was black; holds and unzoomed frames were fine. WebGL exports were correct. One 70 s export had 879 of 4180 frames black.
+
+Debugging (standalone Electron harness bundling the production `buildExportStage` + `SourceFrameProvider` + `sampleZoomCameraAtTime` over the real project, with pixel readback):
+
+- Black on WebGPU, correct on WebGL, for the same frame. Not MSAA (`antialias: "off"` was still black), not the `VideoFrame` texture (a canvas source was still black), not the output size, and not readback (renderer `extract` was black too). No WebGPU validation errors.
+- A bare sprite plus `ZoomBlurFilter` (or `MotionBlurFilter`) rendered correctly in a plain Pixi app, and **black once `import "pixi.js/unsafe-eval"` was added**.
+- Root cause, in PixiJS 8.18.1: `UboSystem.syncUniformGroup` calls the sync function as `(uniforms, data, dataInt32, offset)`, but the `unsafe-eval` polyfills (`generateUboSyncPolyfillWGSL` / `STD40`) return `(uniforms, data, offset)`. A self-buffered uniform group passes an `Int32Array` as `dataInt32`, so the polyfill computes `Int32Array + n` (a string) as the index and every write is lost. On WebGPU each filter's uniforms (`uInputSize`, `uStrength`, `uCenter`, …) are such UBOs, so they stayed zero, the shader divided by `uInputSize = 0`, and the output was NaN, i.e. black. WebGL filter uniforms are not UBOs, so WebGL was unaffected. The preview hits the same bug whenever it runs on WebGPU.
+- A second bug in the same polyfill: its `i32` setter writes through the float view (`data[offset] = v`; Pixi's eval code writes `dataInt32[offset] = v`), and `vec2/3/4<i32>` have no setter at all. So `MotionBlurFilter`'s `uKernelSize = 9` reached the shader as the float's bit pattern (1091567616), and the reframe **pan blur** frames were black even after the arity fix (shorter black runs during cursor-follow reframes).
+- Regression source: commit `d5c64f2` (2026-11-11, "Fix blank PixiJS canvas in packaged build; enforce CSP in dev") added the `pixi.js/unsafe-eval` import and enforced the no-eval CSP in dev. Before it, dev builds used PixiJS's eval-generated sync functions, which are correct, so exports were fine.
+
+Fix (2026-11-12): `pixi/ubo-sync-polyfill-fix.ts`, imported by `create-app.ts` right after `pixi.js/unsafe-eval` so it covers preview and export, wraps `GpuUboSystem` / `GlUboSystem` `._generateUboSync` and adapts 3-parameter sync functions to the 4-parameter call, forwarding the real `offset`. It also keeps scalar and vector `i32` uniforms out of the polyfill and writes them through an `Int32Array` view of the same buffer (`createUboSync`). It is idempotent, and it is a no-op for a 4-parameter function, so it switches itself off once PixiJS fixes the polyfill. Remove it after upgrading PixiJS past the fix. Regression test: `canvas/__tests__/ubo-sync-polyfill-fix.test.ts` runs the real polyfill with the ZoomBlur uniform layout, for both the self-buffered and the batched-offset paths, plus the `MotionBlurFilter` `i32` layout and `vec2<i32>`. Verify on real output by counting frames with mean luma ≈ 0 in an export with zoom clips.
 
 ### WebGPU Renderer Fallback
 

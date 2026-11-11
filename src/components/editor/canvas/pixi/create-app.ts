@@ -4,6 +4,9 @@ import { Application, type ApplicationOptions } from "pixi.js"
 // init throws. Owning it here means every renderer gets it — never construct
 // an `Application` outside this module.
 import "pixi.js/unsafe-eval"
+// Fixes that polyfill's UBO sync arity bug, which zeroed every WebGPU filter's
+// uniforms and turned blurred zoom frames black. See the module for details.
+import "./ubo-sync-polyfill-fix"
 import { rendererPreferenceChain } from "./renderer-preference"
 
 export type PixiApplicationOptions = Omit<
