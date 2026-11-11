@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Application } from "pixi.js"
+import type { Application } from "pixi.js"
 
 import { getPreviewFillTransform } from "@/lib/editor-canvas"
 import { resolveCanvasPalette } from "@/lib/theme-colors"
@@ -31,7 +31,7 @@ import {
 } from "../zoom-scene"
 import { CursorController, type CursorState } from "./cursor-controller"
 import { canvasNodeFromVideo } from "./node-model"
-import { preferredRendererBackend } from "./renderer-preference"
+import { createPixiApplication } from "./create-app"
 import { CanvasScene } from "./scene"
 import { SelectionController } from "./selection-controller"
 import { VideoController } from "./video-controller"
@@ -324,7 +324,6 @@ export function PixiCanvas() {
     if (!host) return
 
     let disposed = false
-    const app = new Application()
 
     const getRendererResolution = () =>
       Math.min(window.devicePixelRatio || 1, 2)
@@ -403,16 +402,13 @@ export function PixiCanvas() {
 
     const init = async () => {
       const initialSize = measure()
-      await app.init({
+      // Prefer WebGPU for the interactive preview, falling back to WebGL2 (see
+      // `rendererPreferenceChain`). During layout-driven resizes we paint
+      // immediately after resize so old swapchain pixels are not presented in
+      // the newly sized canvas.
+      const app = await createPixiApplication({
         width: initialSize.width,
         height: initialSize.height,
-        // Prefer WebGPU for the interactive preview. During layout-driven
-        // resizes we paint immediately after resize so old swapchain pixels are
-        // not presented in the newly sized canvas. `preferredRendererBackend`
-        // downgrades to WebGL2 in environments that expose `navigator.gpu` but
-        // not the `GPUTextureUsage` globals PixiJS needs (those throw at the
-        // first texture upload, after init has already succeeded).
-        preference: preferredRendererBackend(),
         antialias: true,
         resolution: rendererResolution,
         // Keep the backing store and CSS box in the same coordinate system.
@@ -606,7 +602,9 @@ export function PixiCanvas() {
       window.addEventListener("resize", scheduleResize)
     }
 
-    void init()
+    init().catch((error) => {
+      console.error("[PixiCanvas] renderer init failed:", error)
+    })
 
     return () => {
       disposed = true

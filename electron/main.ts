@@ -103,8 +103,8 @@ const SHARED_WEB_PREFERENCES = {
 // `self.__next_f.push(...)` RSC payload + bootstrap). `script-src 'self'`
 // blocks them and every window renders un-hydrated, so allow exactly those
 // scripts by sha256 hash — computed once from the packaged out/ HTML — rather
-// than opening script-src to 'unsafe-inline'. Dev serves from next dev and
-// gets no CSP, so this only runs packaged.
+// than opening script-src to 'unsafe-inline'. Only runs packaged — see
+// INLINE_SCRIPT_SOURCES for dev.
 function collectInlineScriptHashes(dir: string): string[] {
   const hashes = new Set<string>()
   const walk = (current: string): void => {
@@ -132,10 +132,15 @@ function collectInlineScriptHashes(dir: string): string[] {
   return [...hashes]
 }
 
-const INLINE_SCRIPT_HASHES = isDev ? [] : collectInlineScriptHashes(OUT_DIR)
+// Dev enforces the same CSP as the packaged app, so a dependency that needs
+// something the policy forbids (eval, a file: fetch, a blob: worker) breaks
+// under `pnpm dev` instead of only after packaging. The one dev relaxation is
+// inline scripts: next dev's bootstrap scripts change on every compile and
+// can't be hash-pinned. 'unsafe-eval' is off in both.
+const INLINE_SCRIPT_SOURCES = isDev ? ["'unsafe-inline'"] : collectInlineScriptHashes(OUT_DIR)
 const CSP_BASE = [
   "default-src 'self' app:",
-  ["script-src 'self' app:", ...INLINE_SCRIPT_HASHES].join(' '),
+  ["script-src 'self' app:", ...INLINE_SCRIPT_SOURCES].join(' '),
   // PixiJS decodes textures in a blob: worker (Assets loadImageBitmap).
   "worker-src 'self' app: blob:",
   "style-src 'self' app: 'unsafe-inline'",
@@ -1316,24 +1321,24 @@ if (hasSingleInstanceLock) {
   app.whenReady().then(() => {
     nativeTheme.themeSource = 'dark'
 
-    if (!isDev) {
-      session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-        // Per-window CSP: only the export window gets the file:-permitted
-        // policy; everything else stays on the base CSP. `webContentsId` is
-        // present on requests originating from a renderer; protocol-handler
-        // requests that happen before any renderer attaches simply hit the
-        // base policy.
-        const fromExport =
-          typeof details.webContentsId === 'number' &&
-          exportWin !== null &&
-          !exportWin.isDestroyed() &&
-          exportWin.webContents.id === details.webContentsId
-        const csp = fromExport ? CSP_EXPORT : CSP_BASE
-        callback({
-          responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [csp] },
-        })
+    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      // Per-window CSP: only the export window gets the file:-permitted
+      // policy; everything else stays on the base CSP. `webContentsId` is
+      // present on requests originating from a renderer; protocol-handler
+      // requests that happen before any renderer attaches simply hit the
+      // base policy. Applied in dev too (see INLINE_SCRIPT_SOURCES).
+      const fromExport =
+        typeof details.webContentsId === 'number' &&
+        exportWin !== null &&
+        !exportWin.isDestroyed() &&
+        exportWin.webContents.id === details.webContentsId
+      const csp = fromExport ? CSP_EXPORT : CSP_BASE
+      callback({
+        responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [csp] },
       })
+    })
 
+    if (!isDev) {
       protocol.handle('app', async (req) => {
         const filePath = resolveAppFile(req.url)
         if (!filePath) return new Response('Bad Request', { status: 400 })

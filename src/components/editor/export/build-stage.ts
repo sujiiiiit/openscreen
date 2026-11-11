@@ -1,5 +1,5 @@
 import {
-  Application,
+  type Application,
   Container,
   Graphics,
   ImageSource,
@@ -53,7 +53,7 @@ import {
   applyZoomPanBlur,
   createZoomPanBlurFilter,
 } from "@/components/editor/canvas/pixi/zoom-pan-blur"
-import { rendererPreferenceChain } from "@/components/editor/canvas/pixi/renderer-preference"
+import { createPixiApplication } from "@/components/editor/canvas/pixi/create-app"
 import type { SmoothedCursorTrack } from "@/lib/cursors/cursor-track"
 import { resolveCursorAsset } from "@/lib/cursors/cursor-set"
 
@@ -558,47 +558,30 @@ async function createExportApp(
   outputSize: { width: number; height: number },
   container: HTMLDivElement
 ): Promise<Application> {
-  let lastError: unknown = null
-  // Skip the WebGPU attempt entirely when its global constants are missing —
-  // init would succeed but per-frame video-texture draws in run-export.ts would
-  // throw `GPUTextureUsage is not defined`, which the init try/catch can't see.
-  for (const preference of rendererPreferenceChain()) {
-    const app = new Application()
-    try {
-      await app.init({
-        preference,
-        width: outputSize.width,
-        height: outputSize.height,
-        resolution: 1, // export is already at output pixel size; no DPR scaling
-        autoDensity: false,
-        antialias: true,
-        background: 0x000000,
-        backgroundAlpha: 1, // opaque black behind the artboard (matches prior export)
-        autoStart: false,
-        powerPreference: "high-performance",
-        eventFeatures: {
-          move: false,
-          globalMove: false,
-          click: false,
-          wheel: false,
-        },
-      })
+  return createPixiApplication(
+    {
+      width: outputSize.width,
+      height: outputSize.height,
+      resolution: 1, // export is already at output pixel size; no DPR scaling
+      autoDensity: false,
+      antialias: true,
+      background: 0x000000,
+      backgroundAlpha: 1, // opaque black behind the artboard (matches prior export)
+      autoStart: false,
+      powerPreference: "high-performance",
+      eventFeatures: {
+        move: false,
+        globalMove: false,
+        click: false,
+        wheel: false,
+      },
+    },
+    (app) => {
       app.canvas.style.display = "block"
       container.appendChild(app.canvas)
       app.render()
       probeReadback(app.canvas)
-      return app
-    } catch (error) {
-      lastError = error
-      try {
-        app.destroy({ removeView: true }, { children: true })
-      } catch {
-        // best-effort
-      }
     }
-  }
-  throw new Error(
-    `Failed to initialize an export renderer (WebGPU + WebGL2): ${String(lastError)}`
   )
 }
 
