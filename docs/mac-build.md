@@ -39,7 +39,7 @@ Ad-hoc signatures change on every build, so macOS treats each build as a new app
 
 ## Packaged CSP
 
-Packaged windows load `app://` with the CSP from `electron/main.ts`. The Next static export hydrates through inline `<script>` tags, so `script-src` allow-lists their sha256 hashes. `collectInlineScriptHashes(OUT_DIR)` computes them once at startup, which avoids `'unsafe-inline'`. Without this, every packaged window rendered but never hydrated. `worker-src` allows `blob:` for PixiJS texture-decode workers. Dev (`next dev`) has no CSP.
+Packaged windows load `app://` with the CSP from `electron/main.ts`. The Next static export hydrates through inline `<script>` tags, so `script-src` allow-lists their sha256 hashes. `collectInlineScriptHashes(OUT_DIR)` computes them once at startup, which avoids `'unsafe-inline'`. Without this, every packaged window rendered but never hydrated. `worker-src` allows `blob:` for PixiJS texture-decode workers. Dev (`next dev`) enforces the same policy, with `script-src 'unsafe-inline'` instead of hashes (next dev's inline scripts change every compile), so CSP violations show up in `pnpm dev` rather than only after packaging. `'unsafe-eval'` is off in both; PixiJS works under that via the `pixi.js/unsafe-eval` import in `src/components/editor/canvas/pixi/create-app.ts`.
 
 ## Verify a build
 

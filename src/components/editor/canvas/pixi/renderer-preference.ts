@@ -84,7 +84,7 @@ function hasRequiredWebGPUGlobals(): boolean {
  * The renderer preference handed to `app.init()`: the user's backend choice,
  * with the WebGPU environment gate applied on top.
  */
-export function preferredRendererBackend(): RendererPreference {
+function preferredRendererBackend(): RendererPreference {
   if (getRendererBackendPreference() === "webgl") return "webgl"
   return hasRequiredWebGPUGlobals() ? "webgpu" : "webgl"
 }
