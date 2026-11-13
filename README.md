@@ -1,5 +1,8 @@
 # OpenScreen
 
+<img width="1710" height="1112" alt="openscreen-preview" src="https://github.com/user-attachments/assets/3fd4659a-9947-455c-bb7e-745d09449da6" />
+
+
 A macOS app that turns a raw screen recording into a polished product demo.
 
 You record your screen, camera and mic. OpenScreen then edits the recording for you: it zooms in where you clicked, redraws a smooth cursor, puts the video on a styled background with rounded corners, and exports an MP4. You can adjust everything on a timeline afterwards, but you don't have to.
